@@ -38,13 +38,18 @@ class Side(str, Enum):
 
 @dataclass(frozen=True)
 class Params:
-    """종목별 설정값. 유효하지 않으면 생성 시점에 즉시 실패한다."""
+    """종목별 설정값. 유효하지 않으면 생성 시점에 즉시 실패한다.
+
+    매수는 금액 기반: 수량은 트리거 시점 체결가로 floor(금액 ÷ 가격) 즉석 계산.
+    매수 트리거는 항상 기준선 이하 가격에서 발동하므로,
+    금액 ≥ 기준선 가격이면 수량이 최소 1주 이상임이 보장된다.
+    """
 
     line1: float  # 1차 매수 기준선
     line2: float  # 2차 매수 기준선
     line3: float  # 손절 기준선
-    buy1_qty: int  # 1차 매수 수량
-    buy2_qty: int  # 2차 매수 수량
+    buy1_amount: float  # 1차 매수 금액
+    buy2_amount: float  # 2차 매수 금액
     tp_rates: tuple[float, float, float] = (0.03, 0.05, 0.07)  # 평단 대비 익절 트리거
     tp_ratios: tuple[float, float, float] = (
         0.40,
@@ -62,8 +67,11 @@ class Params:
             raise ValueError(f"익절률은 오름차순이어야 함: {self.tp_rates}")
         if abs(sum(self.tp_ratios) - 1.0) > 1e-9:
             raise ValueError(f"익절 비중 합은 100% 여야 함: {self.tp_ratios}")
-        if self.buy1_qty <= 0 or self.buy2_qty <= 0:
-            raise ValueError("매수 수량은 1 이상이어야 함")
+        if self.buy1_amount < self.line1 or self.buy2_amount < self.line2:
+            raise ValueError(
+                "매수 금액으로 최소 1주를 살 수 있어야 함: "
+                f"1차 {self.buy1_amount} (≥ 1선 {self.line1}), 2차 {self.buy2_amount} (≥ 2선 {self.line2})"
+            )
         if not (0 <= self.breakeven_buffer < self.tp_rates[0]):
             raise ValueError(
                 f"본절 버퍼는 0 이상, 1차 익절률({self.tp_rates[0]:.0%}) 미만이어야 함: {self.breakeven_buffer}"
@@ -96,6 +104,7 @@ class Position:
     total_bought: int = 0  # 누적 매수 총량 = 익절 비중의 기준 "최초 보유 물량"
     remaining: int = 0  # 현재 잔량
     pending: bool = False  # 주문 접수 후 체결 대기 중이면 True (중복 주문 방지)
+    realized_pnl: float = 0.0  # 당일 누적 실현손익 (세전). 매도 체결마다 누적
 
     def __post_init__(self) -> None:
         if self.state in _HOLDING_STATES:
@@ -149,6 +158,11 @@ def _tp_sell_qty(pos: Position, params: Params, upto_level: int) -> int:
     already_sold = pos.total_bought - pos.remaining
     qty = math.floor(pos.total_bought * cum_ratio) - already_sold
     return min(max(qty, 0), pos.remaining)
+
+
+def _buy_qty(amount: float, price: float) -> int:
+    """매수 수량 즉석 계산: floor(금액 ÷ 트리거 시점 체결가)."""
+    return int(amount // price)
 
 
 def _sell_all(pos: Position, reason: str) -> Decision:
@@ -219,16 +233,17 @@ def decide(pos: Position, params: Params, price: float) -> Decision | None:
             return Decision(
                 State.CLOSED, None, 0, "3선 이하 갭 시가 → 진입 금지, 당일 종료"
             )
-        if price <= params.line2:  # 갭 하락 진입: 1·2차 수량을 한 주문으로 동시 매수
-            return Decision(
-                State.BUY2,
-                Side.BUY,
-                params.buy1_qty + params.buy2_qty,
-                "2선 이하 갭 → 1·2차 동시 매수",
-            )
+        if (
+            price <= params.line2
+        ):  # 갭 하락 진입: 1·2차 금액을 합쳐 한 주문으로 동시 매수
+            qty = _buy_qty(params.buy1_amount + params.buy2_amount, price)
+            return Decision(State.BUY2, Side.BUY, qty, "2선 이하 갭 → 1·2차 동시 매수")
         if price <= params.line1:
             return Decision(
-                State.BUY1, Side.BUY, params.buy1_qty, "1선 이탈 → 1차 매수"
+                State.BUY1,
+                Side.BUY,
+                _buy_qty(params.buy1_amount, price),
+                "1선 이탈 → 1차 매수",
             )
         return None
 
@@ -242,7 +257,10 @@ def decide(pos: Position, params: Params, price: float) -> Decision | None:
             return _sell_all(pos, "3선 이탈(갭) → 2차 매수 생략, 전량 손절")
         if price <= params.line2:
             return Decision(
-                State.BUY2, Side.BUY, params.buy2_qty, "2선 이탈 → 2차 매수"
+                State.BUY2,
+                Side.BUY,
+                _buy_qty(params.buy2_amount, price),
+                "2선 이탈 → 2차 매수",
             )
         return None
 
@@ -318,11 +336,18 @@ def apply_fill(
         raise ValueError(
             f"매도 체결량이 잔량 초과: 잔량 {pos.remaining}, 체결 {fill_qty}"
         )
-    return replace(pos, state=decision.to_state, remaining=new_remaining, pending=False)
+    realized = pos.realized_pnl + (fill_price - pos.avg_price) * fill_qty
+    return replace(
+        pos,
+        state=decision.to_state,
+        remaining=new_remaining,
+        realized_pnl=realized,
+        pending=False,
+    )
 
 
 def reset(pos: Position) -> Position:
     """관리자 수동 개입: 종료 → 대기. 새 사이클을 위해 포지션을 초기화한다."""
     if pos.state is not State.CLOSED:
         raise ValueError(f"종료 상태에서만 초기화 가능: 현재 {pos.state.value}")
-    return Position()
+    return Position(realized_pnl=pos.realized_pnl)  # 당일 실현손익은 이어서 집계

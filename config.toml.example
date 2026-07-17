@@ -1,0 +1,12 @@
+# 이 파일을 config.toml 로 복사한 뒤 발급받은 키를 채워주세요.
+# 주의: config.toml 은 절대 git 에 커밋하지 마세요 (.gitignore 등록 필수)
+
+[kiwoom]
+appkey = "발급받은 앱키"
+secretkey = "발급받은 시크릿키"
+mock = true      # 모의투자. 실전 전환 시 false + 실전용 키로 교체
+account = ""     # 선택. 키움 REST API 는 키 발급 시 계좌가 등록되어 토큰이 계좌와
+                 # 연결되므로 보통 불필요. 메모용 또는 특정 TR 필요 시에만 기입
+
+[discord]
+webhook_url = ""  # notifier 구현 후 사용

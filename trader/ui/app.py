@@ -1,21 +1,38 @@
-"""메인 윈도우 — 툴바(시작/일시정지·등록) + 모니터(상단) + 로그(하단).
+"""메인 윈도우 (FHD 최적화) — 화면 구성:
 
-역할은 세 가지뿐이다: 화면 조립, 200ms 주기 이벤트 큐 폴링,
-사용자 조작을 명령 큐로 전달. 매매 판단·저장은 전부 코어의 일이다.
+  [상시 툴바]  접기토글 · 모드배지 · 감시 시작/일시정지 · 등록/편집/삭제 · 상태
+  [연결 바]↕   모드 선택 · 키움 키/연결/만료 · Discord 토큰/연결 · 계좌 요약
+  [자금 바]↕   총 운용금액 · 최대 종목 → 종목당 배분 · 1/2차 금액 · 적용
+  [모니터]     종목 테이블 (세로 대부분)
+  [로그]
+  [상태 바]    WS 상태 · 마지막 틱 · 장 운영 · 모드/종목 수
+
+연결·자금 바(↕)만 접힌다 — 장중에 쓰는 조작은 항상 보인다.
+역할은 화면 조립, 200ms 큐 폴링, 사용자 조작의 명령 큐 전달뿐이다.
+키움/Discord 연결 버튼은 watcher/broker 구현 전까지 안내만 표시한다.
 """
 
 from __future__ import annotations
 
 import queue
 import tkinter as tk
-from tkinter import ttk
+from datetime import datetime, time as dtime
+from pathlib import Path
+from tkinter import messagebox, ttk
 
+from trader.state_machine import State
 from trader.ui import bus
+
+try:
+    from tkcalendar import DateEntry  # 캘린더 드롭다운 (uv add tkcalendar)
+except ImportError:
+    DateEntry = None
 from trader.ui.events_view import EventsView
 from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
 
 _POLL_MS = 200
+_ASSETS = Path(__file__).resolve().parents[2] / "assets"
 
 
 class App(tk.Tk):
@@ -23,45 +40,293 @@ class App(tk.Tk):
         super().__init__()
         self._bus = b
         self._running = False
+        self._mode_real = False
+        self._funds: bus.Funds | None = None
+        self._registry: dict[str, tuple[str, object, object]] = (
+            {}
+        )  # symbol -> (name, params, position)
+        self._last_price: dict[str, float] = {}  # 평가손익 계산용
+        self._last_tick: str = "--:--:--"
+        self._current_date: str = datetime.now().strftime("%Y-%m-%d")
+
         self.title("three-line-trader")
-        self.geometry("900x560")
+        self._set_icon()
+        try:
+            self.state("zoomed")  # Windows: 최대화 (FHD 전체화면)
+        except tk.TclError:
+            self.geometry("1600x900")
 
-        # ── 툴바 ──
-        toolbar = ttk.Frame(self, padding=(8, 6))
-        toolbar.pack(fill="x")
-        self._toggle_btn = ttk.Button(toolbar, text="감시 시작", command=self._toggle)
-        self._toggle_btn.pack(side="left")
-        ttk.Button(toolbar, text="종목 등록", command=self._open_register).pack(
-            side="left", padx=(6, 0)
-        )
-        self._status = ttk.Label(toolbar, text="정지됨", foreground="#9e9e9e")
-        self._status.pack(side="right")
-
-        # ── 모니터(상단) / 로그(하단) 분할 ──
-        paned = ttk.PanedWindow(self, orient="vertical")
-        paned.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.positions = PositionsView(
-            paned, on_reset=self._send_reset, on_delete=self._send_delete
-        )
-        self.events = EventsView(paned)
-        paned.add(self.positions, weight=3)
-        paned.add(self.events, weight=1)
+        self._build_toolbar()
+        self._settings = ttk.Frame(self)  # 접이식 컨테이너 (연결 바 + 자금 바)
+        self._settings.pack(fill="x", after=self._toolbar)
+        self._build_connection_bar(self._settings)
+        self._build_funds_bar(self._settings)
+        self._build_main_area()
+        self._build_status_bar()
 
         self.after(_POLL_MS, self._poll)
+        self.after(1000, self._refresh_clock)
+
+    # ── 화면 조립 ───────────────────────────────────────────────
+
+    def _build_toolbar(self) -> None:
+        self._toolbar = ttk.Frame(self, padding=(8, 5))
+        self._toolbar.pack(fill="x")
+        self._fold_btn = ttk.Button(
+            self._toolbar, text="▲ 설정", width=7, command=self._toggle_fold
+        )
+        self._fold_btn.pack(side="left")
+        self._mode_badge = ttk.Label(
+            self._toolbar, text="모의투자", foreground="#1565c0"
+        )
+        self._mode_badge.pack(side="left", padx=(8, 12))
+        ttk.Label(self._toolbar, text="매매일").pack(side="left")
+        self._date_var = tk.StringVar()
+        if DateEntry:  # 클릭 시 캘린더가 펼쳐지고, 날짜 선택 즉시 이동
+            self._date_picker = DateEntry(
+                self._toolbar,
+                textvariable=self._date_var,
+                date_pattern="yyyy-mm-dd",
+                width=11,
+                justify="center",
+                state="readonly",
+            )
+            self._date_picker.pack(side="left", padx=(4, 12))
+            self._date_picker.bind(
+                "<<DateEntrySelected>>", lambda _e: self._change_date()
+            )
+        else:  # tkcalendar 미설치: 직접 입력 + 이동 버튼
+            self._date_picker = None
+            date_entry = ttk.Entry(
+                self._toolbar, textvariable=self._date_var, width=11, justify="center"
+            )
+            date_entry.pack(side="left", padx=(4, 2))
+            date_entry.bind("<Return>", lambda _e: self._change_date())
+            ttk.Button(self._toolbar, text="이동", command=self._change_date).pack(
+                side="left", padx=(0, 12)
+            )
+        self._toggle_btn = ttk.Button(
+            self._toolbar, text="감시 시작", command=self._toggle_run
+        )
+        self._toggle_btn.pack(side="left")
+        ttk.Button(self._toolbar, text="등록", command=self._open_register).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(
+            self._toolbar,
+            text="편집",
+            command=lambda: self._open_edit(self.positions.selected()),
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            self._toolbar,
+            text="삭제",
+            command=lambda: self._delete(self.positions.selected()),
+        ).pack(side="left", padx=(6, 0))
+        self._status = ttk.Label(self._toolbar, text="정지됨", foreground="#9e9e9e")
+        self._status.pack(side="right")
+        self._pnl_label = ttk.Label(self._toolbar, text="실현 - · 평가 - · 합계 -")
+        self._pnl_label.pack(side="right", padx=(0, 16))
+
+    def _build_connection_bar(self, parent: ttk.Frame) -> None:
+        bar = ttk.Frame(parent, padding=(8, 3))
+        bar.pack(fill="x")
+        ttk.Label(bar, text="모드").pack(side="left")
+        self._mode_combo = ttk.Combobox(
+            bar, values=["모의투자", "실전투자"], state="readonly", width=8
+        )
+        self._mode_combo.set("모의투자")
+        self._mode_combo.bind("<<ComboboxSelected>>", self._on_mode_selected)
+        self._mode_combo.pack(side="left", padx=(4, 12))
+
+        ttk.Label(bar, text="키움 앱키").pack(side="left")
+        self._kiwoom_key = ttk.Entry(bar, width=16, show="*")
+        self._kiwoom_key.pack(side="left", padx=(4, 2))
+        self._kiwoom_secret = ttk.Entry(bar, width=16, show="*")
+        self._kiwoom_secret.pack(side="left", padx=(0, 4))
+        ttk.Button(bar, text="연결", command=self._connect_kiwoom).pack(side="left")
+        self._kiwoom_status = ttk.Label(bar, text="● 미연결", foreground="#9e9e9e")
+        self._kiwoom_status.pack(side="left", padx=(6, 14))
+
+        ttk.Label(bar, text="Discord").pack(side="left")
+        self._discord_token = ttk.Entry(bar, width=14, show="*")
+        self._discord_token.pack(side="left", padx=(4, 4))
+        ttk.Button(bar, text="연결", command=self._connect_discord).pack(side="left")
+        self._discord_status = ttk.Label(bar, text="● 미연결", foreground="#9e9e9e")
+        self._discord_status.pack(side="left", padx=(6, 0))
+
+        self._account = ttk.Label(bar, text="계좌 - · 예수금 -")
+        self._account.pack(side="right")
+
+    def _build_funds_bar(self, parent: ttk.Frame) -> None:
+        bar = ttk.Frame(parent, padding=(8, 3))
+        bar.pack(fill="x")
+        self._funds_vars = {k: tk.StringVar() for k in ("total", "max", "buy1", "buy2")}
+
+        def entry(label: str, key: str, width: int) -> None:
+            ttk.Label(bar, text=label).pack(side="left")
+            e = ttk.Entry(
+                bar, textvariable=self._funds_vars[key], width=width, justify="right"
+            )
+            e.pack(side="left", padx=(4, 10))
+            if key in ("total", "max"):  # 변경 시 종목당 배분·1/2차 금액 자동 채움
+                e.bind("<KeyRelease>", self._auto_fill_funds)
+
+        entry("총 운용금액", "total", 12)
+        entry("최대 종목", "max", 4)
+        self._per_symbol = ttk.Label(bar, text="→ 종목당 -")
+        self._per_symbol.pack(side="left", padx=(0, 10))
+        entry("1차", "buy1", 10)
+        entry("2차", "buy2", 10)
+        ttk.Button(bar, text="적용", command=self._apply_funds).pack(side="left")
+
+    def _build_main_area(self) -> None:
+        paned = ttk.PanedWindow(self, orient="vertical")
+        paned.pack(fill="both", expand=True, padx=8, pady=(2, 0))
+        self.positions = PositionsView(
+            paned, on_edit=self._open_edit, on_reset=self._reset, on_delete=self._delete
+        )
+        self.events = EventsView(paned)
+        paned.add(self.positions, weight=5)
+        paned.add(self.events, weight=2)
+
+    def _build_status_bar(self) -> None:
+        bar = ttk.Frame(self, padding=(8, 3))
+        bar.pack(fill="x", side="bottom")
+        self._ws_label = ttk.Label(bar, text="● WS 미연결", foreground="#9e9e9e")
+        self._ws_label.pack(side="left", padx=(0, 12))
+        self._tick_label = ttk.Label(bar, text="마지막 틱 --:--:--")
+        self._tick_label.pack(side="left", padx=(0, 12))
+        self._market_label = ttk.Label(bar, text="")
+        self._market_label.pack(side="left")
+        self._summary = ttk.Label(bar, text="")
+        self._summary.pack(side="right")
+
+    def _set_icon(self) -> None:
+        """윈도우 아이콘: Windows 는 .ico, 그 외 플랫폼은 .png 로 적용."""
+        try:
+            self.iconbitmap(_ASSETS / "three-line-trader.ico")
+        except tk.TclError:
+            png = _ASSETS / "three-line-trader-512.png"
+            if png.exists():
+                self._icon_image = tk.PhotoImage(file=png)  # GC 방지로 참조 유지
+                self.iconphoto(True, self._icon_image)
 
     # ── 사용자 조작 → 명령 큐 ───────────────────────────────────
 
-    def _toggle(self) -> None:
+    def _toggle_fold(self) -> None:
+        if self._settings.winfo_manager():
+            self._settings.pack_forget()
+            self._fold_btn.configure(text="▼ 설정")
+        else:
+            self._settings.pack(fill="x", after=self._toolbar)
+            self._fold_btn.configure(text="▲ 설정")
+
+    def _toggle_run(self) -> None:
         self._bus.commands.put(bus.SetRunning(not self._running))
 
     def _open_register(self) -> None:
-        RegisterDialog(self, on_submit=self._bus.commands.put)
+        defaults = (
+            (self._funds.buy1_amount, self._funds.buy2_amount)
+            if self._funds
+            else (0, 0)
+        )
+        RegisterDialog(self, on_submit=self._bus.commands.put, default_amounts=defaults)
 
-    def _send_reset(self, symbol: str) -> None:
-        self._bus.commands.put(bus.Reset(symbol))
+    def _open_edit(self, symbol: str | None) -> None:
+        if not symbol or symbol not in self._registry:
+            return
+        name, params, _pos = self._registry[symbol]
+        RegisterDialog(
+            self, on_submit=self._bus.commands.put, edit=(symbol, name, params)
+        )
 
-    def _send_delete(self, symbol: str) -> None:
-        self._bus.commands.put(bus.Delete(symbol))
+    def _reset(self, symbol: str | None) -> None:
+        if symbol:
+            self._bus.commands.put(bus.Reset(symbol))
+
+    def _delete(self, symbol: str | None) -> None:
+        if symbol and messagebox.askyesno(
+            "확인", f"{symbol} 을 관심종목에서 제외할까요?"
+        ):
+            self._bus.commands.put(bus.Delete(symbol))
+
+    def _on_mode_selected(self, _event=None) -> None:
+        want_real = self._mode_combo.get() == "실전투자"
+        if want_real == self._mode_real:
+            return
+        if self._running:
+            messagebox.showwarning(
+                "전환 불가",
+                "감시 중에는 모드를 전환할 수 없습니다. 먼저 일시정지하세요.",
+            )
+            self._mode_combo.set("실전투자" if self._mode_real else "모의투자")
+            return
+        if want_real and not messagebox.askyesno(
+            "실전투자 전환", "실전투자로 전환합니다.\n실제 주문이 나갑니다. 계속할까요?"
+        ):
+            self._mode_combo.set("모의투자")
+            return
+        self._bus.commands.put(bus.SetMode(want_real))
+
+    def _auto_fill_funds(self, _event=None) -> None:
+        """총액/최대 종목 입력 시 종목당 배분 표시 및 1·2차 금액 절반씩 자동 채움."""
+        try:
+            total = float(self._funds_vars["total"].get().replace(",", "") or 0)
+            max_n = int(self._funds_vars["max"].get() or 0)
+            per = total / max_n if max_n else 0
+        except ValueError:
+            return
+        self._per_symbol.configure(text=f"→ 종목당 {per:,.0f}")
+        self._funds_vars["buy1"].set(f"{per / 2:,.0f}")
+        self._funds_vars["buy2"].set(f"{per / 2:,.0f}")
+
+    def _apply_funds(self) -> None:
+        try:
+            total = float(self._funds_vars["total"].get().replace(",", ""))
+            max_n = int(self._funds_vars["max"].get())
+            buy1 = float(self._funds_vars["buy1"].get().replace(",", ""))
+            buy2 = float(self._funds_vars["buy2"].get().replace(",", ""))
+            if total <= 0 or max_n <= 0:
+                raise ValueError("총 운용금액과 최대 종목 수는 0보다 커야 합니다")
+            if buy1 + buy2 > total / max_n + 1e-9:
+                raise ValueError(
+                    f"1차+2차 금액이 종목당 배분({total / max_n:,.0f})을 초과합니다"
+                )
+        except ValueError as e:
+            messagebox.showerror("입력 오류", str(e))
+            return
+        self._bus.commands.put(bus.SetFunds(total, max_n, buy1, buy2))
+
+    def _change_date(self) -> None:
+        d = self._date_var.get().strip()
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror(
+                "입력 오류", "매매일은 YYYY-MM-DD 형식으로 입력하세요."
+            )
+            return
+        if self._running:
+            messagebox.showwarning(
+                "전환 불가", "감시 중에는 매매일을 전환할 수 없습니다. 먼저 중지하세요."
+            )
+            self._set_date_display(self._current_date)  # 선택을 원래 날짜로 되돌림
+            return
+        self._bus.commands.put(bus.SetTradeDate(d))
+
+    def _set_date_display(self, d: str) -> None:
+        if self._date_picker:
+            self._date_picker.set_date(datetime.strptime(d, "%Y-%m-%d"))
+        else:
+            self._date_var.set(d)
+
+    def _connect_kiwoom(self) -> None:
+        messagebox.showinfo(
+            "안내", "키움 API 연결은 watcher/broker 구현 후 동작합니다."
+        )
+
+    def _connect_discord(self) -> None:
+        messagebox.showinfo("안내", "Discord 연결은 notifier 구현 후 동작합니다.")
 
     # ── 이벤트 큐 → 화면 갱신 ───────────────────────────────────
 
@@ -75,18 +340,95 @@ class App(tk.Tk):
 
     def _dispatch(self, ev) -> None:
         match ev:
-            case bus.PositionUpdate(symbol=s, name=n, position=p):
-                self.positions.upsert(s, n, p)
+            case bus.PositionUpdate(symbol=s, name=n, position=p, params=prm):
+                self._registry[s] = (n, prm, p)
+                self.positions.upsert(s, n, p, prm)
+                self._update_summary()
+                self._update_pnl()
             case bus.Tick(symbol=s, price=p):
                 self.positions.tick(s, p)
+                self._last_price[s] = p
+                self._last_tick = datetime.now().strftime("%H:%M:%S")
+                self._tick_label.configure(text=f"마지막 틱 {self._last_tick}")
+                self._update_pnl()
             case bus.LogLine(ts=ts, symbol=s, kind=k, text=t):
                 self.events.append(ts, s, k, t)
             case bus.SymbolRemoved(symbol=s):
+                self._registry.pop(s, None)
                 self.positions.remove(s)
+                self._update_summary()
             case bus.WatchStatus(running=r):
                 self._running = r
-                self._toggle_btn.configure(text="일시정지" if r else "감시 시작")
+                self._toggle_btn.configure(text="중지" if r else "감시 시작")
                 self._status.configure(
                     text="감시 중" if r else "정지됨",
                     foreground="#2e7d32" if r else "#9e9e9e",
                 )
+                self._ws_label.configure(
+                    text="● WS 수신 중 (시뮬레이션)" if r else "● WS 미연결",
+                    foreground="#2e7d32" if r else "#9e9e9e",
+                )
+            case bus.Funds() as f:
+                self._funds = f
+                self._funds_vars["total"].set(f"{f.total:,.0f}")
+                self._funds_vars["max"].set(str(f.max_symbols))
+                self._funds_vars["buy1"].set(f"{f.buy1_amount:,.0f}")
+                self._funds_vars["buy2"].set(f"{f.buy2_amount:,.0f}")
+                self._per_symbol.configure(
+                    text=f"→ 종목당 {f.total / f.max_symbols:,.0f}"
+                )
+            case bus.TradeDate(date=d):
+                self._current_date = d
+                self._set_date_display(d)
+                self._registry.clear()
+                self._last_price.clear()
+                self.positions.clear()
+                self._update_summary()
+                self._update_pnl()
+            case bus.Mode(real=real):
+                self._mode_real = real
+                self._mode_combo.set("실전투자" if real else "모의투자")
+                self._mode_badge.configure(
+                    text="실전투자" if real else "모의투자",
+                    foreground="#c62828" if real else "#1565c0",
+                )
+                self._update_summary()
+
+    def _update_summary(self) -> None:
+        holding = sum(
+            1
+            for _, _, p in self._registry.values()
+            if p.state not in (State.WAITING, State.CLOSED)
+        )
+        mode = "실전투자" if self._mode_real else "모의투자"
+        self._summary.configure(
+            text=f"{mode} · 감시 {len(self._registry)}종목 · 보유 {holding}종목"
+        )
+
+    def _update_pnl(self) -> None:
+        realized = sum(p.realized_pnl for _, _, p in self._registry.values())
+        unrealized = invested = 0.0
+        for s, (_, _, p) in self._registry.items():
+            if p.remaining and s in self._last_price:
+                unrealized += (self._last_price[s] - p.avg_price) * p.remaining
+            invested += p.avg_price * p.total_bought
+        total = realized + unrealized
+        rate = f" ({total / invested:+.2%})" if invested else ""
+        color = "#c62828" if total > 0 else ("#1565c0" if total < 0 else "#9e9e9e")
+        self._pnl_label.configure(
+            text=f"실현 {realized:+,.0f} · 평가 {unrealized:+,.0f} · 합계 {total:+,.0f}{rate}",
+            foreground=color,
+        )
+
+    def _refresh_clock(self) -> None:
+        now = datetime.now()
+        if now.weekday() >= 5:
+            phase = "휴장 (주말)"
+        elif now.time() < dtime(9, 0):
+            phase = "장전"
+        elif now.time() <= dtime(15, 30):
+            phase = "장중 (15:30 마감)"
+        else:
+            phase = "장 마감"
+        self._market_label.configure(text=phase)
+        self.after(1000, self._refresh_clock)

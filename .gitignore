@@ -1,10 +1,20 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# 보안: API 키는 절대 커밋 금지
+config.toml
 
-# Virtual environments
-.venv
+# 데이터/로그 (매매 기록·시뮬레이터 DB)
+data/
+*.log
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

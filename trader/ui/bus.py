@@ -20,11 +20,36 @@ from trader.state_machine import Params, Position
 
 @dataclass(frozen=True)
 class PositionUpdate:
-    """포지션 스냅샷 변경 (등록·전이·리셋 직후)."""
+    """포지션 스냅샷 변경 (등록·전이·리셋 직후). params 는 편집 창 프리필과 3선 컬럼 표시용."""
 
     symbol: str
     name: str
     position: Position
+    params: Params
+
+
+@dataclass(frozen=True)
+class Funds:
+    """전역 자금 설정 (시작 시 복원값 또는 변경 확정값)."""
+
+    total: float
+    max_symbols: int
+    buy1_amount: float
+    buy2_amount: float
+
+
+@dataclass(frozen=True)
+class Mode:
+    """투자 모드. real=True 는 실전투자."""
+
+    real: bool
+
+
+@dataclass(frozen=True)
+class TradeDate:
+    """현재 활성 매매일. UI 는 수신 시 테이블을 비우고 이어지는 PositionUpdate 로 다시 채운다."""
+
+    date: str  # YYYY-MM-DD
 
 
 @dataclass(frozen=True)
@@ -62,12 +87,37 @@ class SymbolRemoved:
 
 @dataclass(frozen=True)
 class Register:
-    """관심종목 등록/갱신 (시작 상태 지정 가능)."""
+    """관심종목 등록/갱신. position=None 이면 편집 모드 — 현재 포지션을 유지한 채
+    설정(params)만 교체한다 (편집 창이 열려 있는 동안 상태가 바뀌어도 안전)."""
 
     symbol: str
     name: str
     params: Params
-    position: Position
+    position: Position | None
+
+
+@dataclass(frozen=True)
+class SetFunds:
+    """전역 자금 설정 변경."""
+
+    total: float
+    max_symbols: int
+    buy1_amount: float
+    buy2_amount: float
+
+
+@dataclass(frozen=True)
+class SetMode:
+    """투자 모드 전환."""
+
+    real: bool
+
+
+@dataclass(frozen=True)
+class SetTradeDate:
+    """매매일 전환 — 해당 날짜의 관심종목 리스트를 로드한다. 감시 중에는 거부된다."""
+
+    date: str  # YYYY-MM-DD
 
 
 @dataclass(frozen=True)

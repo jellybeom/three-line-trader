@@ -15,7 +15,7 @@ from __future__ import annotations
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 from trader.state_machine import (
     Side,
@@ -33,7 +33,7 @@ _VOLATILITY = 0.003  # 틱당 표준편차 0.3%
 
 
 def _now() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class SimCore:
@@ -43,9 +43,16 @@ class SimCore:
         self._bus = b
         self._store = store
         self._running = False
+        self._date = date.today().isoformat()  # 활성 매매일
         # symbol -> {"name", "params", "pos", "price"}
         self._entries: dict[str, dict] = {}
-        for symbol, (name, params, pos) in store.load_all().items():
+        self._load_date(self._date)
+
+    def _load_date(self, trade_date: str) -> None:
+        """해당 매매일의 관심종목 리스트를 로드한다."""
+        self._date = trade_date
+        self._entries = {}
+        for symbol, (name, params, pos) in self._store.load_all(trade_date).items():
             price = pos.avg_price if pos.avg_price else params.line1 * 1.03
             self._entries[symbol] = {
                 "name": name,
@@ -56,9 +63,12 @@ class SimCore:
 
     def loop(self) -> None:
         # 복원된 종목을 UI 에 초기 표시
-        for symbol, e in self._entries.items():
-            self._emit_position(symbol)
+        self._emit_date_loaded()
         self._bus.events.put(bus.WatchStatus(self._running))
+        self._emit_funds()
+        self._bus.events.put(
+            bus.Mode(self._store.get_setting("mode", "모의") == "실전")
+        )
 
         while True:
             self._handle_commands()
@@ -69,13 +79,41 @@ class SimCore:
 
     # ── 명령 처리 (UI → 코어) ───────────────────────────────────
 
+    def _emit_date_loaded(self) -> None:
+        """매매일 확정 통지 후 해당 날짜의 전 종목을 UI 로 발행."""
+        self._bus.events.put(bus.TradeDate(self._date))
+        for symbol in self._entries:
+            self._emit_position(symbol)
+
     def _handle_commands(self) -> None:
         while not self._bus.commands.empty():
             cmd = self._bus.commands.get_nowait()
             match cmd:
+                case bus.SetTradeDate(date=d):
+                    if self._running:
+                        self._log(
+                            "시스템", "에러", "감시 중에는 매매일을 전환할 수 없습니다"
+                        )
+                        continue
+                    self._load_date(d)
+                    self._emit_date_loaded()
+                    self._log(
+                        "시스템",
+                        "설정",
+                        f"매매일 {d} 리스트 로드 ({len(self._entries)}종목)",
+                    )
                 case bus.Register(symbol=s, name=n, params=p, position=pos):
-                    self._store.register_symbol(s, n, p, pos)
-                    price = pos.avg_price if pos.avg_price else p.line1 * 1.03
+                    if pos is None:  # 편집: 현재 포지션 유지, 설정만 교체
+                        pos = self._entries[s]["pos"] if s in self._entries else None
+                    if pos is None:
+                        self._log(s, "에러", "편집 대상 종목이 없습니다")
+                        continue
+                    self._store.register_symbol(self._date, s, n, p, pos)
+                    price = (
+                        self._entries[s]["price"]
+                        if s in self._entries
+                        else (pos.avg_price if pos.avg_price else p.line1 * 1.03)
+                    )
                     self._entries[s] = {
                         "name": n,
                         "params": p,
@@ -83,15 +121,41 @@ class SimCore:
                         "price": price,
                     }
                     self._emit_position(s)
-                    self._log(s, "등록", f"{n} (시작 상태: {pos.state.value})")
+                    self._log(s, "등록", f"{n} (상태: {pos.state.value})")
+                case bus.SetFunds(
+                    total=t, max_symbols=m, buy1_amount=b1, buy2_amount=b2
+                ):
+                    for key, val in (
+                        ("funds_total", t),
+                        ("funds_max", m),
+                        ("funds_buy1", b1),
+                        ("funds_buy2", b2),
+                    ):
+                        self._store.set_setting(key, str(val))
+                    self._emit_funds()
+                    self._log(
+                        "시스템",
+                        "설정",
+                        f"자금 설정 적용: 총 {t:,.0f} / {m}종목 / 1차 {b1:,.0f} / 2차 {b2:,.0f}",
+                    )
+                case bus.SetMode(real=real):
+                    self._store.set_setting("mode", "실전" if real else "모의")
+                    self._bus.events.put(bus.Mode(real))
+                    self._log(
+                        "시스템",
+                        "설정",
+                        f"{'실전' if real else '모의'}투자 모드로 전환",
+                    )
                 case bus.Delete(symbol=s):
-                    self._store.delete_symbol(s)
+                    self._store.delete_symbol(self._date, s)
                     self._entries.pop(s, None)
                     self._bus.events.put(bus.SymbolRemoved(s))
                     self._log(s, "삭제", "관심종목 제외")
                 case bus.Reset(symbol=s) if s in self._entries:
                     try:
-                        new_pos = self._store.admin_reset(s, self._entries[s]["pos"])
+                        new_pos = self._store.admin_reset(
+                            self._date, s, self._entries[s]["pos"]
+                        )
                     except ValueError as err:
                         self._log(s, "에러", str(err))
                     else:
@@ -122,15 +186,34 @@ class SimCore:
         else:  # 주문 → (즉시 체결 가정) → 확정
             pos = apply_fill(mark_pending(pos), d, fill_price=price, fill_qty=d.qty)
         e["pos"] = pos
-        self._store.save_transition(symbol, from_state, pos, d, price)
+        self._store.save_transition(self._date, symbol, from_state, pos, d, price)
         self._emit_position(symbol)
-        self._log(symbol, "전이", d.reason)
+        text = d.reason
+        if pos.state.value == "종료":
+            text += f" (실현손익 {pos.realized_pnl:+,.0f})"
+        self._log(symbol, "전이", text)
 
     # ── 이벤트 발행 (코어 → UI) ─────────────────────────────────
 
     def _emit_position(self, symbol: str) -> None:
         e = self._entries[symbol]
-        self._bus.events.put(bus.PositionUpdate(symbol, e["name"], e["pos"]))
+        self._bus.events.put(
+            bus.PositionUpdate(symbol, e["name"], e["pos"], e["params"])
+        )
+
+    def _emit_funds(self) -> None:
+        g = self._store.get_setting
+        total = float(g("funds_total", "10000000"))
+        max_n = int(g("funds_max", "10"))
+        per_half = total / max_n / 2
+        self._bus.events.put(
+            bus.Funds(
+                total,
+                max_n,
+                float(g("funds_buy1", str(per_half))),
+                float(g("funds_buy2", str(per_half))),
+            )
+        )
 
     def _log(self, symbol: str, kind: str, text: str) -> None:
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
