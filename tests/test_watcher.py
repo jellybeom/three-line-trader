@@ -44,9 +44,14 @@ def test_체결_메시지에서_틱_추출_및_등락부호_제거():
             ],
         }
     )
-    kind, ticks = parse_message(raw)
+    kind, data = parse_message(
+        raw
+    )  # real 은 data 원본을 돌려준다 (0B/00 분기는 핸들러 몫)
     assert kind == "real"
-    assert ticks == [Tick("005930", 72400, "140233"), Tick("000660", 198500, "140233")]
+    assert extract_ticks(data) == [
+        Tick("005930", 72400, "140233"),
+        Tick("000660", 198500, "140233"),
+    ]
 
 
 def test_0B가_아닌_타입과_이상_항목은_건너뜀():

@@ -30,12 +30,14 @@ class PositionUpdate:
 
 @dataclass(frozen=True)
 class Funds:
-    """전역 자금 설정 (시작 시 복원값 또는 변경 확정값)."""
+    """전역 자금·전략 설정 (시작 시 복원값 또는 변경 확정값)."""
 
     total: float
     max_symbols: int
     buy1_amount: float
     buy2_amount: float
+    tp_rates: tuple[float, float, float] = (0.03, 0.05, 0.07)
+    tp_ratios: tuple[float, float, float] = (0.40, 0.50, 0.10)
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,21 @@ class WatchStatus:
 
 
 @dataclass(frozen=True)
+class KiwoomStatus:
+    """키움 연결 상태 (연결/실패/끊김)."""
+
+    connected: bool
+    detail: str  # 만료일 또는 실패 사유
+
+
+@dataclass(frozen=True)
+class Account:
+    """계좌 요약 (주문가능금액)."""
+
+    deposit: float
+
+
+@dataclass(frozen=True)
 class SymbolRemoved:
     symbol: str
 
@@ -98,12 +115,14 @@ class Register:
 
 @dataclass(frozen=True)
 class SetFunds:
-    """전역 자금 설정 변경."""
+    """전역 자금·전략 설정 변경. '대기' 상태 종목에는 즉시 반영된다."""
 
     total: float
     max_symbols: int
     buy1_amount: float
     buy2_amount: float
+    tp_rates: tuple[float, float, float]
+    tp_ratios: tuple[float, float, float]
 
 
 @dataclass(frozen=True)
@@ -111,6 +130,16 @@ class SetMode:
     """투자 모드 전환."""
 
     real: bool
+
+
+@dataclass(frozen=True)
+class ConnectKiwoom:
+    """config.toml 의 현재 모드 키로 키움 연결 (토큰 발급 + 계좌 조회 + WS 시작)."""
+
+
+@dataclass(frozen=True)
+class RefreshAccount:
+    """예수금(주문가능금액) 새로고침."""
 
 
 @dataclass(frozen=True)

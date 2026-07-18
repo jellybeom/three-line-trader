@@ -10,8 +10,10 @@ watcher(시세)와 broker(주문)가 KiwoomAuth 하나를 공유한다 —
 
 from __future__ import annotations
 
+import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import requests
 
@@ -67,6 +69,32 @@ class KiwoomAuth:
             raise KiwoomAuthError(f"토큰 발급 실패 (HTTP {resp.status_code}): {data}")
         self._token = token
         self._expires_at = _parse_expires(data.get("expires_dt", ""))
+
+
+def load_auth(
+    config_path: str | Path = "config.toml", real: bool = False
+) -> KiwoomAuth:
+    """config.toml 에서 모드에 맞는 키를 읽어 KiwoomAuth 생성.
+
+    [kiwoom.mock] / [kiwoom.real] 중첩 형식을 우선하고,
+    구버전 평면 [kiwoom] (appkey/secretkey/mock) 형식도 호환한다.
+    """
+    path = Path(config_path)
+    if not path.exists():
+        raise KiwoomAuthError(
+            f"{config_path} 가 없습니다. config.toml.example 을 참고해 작성하세요."
+        )
+    kiwoom = tomllib.loads(path.read_text(encoding="utf-8")).get("kiwoom", {})
+
+    section = kiwoom.get("real" if real else "mock")
+    if section is None and "appkey" in kiwoom:  # 구버전 평면 형식
+        section = kiwoom
+    if not section or not section.get("appkey") or not section.get("secretkey"):
+        raise KiwoomAuthError(
+            f"config.toml 에 {'실전' if real else '모의'}투자 키가 없습니다 "
+            f"([kiwoom.{'real' if real else 'mock'}] 섹션의 appkey/secretkey 확인)."
+        )
+    return KiwoomAuth(section["appkey"], section["secretkey"], mock=not real)
 
 
 def _parse_expires(expires_dt: str) -> datetime:

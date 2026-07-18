@@ -3,7 +3,9 @@
 프로토콜 (키움 공식 가이드 기준):
 - 접속 → LOGIN {'trnm':'LOGIN','token':...} → {'trnm':'LOGIN','return_code':0}
 - 등록   {'trnm':'REG','grp_no':'1','refresh':'1','data':[{'item':[코드들],'type':['0B']}]}
+  (on_fill 콜백이 있으면 계좌 단위 체결통보 '00' 도 함께 등록)
 - 수신   {'trnm':'REAL','data':[{'type':'0B','item':코드,'values':{'10':현재가,...}}]}
+  type '00'(주문체결통보) 항목은 values 원본을 on_fill 로 전달한다 (해석은 broker.extract_fill)
 - 서버 PING {'trnm':'PING'} 은 받은 그대로 되돌려 보내야 연결이 유지된다.
 
 0B(주식체결)의 '10' 필드가 현재가이며, 키움 관례상 등락 부호(+/-)가 붙어
@@ -50,7 +52,7 @@ def parse_message(raw: str) -> tuple[str, object]:
         case "LOGIN":
             return "login", msg.get("return_code") == 0
         case "REAL":
-            return "real", extract_ticks(msg.get("data", []))
+            return "real", msg.get("data", [])
         case _:
             return "other", msg
 
@@ -83,12 +85,16 @@ class Watcher:
         on_tick: Callable[[Tick], Awaitable[None]],
         on_status: Callable[[str], Awaitable[None]],  # 연결/재연결/오류 로그
         on_reconnect: Callable[[], Awaitable[None]] | None = None,
+        on_fill: (
+            Callable[[dict], Awaitable[None]] | None
+        ) = None,  # 체결통보 '00' values 원본
     ):
         self._ws_url = ws_url
         self._token_provider = token_provider
         self._on_tick = on_tick
         self._on_status = on_status
         self._on_reconnect = on_reconnect
+        self._on_fill = on_fill
         self._symbols: list[str] = []
         self._ws = None
         self._stopped = False
@@ -159,7 +165,12 @@ class Watcher:
         raise ConnectionError("로그인 응답 없음")
 
     async def _register(self, ws) -> None:
-        if not self._symbols:
+        data = []
+        if self._symbols:
+            data.append({"item": self._symbols, "type": ["0B"]})
+        if self._on_fill:
+            data.append({"item": [""], "type": ["00"]})  # 체결통보는 계좌 단위
+        if not data:
             return
         await ws.send(
             json.dumps(
@@ -167,7 +178,7 @@ class Watcher:
                     "trnm": "REG",
                     "grp_no": "1",
                     "refresh": "1",
-                    "data": [{"item": self._symbols, "type": ["0B"]}],
+                    "data": data,
                 }
             )
         )
@@ -177,5 +188,9 @@ class Watcher:
         if kind == "ping":
             await ws.send(raw)
         elif kind == "real":
-            for tick in payload:
+            for tick in extract_ticks(payload):
                 await self._on_tick(tick)
+            if self._on_fill:
+                for entry in payload:
+                    if entry.get("type") == "00":
+                        await self._on_fill(entry.get("values", {}))

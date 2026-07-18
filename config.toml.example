@@ -1,12 +1,15 @@
 # 이 파일을 config.toml 로 복사한 뒤 발급받은 키를 채워주세요.
 # 주의: config.toml 은 절대 git 에 커밋하지 마세요 (.gitignore 등록 필수)
+# 모의/실전은 키가 별도 발급이므로 섹션이 나뉩니다. UI 의 모드 전환이 해당 섹션 키로 재연결합니다.
+# (기존 평면 [kiwoom] appkey/secretkey 형식도 모의투자 키로 호환 인식됩니다)
 
-[kiwoom]
-appkey = "발급받은 앱키"
-secretkey = "발급받은 시크릿키"
-mock = true      # 모의투자. 실전 전환 시 false + 실전용 키로 교체
-account = ""     # 선택. 키움 REST API 는 키 발급 시 계좌가 등록되어 토큰이 계좌와
-                 # 연결되므로 보통 불필요. 메모용 또는 특정 TR 필요 시에만 기입
+[kiwoom.mock]
+appkey = "모의투자 앱키"
+secretkey = "모의투자 시크릿키"
+
+[kiwoom.real]
+appkey = ""      # 실전 전환 시 실전용 키 기입
+secretkey = ""
 
 [discord]
 webhook_url = ""  # notifier 구현 후 사용

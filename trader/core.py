@@ -1,0 +1,520 @@
+"""실전 매매 코어 — watcher(시세) · state_machine(판단) · broker(주문) · store(기록) 조립.
+
+simulate.SimCore 의 실전판이다. "즉시 체결 가정" 대신 실제 2단계 흐름을 구현한다:
+
+    틱 수신 → decide → (예수금 방어) → REST 주문 전송 → pending 표시
+    → 체결통보(00) 수신 → apply_fill 로 상태 확정 → 저장·UI 발행
+
+코어 레벨 정책 (README 운영 규칙):
+- 예수금 부족: 1차 매수 시점 → 주문 없이 '종료' 전환. 2차 매수 시점 → 1차 물량
+  유지, 해당 종목 추가 매수만 차단(1회 알림). 손절·익절 경로는 계속 동작한다.
+- 시작·연결 시 계좌 실보유와 저장된 포지션을 대조(reconcile)해 불일치를 경고한다.
+- WebSocket 재연결 직후 REST 현재가로 공백 구간을 1회 보정한다.
+- 체결통보가 일정 시간 오지 않는 pending 주문은 경고한다 (수동 확인 필요).
+
+전체가 코어 스레드의 단일 asyncio 루프에서 돌며(store 는 이 스레드 소유),
+blocking REST 호출만 asyncio.to_thread 로 내보낸다.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import date, datetime
+
+from trader.broker import Broker, BrokerError, extract_fill
+from trader.kiwoom import KiwoomAuthError, load_auth
+from dataclasses import replace
+
+from trader.state_machine import (
+    Decision,
+    Side,
+    State,
+    apply_fill,
+    apply_transition,
+    decide,
+    mark_pending,
+)
+from trader.store import Store
+from trader.ui import bus
+from trader.watcher import Tick, Watcher
+
+_PENDING_WARN_SEC = 60  # 체결통보 미도착 경고 기준
+_LOOP_SEC = 0.1
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+class Core:
+    def __init__(
+        self,
+        b: bus.Bus,
+        db_path: str = "data/trader.db",
+        config_path: str = "config.toml",
+    ):
+        self._bus = b
+        self._db_path = db_path
+        self._config_path = config_path
+        self._store: Store | None = None
+        self._broker: Broker | None = None
+        self._watcher: Watcher | None = None
+        self._watcher_task: asyncio.Task | None = None
+        self._running = False
+        self._mode_real = False
+        self._date = date.today().isoformat()
+        self._entries: dict[str, dict] = {}  # symbol -> {name, params, pos, price}
+        # order_no -> {symbol, from_state, decision, order_id, ts, warned}
+        self._pending: dict[str, dict] = {}
+        self._buy2_blocked: set[str] = set()
+
+    # ── 메인 루프 ───────────────────────────────────────────────
+
+    async def run(self) -> None:
+        self._store = Store(self._db_path)
+        self._mode_real = self._store.get_setting("mode", "모의") == "실전"
+        self._load_date(self._date)
+        self._emit_date_loaded()
+        self._emit_funds()
+        self._bus.events.put(bus.Mode(self._mode_real))
+        self._bus.events.put(bus.WatchStatus(False))
+        self._log(
+            "시스템",
+            "시작",
+            f"코어 시작 · 매매일 {self._date} ({len(self._entries)}종목 복원)",
+        )
+        self._warn_restored_pending()
+
+        while True:
+            self._drain_commands_sync_part()
+            await self._drain_commands()
+            self._check_pending_timeout()
+            await asyncio.sleep(_LOOP_SEC)
+
+    def _drain_commands_sync_part(self) -> None:
+        pass  # 자리 유지용 (명령 처리는 전부 async 경로)
+
+    # ── 명령 처리 (UI → 코어) ───────────────────────────────────
+
+    async def _drain_commands(self) -> None:
+        while not self._bus.commands.empty():
+            cmd = self._bus.commands.get_nowait()
+            try:
+                await self._handle_command(cmd)
+            except (
+                Exception
+            ) as e:  # noqa: BLE001 — 명령 하나의 실패가 코어를 죽이면 안 됨
+                self._log("시스템", "에러", f"{type(cmd).__name__} 처리 실패: {e}")
+
+    async def _handle_command(self, cmd) -> None:
+        match cmd:
+            case bus.ConnectKiwoom():
+                await self._connect()
+            case bus.RefreshAccount():
+                await self._refresh_account()
+            case bus.Register(symbol=s, name=n, params=p, position=pos):
+                if pos is None:  # 편집: 현재 포지션 유지
+                    if s not in self._entries:
+                        self._log(s, "에러", "편집 대상 종목이 없습니다")
+                        return
+                    pos = self._entries[s]["pos"]
+                self._store.register_symbol(self._date, s, n, p, pos)
+                price = (
+                    self._entries[s]["price"] if s in self._entries else pos.avg_price
+                )
+                self._entries[s] = {"name": n, "params": p, "pos": pos, "price": price}
+                self._buy2_blocked.discard(s)
+                self._emit_position(s)
+                self._log(s, "등록", f"{n} (상태: {pos.state.value})")
+                await self._sync_watcher_symbols()
+            case bus.Delete(symbol=s):
+                self._store.delete_symbol(self._date, s)
+                self._entries.pop(s, None)
+                self._buy2_blocked.discard(s)
+                self._bus.events.put(bus.SymbolRemoved(s))
+                self._log(s, "삭제", "관심종목 제외")
+                await self._sync_watcher_symbols()
+            case bus.Reset(symbol=s) if s in self._entries:
+                try:
+                    new_pos = self._store.admin_reset(
+                        self._date, s, self._entries[s]["pos"]
+                    )
+                except ValueError as e:
+                    self._log(s, "에러", str(e))
+                else:
+                    self._entries[s]["pos"] = new_pos
+                    self._buy2_blocked.discard(s)
+                    self._emit_position(s)
+                    self._log(s, "리셋", "관리자 수동 초기화 (종료 → 대기)")
+            case bus.SetRunning(running=r):
+                if r and self._broker is None:
+                    self._log(
+                        "시스템", "에러", "키움 연결 후 감시를 시작할 수 있습니다"
+                    )
+                    return
+                self._running = r
+                self._bus.events.put(bus.WatchStatus(r))
+                self._log("시스템", "감시", "감시 시작" if r else "감시 중지")
+            case bus.SetFunds(
+                total=t,
+                max_symbols=m,
+                buy1_amount=b1,
+                buy2_amount=b2,
+                tp_rates=rates,
+                tp_ratios=ratios,
+            ):
+                for key, val in (
+                    ("funds_total", t),
+                    ("funds_max", m),
+                    ("funds_buy1", b1),
+                    ("funds_buy2", b2),
+                    ("funds_rates", ",".join(map(str, rates))),
+                    ("funds_ratios", ",".join(map(str, ratios))),
+                ):
+                    self._store.set_setting(key, str(val))
+                self._emit_funds()
+                self._apply_globals_to_waiting(b1, b2, rates, ratios)
+                self._log(
+                    "시스템",
+                    "설정",
+                    f"전역 설정 적용: 총 {t:,.0f} / {m}종목 / 1차 {b1:,.0f} / 2차 {b2:,.0f} "
+                    f"/ 익절 {'/'.join(f'{r:.0%}' for r in rates)}",
+                )
+            case bus.SetMode(real=real):
+                self._store.set_setting("mode", "실전" if real else "모의")
+                self._mode_real = real
+                self._bus.events.put(bus.Mode(real))
+                await self._disconnect("모드 전환 — 다시 연결하세요")
+                self._log(
+                    "시스템", "설정", f"{'실전' if real else '모의'}투자 모드로 전환"
+                )
+            case bus.SetTradeDate(date=d):
+                if self._running:
+                    self._log(
+                        "시스템", "에러", "감시 중에는 매매일을 전환할 수 없습니다"
+                    )
+                    return
+                self._load_date(d)
+                self._emit_date_loaded()
+                self._log(
+                    "시스템",
+                    "설정",
+                    f"매매일 {d} 리스트 로드 ({len(self._entries)}종목)",
+                )
+                self._warn_restored_pending()
+                await self._sync_watcher_symbols()
+
+    # ── 키움 연결 ───────────────────────────────────────────────
+
+    async def _connect(self) -> None:
+        try:
+            auth = load_auth(self._config_path, real=self._mode_real)
+            await asyncio.to_thread(
+                auth.token
+            )  # 잘못된 키/네트워크 오류는 여기서 드러남 (10초 타임아웃)
+        except Exception as e:  # noqa: BLE001
+            self._bus.events.put(bus.KiwoomStatus(False, "연결 실패"))
+            self._log("시스템", "에러", f"키움 연결 실패: {e}")
+            return
+        self._broker = Broker(auth)
+        self._bus.events.put(
+            bus.KiwoomStatus(True, f"만료 {auth._expires_at:%m-%d %H:%M}")
+        )
+        self._log(
+            "시스템", "연결", f"키움 {'실전' if self._mode_real else '모의'}투자 연결됨"
+        )
+        await self._refresh_account()
+        await self._reconcile()
+
+        if self._watcher_task:
+            self._watcher_task.cancel()
+        self._watcher = Watcher(
+            auth.ws_url,
+            auth.token,
+            on_tick=self._on_tick,
+            on_status=self._on_ws_status,
+            on_reconnect=self._on_ws_reconnect,
+            on_fill=self._on_fill_values,
+        )
+        await self._sync_watcher_symbols()
+        self._watcher_task = asyncio.create_task(self._watcher.run())
+
+    async def _disconnect(self, reason: str) -> None:
+        self._running = False
+        self._bus.events.put(bus.WatchStatus(False))
+        if self._watcher:
+            await self._watcher.stop()
+        if self._watcher_task:
+            self._watcher_task.cancel()
+        self._watcher = self._watcher_task = self._broker = None
+        self._bus.events.put(bus.KiwoomStatus(False, reason))
+
+    async def _refresh_account(self) -> None:
+        if self._broker is None:
+            self._log("시스템", "에러", "키움 연결 후 조회할 수 있습니다")
+            return
+        deposit = await asyncio.to_thread(self._broker.deposit)
+        self._bus.events.put(bus.Account(deposit))
+
+    async def _reconcile(self) -> None:
+        """저장된 포지션 잔량과 계좌 실보유를 대조. 불일치는 경고만 (수동 확인)."""
+        holdings = await asyncio.to_thread(self._broker.holdings)
+        for symbol, e in self._entries.items():
+            expected = e["pos"].remaining
+            actual = holdings.get(symbol, 0)
+            if expected != actual:
+                self._log(
+                    symbol,
+                    "경고",
+                    f"잔고 불일치: 프로그램 {expected}주 vs 계좌 {actual}주 — 수동 확인 필요",
+                )
+
+    async def _sync_watcher_symbols(self) -> None:
+        if self._watcher:
+            await self._watcher.update_symbols(list(self._entries))
+
+    # ── 시세 → 판단 → 주문 ──────────────────────────────────────
+
+    async def _on_tick(self, tick: Tick) -> None:
+        e = self._entries.get(tick.symbol)
+        if e is None:
+            return
+        e["price"] = tick.price
+        self._bus.events.put(bus.Tick(tick.symbol, tick.price))
+        if not self._running:
+            return  # 감시 중지 상태: 시세 표시만
+        d = decide(e["pos"], e["params"], tick.price)
+        if d is None:
+            return
+        await self._execute(tick.symbol, d, tick.price)
+
+    async def _execute(self, symbol: str, d: Decision, price: float) -> None:
+        e = self._entries[symbol]
+        pos, from_state = e["pos"], e["pos"].state
+
+        if d.side is None:  # 주문 없는 즉시 전이 (진입 금지 종료, 수량 0 익절 등)
+            e["pos"] = apply_transition(pos, d)
+            self._store.save_transition(
+                self._date, symbol, from_state, e["pos"], d, price
+            )
+            self._emit_position(symbol)
+            self._log(symbol, "전이", d.reason)
+            return
+
+        if d.side is Side.BUY and not await self._can_buy(symbol, d, price):
+            return
+
+        try:
+            order_fn = self._broker.buy if d.side is Side.BUY else self._broker.sell
+            order_no = await asyncio.to_thread(order_fn, symbol, d.qty)
+        except BrokerError as err:
+            self._log(symbol, "에러", f"주문 실패: {err}")
+            return
+        order_id = self._store.record_order(symbol, d.side.value, d.qty)
+        e["pos"] = mark_pending(pos)
+        self._store.save_position(self._date, symbol, e["pos"])
+        self._pending[order_no] = {
+            "symbol": symbol,
+            "from_state": from_state,
+            "decision": d,
+            "order_id": order_id,
+            "ts": time.monotonic(),
+            "warned": False,
+        }
+        self._emit_position(symbol)
+        self._log(
+            symbol,
+            "주문",
+            f"{d.side.value} {d.qty}주 시장가 접수 (주문번호 {order_no}) — {d.reason}",
+        )
+
+    async def _can_buy(self, symbol: str, d: Decision, price: float) -> bool:
+        """예수금 방어. False 면 주문을 내지 않는다."""
+        e = self._entries[symbol]
+        is_first_entry = e["pos"].state is State.WAITING  # 1차 또는 갭 동시 매수
+        if not is_first_entry and symbol in self._buy2_blocked:
+            return False  # 이미 차단·알림된 종목 (틱마다 REST 호출 방지)
+
+        deposit = await asyncio.to_thread(self._broker.deposit)
+        need = d.qty * price
+        if deposit >= need:
+            return True
+
+        if is_first_entry:  # 1차 시점 부족 → 주문 없이 당일 종료
+            nd = Decision(
+                State.CLOSED,
+                None,
+                0,
+                f"예수금 부족({deposit:,.0f} < {need:,.0f}) → 진입 금지, 당일 종료",
+            )
+            await self._execute(symbol, nd, price)
+        else:  # 2차 시점 부족 → 1차 물량 유지, 추가 매수만 차단 (1회 알림)
+            self._buy2_blocked.add(symbol)
+            self._log(
+                symbol,
+                "에러",
+                f"예수금 부족({deposit:,.0f} < {need:,.0f}) → 2차 매수 차단, "
+                "1차 물량 유지 (손절·익절은 계속 동작)",
+            )
+        self._notify(symbol, "예수금 부족 발생 — 확인 필요")
+        return False
+
+    # ── 체결통보 → 상태 확정 ────────────────────────────────────
+
+    async def _on_fill_values(self, values: dict) -> None:
+        fill = extract_fill(values)
+        if fill is None:
+            self._log(
+                "시스템", "경고", f"체결통보 해석 실패 (필드 확인 필요): {values}"
+            )
+            return
+        info = self._pending.get(fill.order_no)
+        if info is None:
+            return  # 이 프로그램이 낸 주문이 아님 (수동 주문 등)
+        if fill.filled_qty == 0 or fill.unfilled_qty > 0:
+            return  # 접수/부분 체결 통보 — 완전 체결까지 대기
+
+        self._pending.pop(fill.order_no)
+        symbol, d = info["symbol"], info["decision"]
+        e = self._entries[symbol]
+        if fill.filled_qty != d.qty:
+            self._log(
+                symbol,
+                "경고",
+                f"체결 수량 상이: 주문 {d.qty}주 vs 체결 {fill.filled_qty}주",
+            )
+        e["pos"] = apply_fill(e["pos"], d, fill.fill_price, fill.filled_qty)
+        self._store.save_transition(
+            self._date, symbol, info["from_state"], e["pos"], d, fill.fill_price
+        )
+        self._store.update_order(
+            info["order_id"],
+            "체결",
+            fill_price=fill.fill_price,
+            fill_qty=fill.filled_qty,
+            broker_order_no=fill.order_no,
+        )
+        self._emit_position(symbol)
+        text = f"{d.reason} → 체결 {fill.filled_qty}주 @ {fill.fill_price:,.0f}"
+        if e["pos"].state is State.CLOSED:
+            text += f" (실현손익 {e['pos'].realized_pnl:+,.0f})"
+            self._notify(symbol, text)
+        self._log(symbol, "체결", text)
+
+    def _check_pending_timeout(self) -> None:
+        for order_no, info in self._pending.items():
+            if not info["warned"] and time.monotonic() - info["ts"] > _PENDING_WARN_SEC:
+                info["warned"] = True
+                self._log(
+                    info["symbol"],
+                    "경고",
+                    f"주문 {order_no} 체결통보 {_PENDING_WARN_SEC}초 미도착 — 수동 확인 필요",
+                )
+
+    # ── WebSocket 상태 ──────────────────────────────────────────
+
+    async def _on_ws_status(self, msg: str) -> None:
+        self._log("시스템", "연결", msg)
+
+    async def _on_ws_reconnect(self) -> None:
+        """재연결 후 공백 구간 보정: 보유·대기 종목 현재가를 REST 로 1회 조회해 재판정."""
+        for symbol, e in list(self._entries.items()):
+            if e["pos"].state is State.CLOSED:
+                continue
+            try:
+                _, price = await asyncio.to_thread(self._broker.stock_info, symbol)
+            except BrokerError as err:
+                self._log(symbol, "경고", f"재연결 가격 보정 실패: {err}")
+                continue
+            if price > 0:
+                await self._on_tick(Tick(symbol, price, ""))
+
+    # ── 상태 로드 / 발행 ────────────────────────────────────────
+
+    def _load_date(self, trade_date: str) -> None:
+        self._date = trade_date
+        self._entries = {}
+        self._buy2_blocked = set()
+        for symbol, (name, params, pos) in self._store.load_all(trade_date).items():
+            self._entries[symbol] = {
+                "name": name,
+                "params": params,
+                "pos": pos,
+                "price": pos.avg_price,
+            }
+
+    def _warn_restored_pending(self) -> None:
+        """체결 확인 전 크래시로 pending 인 채 복원된 종목 경고."""
+        for symbol, e in self._entries.items():
+            if e["pos"].pending:
+                self._log(
+                    symbol,
+                    "경고",
+                    "체결 대기 중 종료된 포지션 복원 — 계좌 체결 내역과 대조 후 "
+                    "필요 시 편집으로 상태를 바로잡으세요",
+                )
+
+    def _emit_date_loaded(self) -> None:
+        self._bus.events.put(bus.TradeDate(self._date))
+        for symbol in self._entries:
+            self._emit_position(symbol)
+
+    def _emit_position(self, symbol: str) -> None:
+        e = self._entries[symbol]
+        self._bus.events.put(
+            bus.PositionUpdate(symbol, e["name"], e["pos"], e["params"])
+        )
+
+    def _apply_globals_to_waiting(self, b1, b2, rates, ratios) -> None:
+        """진입 전('대기') 종목에 새 전역 설정을 즉시 반영한다. 보유 중 종목은 진입 시점 값 유지."""
+        updated = 0
+        for symbol, e in self._entries.items():
+            if e["pos"].state is not State.WAITING:
+                continue
+            try:
+                e["params"] = replace(
+                    e["params"],
+                    buy1_amount=b1,
+                    buy2_amount=b2,
+                    tp_rates=rates,
+                    tp_ratios=ratios,
+                )
+            except ValueError as err:  # 예: 금액 < 기준선
+                self._log(symbol, "에러", f"새 전역 설정 적용 불가: {err}")
+                continue
+            self._store.register_symbol(
+                self._date, symbol, e["name"], e["params"], e["pos"]
+            )
+            self._emit_position(symbol)
+            updated += 1
+        if updated:
+            self._log(
+                "시스템", "설정", f"대기 종목 {updated}개에 새 매수 금액·익절 설정 반영"
+            )
+
+    def _emit_funds(self) -> None:
+        g = self._store.get_setting
+        total = float(g("funds_total", "10000000"))
+        max_n = int(g("funds_max", "10"))
+        per_half = total / max_n / 2
+        rates = tuple(float(x) for x in g("funds_rates", "0.03,0.05,0.07").split(","))
+        ratios = tuple(float(x) for x in g("funds_ratios", "0.4,0.5,0.1").split(","))
+        self._bus.events.put(
+            bus.Funds(
+                total,
+                max_n,
+                float(g("funds_buy1", str(per_half))),
+                float(g("funds_buy2", str(per_half))),
+                rates,
+                ratios,
+            )
+        )
+
+    def _log(self, symbol: str, kind: str, text: str) -> None:
+        self._store.log(self._date, symbol, kind, text)
+        self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
+
+    def _notify(self, symbol: str, text: str) -> None:
+        """Discord 알림 자리 — notifier 구현 시 여기서 발송한다."""
+        self._log(symbol, "알림", f"[Discord 예정] {text}")

@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS symbols (
     buy2_amount REAL NOT NULL,
     tp_rate1  REAL NOT NULL, tp_rate2  REAL NOT NULL, tp_rate3  REAL NOT NULL,
     tp_ratio1 REAL NOT NULL, tp_ratio2 REAL NOT NULL, tp_ratio3 REAL NOT NULL,
-    breakeven_buffer REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (trade_date, symbol)
 );
@@ -88,7 +87,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 4  # 스키마 변경 시 1 증가. 구버전 DB 파일은 명확한 에러로 안내한다.
+_SCHEMA_VERSION = 5  # 스키마 변경 시 1 증가. 구버전 DB 파일은 명확한 에러로 안내한다.
 
 
 class Store:
@@ -144,8 +143,8 @@ class Store:
                 """INSERT INTO symbols
                    (trade_date, symbol, name, line1, line2, line3, buy1_amount, buy2_amount,
                     tp_rate1, tp_rate2, tp_rate3, tp_ratio1, tp_ratio2, tp_ratio3,
-                    breakeven_buffer, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(trade_date, symbol) DO UPDATE SET
                     name=excluded.name, line1=excluded.line1, line2=excluded.line2,
                     line3=excluded.line3, buy1_amount=excluded.buy1_amount,
@@ -153,7 +152,6 @@ class Store:
                     tp_rate1=excluded.tp_rate1, tp_rate2=excluded.tp_rate2,
                     tp_rate3=excluded.tp_rate3, tp_ratio1=excluded.tp_ratio1,
                     tp_ratio2=excluded.tp_ratio2, tp_ratio3=excluded.tp_ratio3,
-                    breakeven_buffer=excluded.breakeven_buffer,
                     updated_at=excluded.updated_at""",
                 (
                     trade_date,
@@ -166,7 +164,6 @@ class Store:
                     params.buy2_amount,
                     *params.tp_rates,
                     *params.tp_ratios,
-                    params.breakeven_buffer,
                     _now(),
                 ),
             )
@@ -214,7 +211,6 @@ class Store:
                     buy2_amount=r["buy2_amount"],
                     tp_rates=(r["tp_rate1"], r["tp_rate2"], r["tp_rate3"]),
                     tp_ratios=(r["tp_ratio1"], r["tp_ratio2"], r["tp_ratio3"]),
-                    breakeven_buffer=r["breakeven_buffer"],
                 )
                 position = Position(
                     state=State(r["state"]),

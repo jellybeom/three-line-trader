@@ -56,7 +56,6 @@ class Params:
         0.50,
         0.10,
     )  # 최초 물량 대비 매도 비중
-    breakeven_buffer: float = 0.0  # 본절 버퍼 (예: 0.004 = 평단 +0.4%). 기본 0
 
     def __post_init__(self) -> None:
         if not (self.line1 > self.line2 > self.line3 > 0):
@@ -71,10 +70,6 @@ class Params:
             raise ValueError(
                 "매수 금액으로 최소 1주를 살 수 있어야 함: "
                 f"1차 {self.buy1_amount} (≥ 1선 {self.line1}), 2차 {self.buy2_amount} (≥ 2선 {self.line2})"
-            )
-        if not (0 <= self.breakeven_buffer < self.tp_rates[0]):
-            raise ValueError(
-                f"본절 버퍼는 0 이상, 1차 익절률({self.tp_rates[0]:.0%}) 미만이어야 함: {self.breakeven_buffer}"
             )
 
 
@@ -143,8 +138,8 @@ def _tp_price(pos: Position, params: Params, level: int) -> float:
 
 
 def _breakeven(pos: Position, params: Params) -> float:
-    """본절 청산 기준가 = 평단가 × (1 + 버퍼)."""
-    return pos.avg_price * (1 + params.breakeven_buffer)
+    """본절 청산 기준가 = 평단가."""
+    return pos.avg_price
 
 
 def _tp_sell_qty(pos: Position, params: Params, upto_level: int) -> int:

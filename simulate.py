@@ -17,6 +17,8 @@ import threading
 import time
 from datetime import date, datetime
 
+from dataclasses import replace
+
 from trader.state_machine import (
     Side,
     State,
@@ -89,6 +91,14 @@ class SimCore:
         while not self._bus.commands.empty():
             cmd = self._bus.commands.get_nowait()
             match cmd:
+                case bus.ConnectKiwoom():
+                    self._bus.events.put(bus.KiwoomStatus(True, "시뮬레이션"))
+                    self._bus.events.put(bus.Account(10_000_000))
+                    self._log(
+                        "시스템", "연결", "키움 연결 (시뮬레이션 — 실제 접속 없음)"
+                    )
+                case bus.RefreshAccount():
+                    self._bus.events.put(bus.Account(10_000_000))
                 case bus.SetTradeDate(date=d):
                     if self._running:
                         self._log(
@@ -123,20 +133,40 @@ class SimCore:
                     self._emit_position(s)
                     self._log(s, "등록", f"{n} (상태: {pos.state.value})")
                 case bus.SetFunds(
-                    total=t, max_symbols=m, buy1_amount=b1, buy2_amount=b2
+                    total=t,
+                    max_symbols=m,
+                    buy1_amount=b1,
+                    buy2_amount=b2,
+                    tp_rates=rates,
+                    tp_ratios=ratios,
                 ):
                     for key, val in (
                         ("funds_total", t),
                         ("funds_max", m),
                         ("funds_buy1", b1),
                         ("funds_buy2", b2),
+                        ("funds_rates", ",".join(map(str, rates))),
+                        ("funds_ratios", ",".join(map(str, ratios))),
                     ):
                         self._store.set_setting(key, str(val))
                     self._emit_funds()
+                    for s, e in self._entries.items():  # 대기 종목에 즉시 반영
+                        if e["pos"].state is State.WAITING:
+                            e["params"] = replace(
+                                e["params"],
+                                buy1_amount=b1,
+                                buy2_amount=b2,
+                                tp_rates=rates,
+                                tp_ratios=ratios,
+                            )
+                            self._store.register_symbol(
+                                self._date, s, e["name"], e["params"], e["pos"]
+                            )
+                            self._emit_position(s)
                     self._log(
                         "시스템",
                         "설정",
-                        f"자금 설정 적용: 총 {t:,.0f} / {m}종목 / 1차 {b1:,.0f} / 2차 {b2:,.0f}",
+                        f"전역 설정 적용: 총 {t:,.0f} / {m}종목 / 1차 {b1:,.0f} / 2차 {b2:,.0f}",
                     )
                 case bus.SetMode(real=real):
                     self._store.set_setting("mode", "실전" if real else "모의")
@@ -206,12 +236,16 @@ class SimCore:
         total = float(g("funds_total", "10000000"))
         max_n = int(g("funds_max", "10"))
         per_half = total / max_n / 2
+        rates = tuple(float(x) for x in g("funds_rates", "0.03,0.05,0.07").split(","))
+        ratios = tuple(float(x) for x in g("funds_ratios", "0.4,0.5,0.1").split(","))
         self._bus.events.put(
             bus.Funds(
                 total,
                 max_n,
                 float(g("funds_buy1", str(per_half))),
                 float(g("funds_buy2", str(per_half))),
+                rates,
+                ratios,
             )
         )
 

@@ -170,18 +170,6 @@ def test_극소량_보유시_매도수량_0이면_주문없이_상태만_전이(
     assert pos.state is State.CLOSED and pos.remaining == 0
 
 
-def test_본절_버퍼가_1차_익절률_이상이면_설정_에러():
-    with pytest.raises(ValueError):
-        Params(
-            line1=10_000,
-            line2=9_000,
-            line3=8_000,
-            buy1_amount=1_000_000,
-            buy2_amount=900_000,
-            breakeven_buffer=0.03,
-        )
-
-
 # ── 갭 처리: 중간 단계 생략 ─────────────────────────────────────
 
 
@@ -350,18 +338,3 @@ def test_잘못된_설정은_생성_시점에_실패():
             buy1_amount=9_999,
             buy2_amount=900_000,
         )
-
-
-def test_본절_버퍼_적용시_버퍼_가격에서_청산():
-    p = Params(
-        line1=10_000,
-        line2=9_000,
-        line3=8_000,
-        buy1_amount=1_000_000,
-        buy2_amount=900_000,
-        breakeven_buffer=0.004,
-    )
-    pos = run(Position(), [10_000, 10_300], p)
-    assert decide(pos, p, 10_041) is None  # 버퍼(10,040) 위 → 유지
-    d = decide(pos, p, 10_040)  # 평단 +0.4% 이하 → 청산
-    assert d.to_state is State.CLOSED

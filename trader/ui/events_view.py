@@ -19,7 +19,7 @@ class EventsView(ttk.Frame):
         super().__init__(master)
 
         bar = ttk.Frame(self)
-        bar.pack(fill="x", pady=(4, 4))  # 위아래 여백 동일하게
+        bar.pack(fill="x", pady=(2, 2))  # 위아래 여백 동일, 모니터와의 간격 최소화
         ttk.Label(bar, text="로그").pack(side="left", padx=(2, 0))
         ttk.Button(bar, text="내보내기", command=self._export).pack(
             side="right", padx=(4, 2)
@@ -51,6 +51,10 @@ class EventsView(ttk.Frame):
         if len(children) > _MAX_ROWS:
             self.tree.delete(children[0])
         self.tree.see(children[-1])  # 자동 스크롤
+
+    def deselect(self) -> None:
+        if sel := self.tree.selection():
+            self.tree.selection_remove(*sel)
 
     def _clear(self) -> None:
         self.tree.delete(*self.tree.get_children())
