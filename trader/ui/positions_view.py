@@ -1,7 +1,7 @@
 """포지션 모니터 — 상태·현재가·평단·잔량·수익률·실현손익·1/2/3선 표시.
 
 행 내 조작 (직관 UX):
-- 각 행 끝의 ✎(편집) / ✕(제외) 셀 클릭
+- 각 행 끝의 📈(차트, 추후 구현) / ✎(편집) / ✕(제외) 셀 클릭
 - 맨 아래 "＋ 종목 추가하기" 행 클릭 → 등록 창
 - 더블클릭 편집, 우클릭 메뉴(편집/리셋/제외)도 유지
 
@@ -19,6 +19,7 @@ from typing import Callable
 from trader.state_machine import Params, Position, State
 
 _COLUMNS = (
+    "code",
     "name",
     "state",
     "price",
@@ -29,10 +30,12 @@ _COLUMNS = (
     "line1",
     "line2",
     "line3",
+    "chart",
     "edit",
     "del",
 )
 _HEADINGS = (
+    "코드",
     "종목명",
     "상태",
     "현재가",
@@ -45,9 +48,10 @@ _HEADINGS = (
     "3선",
     "",
     "",
+    "",
 )
 _ADD_ROW = "__add__"
-_BASE_HEADINGS = {"#0": "코드", **dict(zip(_COLUMNS, _HEADINGS))}
+_BASE_HEADINGS = dict(zip(_COLUMNS, _HEADINGS))
 
 
 class PositionsView(ttk.Frame):
@@ -58,26 +62,28 @@ class PositionsView(ttk.Frame):
         on_edit: Callable[[str], None],
         on_reset: Callable[[str], None],
         on_delete: Callable[[str], None],
+        on_chart: Callable[[str], None],
     ):
         super().__init__(master)
         self._on_add = on_add
         self._on_edit = on_edit
         self._on_reset = on_reset
         self._on_delete = on_delete
+        self._on_chart = on_chart
         self._avg: dict[str, float] = {}  # 수익률 계산용 평단 캐시
         self._closed: set[str] = set()  # 종료 종목: 수익률을 종료 시점 값으로 고정
         self._sort_reverse: dict[str, bool] = {}
 
-        self.tree = ttk.Treeview(self, columns=_COLUMNS, show="tree headings")
-        self.tree.heading("#0", text="코드", command=lambda: self._sort("#0"))
-        self.tree.column("#0", width=76, stretch=False)
+        self.tree = ttk.Treeview(self, columns=_COLUMNS, show="headings")
         for col, head in zip(_COLUMNS, _HEADINGS):
             self.tree.heading(col, text=head, command=lambda c=col: self._sort(c))
-            if col in ("edit", "del"):
+            if col in ("chart", "edit", "del"):
                 self.tree.column(col, width=32, anchor="center", stretch=False)
+            elif col == "code":
+                self.tree.column(col, width=76, anchor="center", stretch=False)
             else:
                 width = 150 if col == "state" else (100 if col == "name" else 90)
-                anchor = "w" if col in ("name", "state") else "e"
+                anchor = "center" if col in ("name", "state") else "e"
                 self.tree.column(col, width=width, anchor=anchor)
 
         self.tree.tag_configure(
@@ -118,10 +124,18 @@ class PositionsView(ttk.Frame):
         if pos.state is State.CLOSED:
             self._closed.add(symbol)
             tag = "closed"
+            # 과거 조회 등 틱이 없어도 최종 수익률을 저장값으로 복원 표시
+            if pos.total_bought and pos.avg_price:
+                pnl_cell = (
+                    f"{pos.realized_pnl / (pos.avg_price * pos.total_bought):+.2%}"
+                )
+            else:
+                pnl_cell = "-"
         else:
             self._closed.discard(symbol)  # 관리자 리셋으로 되살아나면 다시 갱신
             tag = self.tree.item(symbol, "tags") if self.tree.exists(symbol) else ""
             tag = tag[0] if tag and tag[0] in ("profit", "loss") else ""
+            pnl_cell = self._cell(symbol, "pnl")
         realized = f"{pos.realized_pnl:+,.0f}" if pos.realized_pnl else "-"
         values = (
             name,
@@ -129,24 +143,21 @@ class PositionsView(ttk.Frame):
             self._cell(symbol, "price"),
             avg,
             qty,
-            self._cell(symbol, "pnl"),
+            pnl_cell,
             realized,
             f"{params.line1:,.0f}",
             f"{params.line2:,.0f}",
             f"{params.line3:,.0f}",
+            "📈",
             "✎",
             "✕",
         )
+        values = (symbol, *values)
         if self.tree.exists(symbol):
             self.tree.item(symbol, values=values, tags=(tag,) if tag else ())
         else:
             self.tree.insert(
-                "",
-                "end",
-                iid=symbol,
-                text=symbol,
-                values=values,
-                tags=(tag,) if tag else (),
+                "", "end", iid=symbol, values=values, tags=(tag,) if tag else ()
             )
         self._ensure_add_row()
 
@@ -186,10 +197,8 @@ class PositionsView(ttk.Frame):
     def _ensure_add_row(self) -> None:
         if not self.tree.exists(_ADD_ROW):
             values = [""] * len(_COLUMNS)
-            values[0] = "＋ 종목 추가하기"
-            self.tree.insert(
-                "", "end", iid=_ADD_ROW, text="", values=values, tags=("addrow",)
-            )
+            values[1] = "＋ 종목 추가하기"  # 종목명 열 아래에 표시
+            self.tree.insert("", "end", iid=_ADD_ROW, values=values, tags=("addrow",))
         self.tree.move(_ADD_ROW, "", "end")  # 항상 맨 아래 유지
 
     def _on_click(self, event) -> None:
@@ -199,12 +208,14 @@ class PositionsView(ttk.Frame):
         if row == _ADD_ROW:
             self._on_add()
             return
-        col_id = self.tree.identify_column(event.x)  # '#N'
+        col_id = self.tree.identify_column(event.x)  # '#N' (1부터)
         index = int(col_id.lstrip("#"))
-        if index == 0:
+        if index < 1:
             return
         col = _COLUMNS[index - 1]
-        if col == "edit":
+        if col == "chart":
+            self._on_chart(row)
+        elif col == "edit":
             self._on_edit(row)
         elif col == "del":
             self._confirm_delete(row)
@@ -227,13 +238,10 @@ class PositionsView(ttk.Frame):
     # ── 정렬 ────────────────────────────────────────────────────
 
     def _sort(self, col: str) -> None:
-        if col in ("edit", "del"):
+        if col in ("chart", "edit", "del"):
             return  # 조작 열은 정렬 대상 아님
         rows = [iid for iid in self.tree.get_children() if iid != _ADD_ROW]
-        if col == "#0":
-            keyed = [(iid, iid) for iid in rows]
-        else:
-            keyed = [(self.tree.set(iid, col), iid) for iid in rows]
+        keyed = [(self.tree.set(iid, col), iid) for iid in rows]
         reverse = self._sort_reverse[col] = not self._sort_reverse.get(col, False)
 
         def key(pair):
@@ -247,7 +255,7 @@ class PositionsView(ttk.Frame):
             self.tree.move(iid, "", i)
         self._ensure_add_row()
         for c, base in _BASE_HEADINGS.items():  # 정렬 기준 열에 방향 표시
-            if c in ("edit", "del"):
+            if c in ("chart", "edit", "del"):
                 continue
             arrow = (" ▼" if reverse else " ▲") if c == col else ""
             self.tree.heading(c, text=base + arrow)

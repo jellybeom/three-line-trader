@@ -1,52 +1,54 @@
 """이벤트 로그 뷰 — 시간순 표시(YYYY-MM-DD HH:MM:SS), 최근 500줄 유지.
 
-'지우기'는 화면 표시만 비운다 — DB 의 events 이력은 그대로 보존된다.
-'내보내기'는 현재 표시 중인 로그를 CSV 파일로 저장한다.
+우클릭 메뉴: '로그 지우기'는 화면 표시만 비운다 (DB 의 events 이력은 보존),
+'CSV 내보내기'는 현재 표시 중인 로그를 파일로 저장한다.
 """
 
 from __future__ import annotations
 
 import csv
 from datetime import datetime
+import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 _MAX_ROWS = 500
-_COLUMNS = ("ts", "symbol", "kind", "text")
+_COLUMNS = ("ts", "symbol", "name", "kind", "text")
 
 
 class EventsView(ttk.Frame):
     def __init__(self, master):
         super().__init__(master)
 
-        bar = ttk.Frame(self)
-        bar.pack(fill="x", pady=(2, 2))  # 위아래 여백 동일, 모니터와의 간격 최소화
-        ttk.Label(bar, text="로그").pack(side="left", padx=(2, 0))
-        ttk.Button(bar, text="내보내기", command=self._export).pack(
-            side="right", padx=(4, 2)
-        )
-        ttk.Button(bar, text="지우기", command=self._clear).pack(
-            side="right", padx=(4, 2)
-        )
-
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(body, columns=_COLUMNS, show="headings", height=8)
         for col, head, width in (
             ("ts", "시각", 150),
-            ("symbol", "종목", 80),
+            ("symbol", "코드", 80),
+            ("name", "종목명", 90),
             ("kind", "종류", 60),
-            ("text", "내용", 520),
+            ("text", "내용", 460),
         ):
             self.tree.heading(col, text=head)
-            self.tree.column(col, width=width, stretch=(col == "text"))
+            self.tree.column(
+                col,
+                width=width,
+                stretch=(col == "text"),
+                anchor="w" if col == "text" else "center",
+            )
 
         scroll = ttk.Scrollbar(body, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-    def append(self, ts: str, symbol: str, kind: str, text: str) -> None:
-        self.tree.insert("", "end", values=(ts, symbol, kind, text))
+        self._menu = tk.Menu(self, tearoff=0)
+        self._menu.add_command(label="로그 지우기 (화면만)", command=self._clear)
+        self._menu.add_command(label="CSV 내보내기", command=self._export)
+        self.tree.bind("<Button-3>", lambda e: self._menu.post(e.x_root, e.y_root))
+
+    def append(self, ts: str, symbol: str, name: str, kind: str, text: str) -> None:
+        self.tree.insert("", "end", values=(ts, symbol, name, kind, text))
         children = self.tree.get_children()
         if len(children) > _MAX_ROWS:
             self.tree.delete(children[0])
@@ -75,6 +77,6 @@ class EventsView(ttk.Frame):
             path, "w", newline="", encoding="utf-8-sig"
         ) as f:  # 엑셀 한글 호환 BOM
             writer = csv.writer(f)
-            writer.writerow(["시각", "종목", "종류", "내용"])
+            writer.writerow(["시각", "코드", "종목명", "종류", "내용"])
             writer.writerows(rows)
         messagebox.showinfo("완료", f"로그 {len(rows)}건을 저장했습니다.\n{path}")

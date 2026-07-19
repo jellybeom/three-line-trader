@@ -71,6 +71,9 @@ class SimCore:
         self._bus.events.put(
             bus.Mode(self._store.get_setting("mode", "모의") == "실전")
         )
+        self._bus.events.put(
+            bus.NotifyLevel(self._store.get_setting("notify_level", "전체"))
+        )
 
         while True:
             self._handle_commands()
@@ -99,6 +102,12 @@ class SimCore:
                     )
                 case bus.RefreshAccount():
                     self._bus.events.put(bus.Account(10_000_000))
+                case bus.LookupSymbol(symbol=s):
+                    self._bus.events.put(bus.SymbolInfo(s, f"시뮬종목{s[-2:]}"))
+                case bus.SetNotifyLevel(level=lv):
+                    self._store.set_setting("notify_level", lv)
+                    self._bus.events.put(bus.NotifyLevel(lv))
+                    self._log("시스템", "설정", f"Discord 알림 수준: {lv}")
                 case bus.SetTradeDate(date=d):
                     if self._running:
                         self._log(

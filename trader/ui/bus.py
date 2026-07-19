@@ -48,6 +48,21 @@ class Mode:
 
 
 @dataclass(frozen=True)
+class SymbolInfo:
+    """종목코드 조회 결과."""
+
+    symbol: str
+    name: str
+
+
+@dataclass(frozen=True)
+class NotifyLevel:
+    """Discord 알림 수준 (시작 시 복원값 또는 변경 확정값)."""
+
+    level: str
+
+
+@dataclass(frozen=True)
 class TradeDate:
     """현재 활성 매매일. UI 는 수신 시 테이블을 비우고 이어지는 PositionUpdate 로 다시 채운다."""
 
@@ -140,6 +155,20 @@ class ConnectKiwoom:
 @dataclass(frozen=True)
 class RefreshAccount:
     """예수금(주문가능금액) 새로고침."""
+
+
+@dataclass(frozen=True)
+class LookupSymbol:
+    """종목코드 → 종목명 조회 요청 (등록 창의 '조회' 버튼)."""
+
+    symbol: str
+
+
+@dataclass(frozen=True)
+class SetNotifyLevel:
+    """Discord 알림 수준 변경 (전체 / 매매만 / 에러만 / 끔)."""
+
+    level: str
 
 
 @dataclass(frozen=True)

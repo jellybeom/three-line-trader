@@ -78,6 +78,9 @@ class Core:
         self._emit_date_loaded()
         self._emit_funds()
         self._bus.events.put(bus.Mode(self._mode_real))
+        self._bus.events.put(
+            bus.NotifyLevel(self._store.get_setting("notify_level", "전체"))
+        )
         self._bus.events.put(bus.WatchStatus(False))
         self._log(
             "시스템",
@@ -113,6 +116,16 @@ class Core:
                 await self._connect()
             case bus.RefreshAccount():
                 await self._refresh_account()
+            case bus.LookupSymbol(symbol=s):
+                if self._broker is None:
+                    self._log(s, "에러", "종목명 조회는 키움 연결 후 가능합니다")
+                    return
+                name, _ = await asyncio.to_thread(self._broker.stock_info, s)
+                self._bus.events.put(bus.SymbolInfo(s, name))
+            case bus.SetNotifyLevel(level=lv):
+                self._store.set_setting("notify_level", lv)
+                self._bus.events.put(bus.NotifyLevel(lv))
+                self._log("시스템", "설정", f"Discord 알림 수준: {lv}")
             case bus.Register(symbol=s, name=n, params=p, position=pos):
                 if pos is None:  # 편집: 현재 포지션 유지
                     if s not in self._entries:
