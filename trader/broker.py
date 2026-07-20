@@ -106,13 +106,45 @@ class Broker:
 
     # ── 계좌 조회 ───────────────────────────────────────────────
 
+    # 주문가능금액 후보 (우선순위 순). 모의/실전 서버가 채우는 필드가 달라
+    # "존재 여부"가 아니라 "0이 아닌 첫 값"을 채택한다 — 실전에서 ord_alow_amt 가
+    # 0으로 오고 실제 금액이 다른 필드에 있는 경우를 실측했다.
+    # fc_stk_krw_repl_set_amt: 해외주식 원화주문(통합증거금) 서비스 계좌에서
+    # 원화 예수금이 대용 설정되어 이 필드에만 잡히는 사례 실측 (2026-07-21).
+    _DEPOSIT_KEYS = (
+        "ord_alow_amt",
+        "100stk_ord_alow_amt",
+        "entr",
+        "d2_entra",
+        "wthd_alow_amt",
+        "fc_stk_krw_repl_set_amt",
+    )
+
     def deposit(self) -> float:
-        """주문가능금액 (예수금 방어의 기준). 필드 후보를 순서대로 탐색한다."""
-        data = self._request(_PATH_ACCOUNT, _TR_DEPOSIT, {"qry_tp": "2"})
-        for key in ("ord_alow_amt", "100stk_ord_alow_amt", "entr"):
-            if data.get(key) not in (None, ""):
-                return float(data[key])
-        raise BrokerError(f"주문가능금액 필드를 찾지 못함: {list(data.keys())}")
+        """주문가능금액 (예수금 방어의 기준). 일반조회 → 추정조회 순으로 시도한다."""
+        found_any = False
+        for qry_tp in ("2", "3"):
+            data = self.deposit_detail(qry_tp)
+            for key in self._DEPOSIT_KEYS:
+                raw = data.get(key)
+                if raw in (None, ""):
+                    continue
+                try:
+                    value = float(raw)
+                except (ValueError, TypeError):
+                    continue
+                found_any = True
+                if value > 0:
+                    return value
+        if found_any:  # 전 후보가 0 — 실제 잔고 없음
+            return 0.0
+        raise BrokerError(
+            "주문가능금액 필드를 찾지 못함 (kt00001 응답 필드 변경 가능성)"
+        )
+
+    def deposit_detail(self, qry_tp: str = "2") -> dict:
+        """예수금상세현황(kt00001) 원본 응답 — 필드 진단용. qry_tp 2=일반, 3=추정."""
+        return self._request(_PATH_ACCOUNT, _TR_DEPOSIT, {"qry_tp": qry_tp})
 
     def holdings(self) -> dict[str, int]:
         """계좌 실제 보유 수량 {종목코드: 잔량} — 시작 시 reconcile 용."""

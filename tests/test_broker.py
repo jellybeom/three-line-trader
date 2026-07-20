@@ -86,6 +86,39 @@ def test_주문가능금액_필드_후보_탐색(auth, monkeypatch):
     assert Broker(auth).deposit() == 950000  # 우선순위 높은 필드 사용
 
 
+def test_실전처럼_우선_필드가_0이면_다음_후보의_실제_값_채택(auth, monkeypatch):
+    _capture(
+        monkeypatch,
+        body={
+            "return_code": 0,
+            "ord_alow_amt": "000000000000",
+            "100stk_ord_alow_amt": "0",
+            "entr": "000000500000",
+        },
+    )
+    assert Broker(auth).deposit() == 500000
+
+
+def test_실측_해외주식_원화대용_계좌는_폴백_필드_채택(auth, monkeypatch):
+    # 2026-07-21 실전 실측: 일반 현금 필드 전부 0, 대용 설정 필드에만 실제 금액
+    _capture(
+        monkeypatch,
+        body={
+            "return_code": 0,
+            "entr": "000000000000000",
+            "ord_alow_amt": "000000000000000",
+            "fc_stk_krw_repl_set_amt": "000000001005766",
+            "mdstrm_usfe": "000000000000145",
+        },
+    )
+    assert Broker(auth).deposit() == 1_005_766
+
+
+def test_전_후보가_0이면_잔고없음_0원(auth, monkeypatch):
+    _capture(monkeypatch, body={"return_code": 0, "ord_alow_amt": "0", "entr": "0"})
+    assert Broker(auth).deposit() == 0
+
+
 def test_보유잔고는_A접두_제거하고_잔량만(auth, monkeypatch):
     _capture(
         monkeypatch,

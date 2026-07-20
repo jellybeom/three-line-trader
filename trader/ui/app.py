@@ -27,7 +27,13 @@ from trader.state_machine import State
 from trader.ui import bus
 
 try:
-    from tkcalendar import DateEntry  # 캘린더 드롭다운 (uv add tkcalendar)
+    import warnings
+
+    with (
+        warnings.catch_warnings()
+    ):  # tkcalendar 소스의 이스케이프 결함 경고 억제 (동작 무관)
+        warnings.filterwarnings("ignore", category=SyntaxWarning)
+        from tkcalendar import DateEntry  # 캘린더 드롭다운 (uv add tkcalendar)
 except ImportError:
     DateEntry = None
 from trader.ui.events_view import EventsView

@@ -37,7 +37,17 @@ async def main() -> None:
     broker = Broker(auth)
     name, price = broker.stock_info(symbol)
     print(f"      종목정보: {symbol} {name} · 현재가 {price:,.0f}")
-    print(f"      주문가능금액: {broker.deposit():,.0f}")
+    deposit = broker.deposit()
+    print(f"      주문가능금액: {deposit:,.0f}")
+    if deposit == 0:  # 실전 필드 진단: 일반/추정 조회 각각 0이 아닌 필드를 보여준다
+        for qry_tp, label in (("2", "일반조회"), ("3", "추정조회")):
+            print(f"      [진단] 예수금 응답({label})의 0이 아닌 필드:")
+            for k, v in broker.deposit_detail(qry_tp).items():
+                try:
+                    if float(v) != 0:
+                        print(f"        {k} = {v}")
+                except (TypeError, ValueError):
+                    continue
     holdings = broker.holdings()
     print(f"      보유잔고: {holdings if holdings else '없음'}")
 
