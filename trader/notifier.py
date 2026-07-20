@@ -48,6 +48,37 @@ def should_notify(level: str, symbol: str, kind: str) -> bool:
     return True  # 전체
 
 
+def format_trade(
+    name: str,
+    symbol: str,
+    reason: str,
+    qty: int,
+    price: float,
+    closed_pnl: float | None = None,
+) -> str:
+    """매매 알림 전용 요약 — 과정("1선 이탈" 등)은 빼고 결과만 담는다.
+
+    예) 🟢 **삼성전자(005930)** 1차 매수 — 38주 @ 13,170
+        💰 **삼성전자(005930)** 2차 익절 — 50주 @ 72,400
+        🛑 **흥구석유(024060)** 전량 손절 — 76주 @ 13,068  ␤  실현손익 **-4,750원**
+    """
+    result = reason.split("→")[-1].strip()  # Decision.reason 의 "과정 → 결과" 중 결과부
+    if "손절" in result:
+        icon = "🛑"
+    elif "익절" in result or "본절" in result or "청산" in result:
+        icon = "💰"
+    elif "매수" in result:
+        icon = "🟢"
+    else:
+        icon = "⚪"  # 진입 금지 종료 등
+    msg = f"{icon} **{name}({symbol})** {result}"
+    if qty > 0:
+        msg += f" — {qty}주 @ {price:,.0f}"
+    if closed_pnl is not None:
+        msg += f"\n실현손익 **{closed_pnl:+,.0f}원**"
+    return msg
+
+
 def format_message(symbol: str, kind: str, text: str) -> str:
     prefix = f"**[{kind}]**"
     return f"{prefix} {text}" if symbol == "시스템" else f"{prefix} {symbol} · {text}"

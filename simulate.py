@@ -27,7 +27,13 @@ from trader.state_machine import (
     decide,
     mark_pending,
 )
-from trader.notifier import DiscordNotifier, format_message, load_webhook, should_notify
+from trader.notifier import (
+    DiscordNotifier,
+    format_message,
+    format_trade,
+    load_webhook,
+    should_notify,
+)
 from trader.store import Store
 from trader.ui import bus
 
@@ -272,9 +278,31 @@ class SimCore:
         self._store.save_transition(self._date, symbol, from_state, pos, d, price)
         self._emit_position(symbol)
         text = d.reason
-        if pos.state.value == "종료":
+        if pos.state is State.CLOSED:
             text += f" (실현손익 {pos.realized_pnl:+,.0f})"
-        self._log(symbol, "전이", text)
+        self._log(symbol, "전이", text, notify=False)
+        # 매매 요약 알림: 체결(주문 전이) 또는 종료 전이만 — 수량 0 익절 전이는 제외
+        if d.side is not None or pos.state is State.CLOSED:
+            if self._notifier and should_notify(self._notify_level, symbol, "체결"):
+                pnl = (
+                    pos.realized_pnl
+                    if pos.state is State.CLOSED and pos.total_bought
+                    else None
+                )
+                threading.Thread(
+                    target=self._send_discord,
+                    daemon=True,
+                    args=(
+                        format_trade(
+                            e["name"],
+                            symbol,
+                            d.reason,
+                            d.qty if d.side is not None else 0,
+                            price,
+                            pnl,
+                        ),
+                    ),
+                ).start()
 
     # ── 이벤트 발행 (코어 → UI) ─────────────────────────────────
 
@@ -302,8 +330,24 @@ class SimCore:
             )
         )
 
-    def _log(self, symbol: str, kind: str, text: str) -> None:
+    def _log(self, symbol: str, kind: str, text: str, notify: bool = True) -> None:
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
+        if (
+            notify
+            and self._notifier
+            and should_notify(self._notify_level, symbol, kind)
+        ):
+            threading.Thread(
+                target=self._send_discord,
+                args=(format_message(symbol, kind, text),),
+                daemon=True,
+            ).start()
+
+    def _send_discord(self, text: str) -> None:
+        try:
+            self._notifier.send(text)
+        except Exception as e:  # noqa: BLE001 — 발송 실패가 재귀 알림이 되지 않게
+            self._log("시스템", "경고", f"Discord 발송 실패: {e}", notify=False)
 
 
 def main() -> None:

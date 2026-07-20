@@ -24,7 +24,13 @@ from datetime import date, datetime
 
 from trader.broker import Broker, BrokerError, extract_fill
 from trader.kiwoom import KiwoomAuthError, load_auth
-from trader.notifier import DiscordNotifier, format_message, load_webhook, should_notify
+from trader.notifier import (
+    DiscordNotifier,
+    format_message,
+    format_trade,
+    load_webhook,
+    should_notify,
+)
 from dataclasses import replace
 
 from trader.state_machine import (
@@ -303,6 +309,19 @@ class Core:
         self._bus.events.put(bus.DiscordStatus(True, ""))
         self._log("시스템", "연결", f"Discord 연결됨 (알림 수준: {self._notify_level})")
 
+    def _notify_trade(self, symbol: str, reason: str, qty: int, price: float) -> None:
+        """체결 확정·종료 전이 시 사용자 친화 요약을 Discord 로 발송한다."""
+        if not (self._notifier and should_notify(self._notify_level, symbol, "체결")):
+            return
+        e = self._entries[symbol]
+        pos = e["pos"]
+        pnl = (
+            pos.realized_pnl if pos.state is State.CLOSED and pos.total_bought else None
+        )
+        asyncio.create_task(
+            self._send_discord(format_trade(e["name"], symbol, reason, qty, price, pnl))
+        )
+
     async def _send_discord(self, text: str) -> None:
         try:
             await asyncio.to_thread(self._notifier.send, text)
@@ -360,7 +379,11 @@ class Core:
                 self._date, symbol, from_state, e["pos"], d, price
             )
             self._emit_position(symbol)
-            self._log(symbol, "전이", d.reason)
+            self._log(symbol, "전이", d.reason, notify=False)
+            if (
+                e["pos"].state is State.CLOSED
+            ):  # 진입 금지 등 종료만 알림 (수량 0 익절 전이는 제외)
+                self._notify_trade(symbol, d.reason, 0, price)
             return
 
         if d.side is Side.BUY and not await self._can_buy(symbol, d, price):
@@ -388,6 +411,7 @@ class Core:
             symbol,
             "주문",
             f"{d.side.value} {d.qty}주 시장가 접수 (주문번호 {order_no}) — {d.reason}",
+            notify=False,
         )
 
     async def _can_buy(self, symbol: str, d: Decision, price: float) -> bool:
@@ -460,8 +484,8 @@ class Core:
         text = f"{d.reason} → 체결 {fill.filled_qty}주 @ {fill.fill_price:,.0f}"
         if e["pos"].state is State.CLOSED:
             text += f" (실현손익 {e['pos'].realized_pnl:+,.0f})"
-            self._notify(symbol, text)
-        self._log(symbol, "체결", text)
+        self._log(symbol, "체결", text, notify=False)
+        self._notify_trade(symbol, d.reason, fill.filled_qty, fill.fill_price)
 
     def _check_pending_timeout(self) -> None:
         for order_no, info in self._pending.items():
