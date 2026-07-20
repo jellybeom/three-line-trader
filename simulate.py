@@ -27,6 +27,7 @@ from trader.state_machine import (
     decide,
     mark_pending,
 )
+from trader.notifier import DiscordNotifier, format_message, load_webhook, should_notify
 from trader.store import Store
 from trader.ui import bus
 
@@ -46,6 +47,8 @@ class SimCore:
         self._store = store
         self._running = False
         self._date = date.today().isoformat()  # 활성 매매일
+        self._notifier: DiscordNotifier | None = None
+        self._notify_level = store.get_setting("notify_level", "전체")
         # symbol -> {"name", "params", "pos", "price"}
         self._entries: dict[str, dict] = {}
         self._load_date(self._date)
@@ -104,7 +107,27 @@ class SimCore:
                     self._bus.events.put(bus.Account(10_000_000))
                 case bus.LookupSymbol(symbol=s):
                     self._bus.events.put(bus.SymbolInfo(s, f"시뮬종목{s[-2:]}"))
+                case bus.ConnectDiscord():
+                    try:
+                        notifier = DiscordNotifier(load_webhook())
+                        notifier.send(
+                            "🔔 three-line-trader 연결되었습니다 (시뮬레이터)"
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        self._bus.events.put(bus.DiscordStatus(False, "연결 실패"))
+                        self._log(
+                            "시스템", "에러", f"Discord 연결 실패: {e}", notify=False
+                        )
+                    else:
+                        self._notifier = notifier
+                        self._bus.events.put(bus.DiscordStatus(True, ""))
+                        self._log(
+                            "시스템",
+                            "연결",
+                            f"Discord 연결됨 (알림 수준: {self._notify_level})",
+                        )
                 case bus.SetNotifyLevel(level=lv):
+                    self._notify_level = lv
                     self._store.set_setting("notify_level", lv)
                     self._bus.events.put(bus.NotifyLevel(lv))
                     self._log("시스템", "설정", f"Discord 알림 수준: {lv}")
@@ -122,6 +145,13 @@ class SimCore:
                         f"매매일 {d} 리스트 로드 ({len(self._entries)}종목)",
                     )
                 case bus.Register(symbol=s, name=n, params=p, position=pos):
+                    if self._running:
+                        self._log(
+                            s,
+                            "에러",
+                            "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
+                        )
+                        continue
                     if pos is None:  # 편집: 현재 포지션 유지, 설정만 교체
                         pos = self._entries[s]["pos"] if s in self._entries else None
                     if pos is None:
@@ -149,6 +179,13 @@ class SimCore:
                     tp_rates=rates,
                     tp_ratios=ratios,
                 ):
+                    if self._running:
+                        self._log(
+                            "시스템",
+                            "에러",
+                            "감시 중에는 설정을 변경할 수 없습니다 — 먼저 중지하세요",
+                        )
+                        continue
                     for key, val in (
                         ("funds_total", t),
                         ("funds_max", m),
@@ -186,6 +223,13 @@ class SimCore:
                         f"{'실전' if real else '모의'}투자 모드로 전환",
                     )
                 case bus.Delete(symbol=s):
+                    if self._running:
+                        self._log(
+                            s,
+                            "에러",
+                            "감시 중에는 삭제할 수 없습니다 — 먼저 중지하세요",
+                        )
+                        continue
                     self._store.delete_symbol(self._date, s)
                     self._entries.pop(s, None)
                     self._bus.events.put(bus.SymbolRemoved(s))

@@ -24,7 +24,7 @@ class EventsView(ttk.Frame):
         self.tree = ttk.Treeview(body, columns=_COLUMNS, show="headings", height=8)
         for col, head, width in (
             ("ts", "시각", 150),
-            ("symbol", "코드", 80),
+            ("symbol", "대상", 80),
             ("name", "종목명", 90),
             ("kind", "종류", 60),
             ("text", "내용", 460),
@@ -77,6 +77,6 @@ class EventsView(ttk.Frame):
             path, "w", newline="", encoding="utf-8-sig"
         ) as f:  # 엑셀 한글 호환 BOM
             writer = csv.writer(f)
-            writer.writerow(["시각", "코드", "종목명", "종류", "내용"])
+            writer.writerow(["시각", "대상", "종목명", "종류", "내용"])
             writer.writerows(rows)
         messagebox.showinfo("완료", f"로그 {len(rows)}건을 저장했습니다.\n{path}")

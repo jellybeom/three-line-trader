@@ -41,15 +41,11 @@ async def main() -> None:
     holdings = broker.holdings()
     print(f"      보유잔고: {holdings if holdings else '없음'}")
 
-    if do_buy1:
-        if not auth.mock:
-            sys.exit("--buy1 은 모의투자(mock=true)에서만 허용됩니다.")
-        order_no = broker.buy(symbol, 1)
-        print(
-            f"      [모의] 시장가 1주 매수 주문 접수: 주문번호 {order_no} (체결통보는 아래 WS 로 확인)"
-        )
+    if do_buy1 and not auth.mock:
+        sys.exit("--buy1 은 모의투자(mock=true)에서만 허용됩니다.")
 
     received = 0
+    connected = asyncio.Event()
 
     async def on_tick(tick: Tick) -> None:
         nonlocal received
@@ -58,6 +54,8 @@ async def main() -> None:
 
     async def on_status(msg: str) -> None:
         print(f"[3/4] {msg}")
+        if "연결" in msg and "끊김" not in msg:
+            connected.set()
 
     async def on_fill(values: dict) -> None:
         fill = extract_fill(values)
@@ -67,10 +65,21 @@ async def main() -> None:
     await watcher.update_symbols([symbol])
 
     print("[3/4] WebSocket 접속·로그인 시도...")
-    print(
-        f"[4/4] {symbol} 실시간 등록 후 {_TIMEOUT}초간 수신 대기 (장중이 아니면 틱 없음이 정상)"
-    )
     task = asyncio.create_task(watcher.run())
+    try:
+        await asyncio.wait_for(connected.wait(), timeout=15)
+    except TimeoutError:
+        sys.exit("WebSocket 연결 실패 — 네트워크/키 확인 필요")
+
+    if do_buy1:  # 반드시 WS 등록 '후' 주문해야 체결통보를 놓치지 않는다
+        order_no = broker.buy(symbol, 1)
+        print(
+            f"      [모의] 시장가 1주 매수 주문 접수: 주문번호 {order_no} → 체결통보 대기"
+        )
+
+    print(
+        f"[4/4] {symbol} 실시간 수신 {_TIMEOUT}초 대기 (장중이 아니면 틱 없음이 정상)"
+    )
     await asyncio.sleep(_TIMEOUT)
     await watcher.stop()
     task.cancel()

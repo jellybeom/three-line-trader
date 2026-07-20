@@ -15,11 +15,13 @@ settings 테이블에 저장되어 재시작 시 복원된다.
 
 from __future__ import annotations
 
+import csv
 import queue
+import re
 import tkinter as tk
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from trader.state_machine import State
 from trader.ui import bus
@@ -33,6 +35,73 @@ from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
 
 _POLL_MS = 200
+_CODE_PATTERN = re.compile(r"^['\u2019A]*(\d{6})$")  # 영웅문은 '096770 처럼 따옴표 접두
+_NUMERIC_CELL = re.compile(r"^[\d,.+\-%\s]*$")
+
+
+def parse_watchlist_csv(path: str) -> list[tuple[str, str]]:
+    """영웅문 관심종목 CSV → [(종목코드, 종목명)].
+
+    1순위: 헤더 행에 '종목코드'/'종목명' 열이 있으면 그 열을 그대로 사용 (영웅문 형식).
+    2순위: 헤더가 없으면 휴리스틱 — 행에서 6자리 코드를 찾고 주변의 첫 텍스트 셀을 종목명으로.
+    """
+    for enc in ("cp949", "utf-8-sig"):
+        try:
+            with open(path, newline="", encoding=enc) as f:
+                rows = list(csv.reader(f))
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise ValueError("CSV 인코딩을 해석할 수 없습니다 (cp949 / utf-8 지원)")
+
+    def extract_code(cell: str) -> str | None:
+        m = _CODE_PATTERN.match(cell.strip().strip('"'))
+        return m.group(1) if m else None
+
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    header = rows[0] if rows else []
+    code_idx = next((i for i, c in enumerate(header) if "종목코드" in c), None)
+    name_idx = next((i for i, c in enumerate(header) if "종목명" in c), None)
+
+    if code_idx is not None:  # 영웅문 등 헤더 있는 형식
+        for row in rows[1:]:
+            if len(row) <= code_idx:
+                continue
+            code = extract_code(row[code_idx])
+            if not code or code in seen:
+                continue
+            name = (
+                row[name_idx].strip().strip('"')
+                if (name_idx is not None and len(row) > name_idx)
+                else ""
+            )
+            seen.add(code)
+            result.append((code, name or code))
+        return result
+
+    for row in rows:  # 헤더 없는 형식: 휴리스틱
+        code = name = None
+        for i, cell in enumerate(row):
+            code = extract_code(cell)
+            if not code:
+                continue
+            for j in list(range(i + 1, len(row))) + list(
+                range(i)
+            ):  # 코드 뒤 → 앞 순서로 탐색
+                c = row[j].strip().strip('"')
+                if len(c) >= 2 and not _NUMERIC_CELL.match(c):
+                    name = c
+                    break
+            break
+        if code and code not in seen:
+            seen.add(code)
+            result.append((code, name or code))
+    return result
+
+
 _ASSETS = Path(__file__).resolve().parents[2] / "assets"
 
 
@@ -47,6 +116,9 @@ class App(tk.Tk):
             {}
         )  # symbol -> (name, params, position)
         self._last_price: dict[str, float] = {}  # 평가손익 계산용
+        self._staged: dict[str, str] = (
+            {}
+        )  # CSV 로 불러온 3선 미입력 종목 {코드: 종목명}
         self._last_tick: str = "--:--:--"
         self._current_date: str = datetime.now().strftime("%Y-%m-%d")
 
@@ -118,25 +190,33 @@ class App(tk.Tk):
         box = ttk.Frame(g_date)
         box.pack(expand=True)
         self._date_var = tk.StringVar()
+        line = ttk.Frame(box)
+        line.pack(pady=(0, 3))
+        ttk.Button(line, text="◀", width=2, command=lambda: self._shift_date(-1)).pack(
+            side="left", padx=(0, 3)
+        )
         if DateEntry:  # 날짜 영역을 클릭해도 캘린더가 펼쳐지도록 바인딩
             self._date_picker = DateEntry(
-                box,
+                line,
                 textvariable=self._date_var,
                 date_pattern="yyyy-mm-dd",
                 width=11,
                 justify="center",
                 state="readonly",
             )
-            self._date_picker.pack(pady=(0, 3))
+            self._date_picker.pack(side="left")
             self._date_picker.bind(
                 "<<DateEntrySelected>>", lambda _e: self._change_date()
             )
             self._date_picker.bind("<Button-1>", self._open_calendar)
         else:  # tkcalendar 미설치: 직접 입력 (Enter 로 이동)
             self._date_picker = None
-            e = ttk.Entry(box, textvariable=self._date_var, width=12, justify="center")
-            e.pack(pady=(0, 3))
+            e = ttk.Entry(line, textvariable=self._date_var, width=12, justify="center")
+            e.pack(side="left")
             e.bind("<Return>", lambda _e: self._change_date())
+        ttk.Button(line, text="▶", width=2, command=lambda: self._shift_date(1)).pack(
+            side="left", padx=(3, 0)
+        )
         self._weekday = ttk.Label(box, text="-", anchor="center")
         self._weekday.pack(fill="x")
 
@@ -272,6 +352,7 @@ class App(tk.Tk):
             on_reset=self._reset,
             on_delete=self._delete,
             on_chart=self._open_chart,
+            on_csv=self._import_csv,
         )
         self.events = EventsView(paned)
         paned.add(self.positions, weight=5)
@@ -302,9 +383,21 @@ class App(tk.Tk):
     # ── 사용자 조작 → 명령 큐 ───────────────────────────────────
 
     def _toggle_run(self) -> None:
+        if not self._running and self._staged:
+            messagebox.showwarning(
+                "감시 시작 불가",
+                f"3선 가격이 입력되지 않은 종목이 {len(self._staged)}개 있습니다.\n"
+                "각 종목의 ✎ 를 눌러 가격을 입력하거나 ✕ 로 제외한 뒤 시작하세요.",
+            )
+            return
         self._bus.commands.put(bus.SetRunning(not self._running))
 
     def _open_register(self) -> None:
+        if self._running:
+            messagebox.showwarning(
+                "변경 불가", "감시 중에는 변경할 수 없습니다. 먼저 중지하세요."
+            )
+            return
         if self._funds is None:
             messagebox.showwarning("안내", "전역 자금 설정이 로드되지 않았습니다.")
             return
@@ -318,7 +411,23 @@ class App(tk.Tk):
         )
 
     def _open_edit(self, symbol: str | None) -> None:
-        if not symbol or symbol not in self._registry or self._funds is None:
+        if not symbol or self._funds is None:
+            return
+        if self._running:
+            messagebox.showwarning(
+                "변경 불가", "감시 중에는 변경할 수 없습니다. 먼저 중지하세요."
+            )
+            return
+
+        if symbol in self._staged:  # CSV 대기 종목: 3선 입력 → 정식 등록
+            RegisterDialog(
+                self,
+                on_submit=self._bus.commands.put,
+                funds=self._funds,
+                prefill=(symbol, self._staged[symbol]),
+            )
+            return
+        if symbol not in self._registry:
             return
         name, params, _pos = self._registry[symbol]
         RegisterDialog(
@@ -328,14 +437,58 @@ class App(tk.Tk):
             edit=(symbol, name, params),
         )
 
+    def _import_csv(self) -> None:
+        if self._running:
+            messagebox.showwarning(
+                "변경 불가", "감시 중에는 변경할 수 없습니다. 먼저 중지하세요."
+            )
+            return
+        path = filedialog.askopenfilename(
+            title="관심종목 CSV 선택",
+            filetypes=[("CSV", "*.csv"), ("모든 파일", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            items = parse_watchlist_csv(path)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("불러오기 실패", str(e))
+            return
+        added = 0
+        for code, name in items:
+            if code in self._registry or code in self._staged:
+                continue
+            self._staged[code] = name
+            self.positions.upsert_staged(code, name)
+            added += 1
+        if not items:
+            messagebox.showwarning("불러오기", "CSV 에서 종목코드를 찾지 못했습니다.")
+            return
+        messagebox.showinfo(
+            "불러오기 완료",
+            f"{added}종목을 불러왔습니다 (중복 {len(items) - added}종목 제외).\n"
+            "각 종목의 ✎ 를 눌러 1·2·3선 가격을 입력해야 감시를 시작할 수 있습니다.",
+        )
+
     def _reset(self, symbol: str | None) -> None:
         if symbol:
             self._bus.commands.put(bus.Reset(symbol))
 
     def _delete(self, symbol: str | None) -> None:
         # 확인창은 PositionsView 가 담당한다 (여기서 또 물으면 이중 확인)
-        if symbol:
-            self._bus.commands.put(bus.Delete(symbol))
+        if not symbol:
+            return
+        if self._running:
+            messagebox.showwarning(
+                "변경 불가", "감시 중에는 변경할 수 없습니다. 먼저 중지하세요."
+            )
+            return
+
+        if symbol in self._staged:  # 대기 종목은 코어에 없음 — UI 에서만 제거
+            del self._staged[symbol]
+            self.positions.remove(symbol)
+            return
+        self._bus.commands.put(bus.Delete(symbol))
 
     def _on_mode_selected(self, _event=None) -> None:
         want_real = self._mode_var.get() == "실전"
@@ -368,6 +521,11 @@ class App(tk.Tk):
         self._funds_vars["buy2"].set(f"{half:,}")
 
     def _apply_funds(self) -> None:
+        if self._running:
+            messagebox.showwarning(
+                "변경 불가", "감시 중에는 변경할 수 없습니다. 먼저 중지하세요."
+            )
+            return
         from trader.state_machine import Params  # 검증 규칙 재사용
 
         v = {
@@ -398,6 +556,12 @@ class App(tk.Tk):
             messagebox.showerror("입력 오류", str(e))
             return
         self._bus.commands.put(bus.SetFunds(total, max_n, buy1, buy2, rates, ratios))
+
+    def _shift_date(self, days: int) -> None:
+        """매매일 하루 이동 (◀ 전일 / ▶ 다음일). 감시 중이면 _change_date 가 막는다."""
+        new = datetime.strptime(self._current_date, "%Y-%m-%d") + timedelta(days=days)
+        self._set_date_display(new.strftime("%Y-%m-%d"))
+        self._change_date()
 
     def _open_calendar(self, _event):
         """날짜든 화살표든 클릭 한 번 = 캘린더 토글 한 번.
@@ -444,7 +608,8 @@ class App(tk.Tk):
         self._bus.commands.put(bus.RefreshAccount())
 
     def _connect_discord(self) -> None:
-        messagebox.showinfo("안내", "Discord 연결은 notifier 구현 후 동작합니다.")
+        self._bus.commands.put(bus.ConnectDiscord())
+        self._discord_status.configure(text="● 연결 중...", foreground="#f9a825")
 
     # ── 이벤트 큐 → 화면 갱신 ───────────────────────────────────
 
@@ -459,6 +624,7 @@ class App(tk.Tk):
     def _dispatch(self, ev) -> None:
         match ev:
             case bus.PositionUpdate(symbol=s, name=n, position=p, params=prm):
+                self._staged.pop(s, None)  # 3선 입력 완료 → 대기 해제
                 self._registry[s] = (n, prm, p)
                 self.positions.upsert(s, n, p, prm)
                 self._update_summary()
@@ -500,6 +666,7 @@ class App(tk.Tk):
             case bus.TradeDate(date=d):
                 self._current_date = d
                 self._set_date_display(d)
+                self._staged.clear()
                 self._registry.clear()
                 self._last_price.clear()
                 self.positions.clear()
@@ -507,6 +674,11 @@ class App(tk.Tk):
                 self._update_pnl()
             case bus.NotifyLevel(level=lv):
                 self._notify_combo.set(lv)
+            case bus.DiscordStatus(connected=ok, detail=detail):
+                self._discord_status.configure(
+                    text="● 연결됨" if ok else f"● 미연결 · {detail}",
+                    foreground="#2e7d32" if ok else "#9e9e9e",
+                )
             case bus.SymbolInfo(symbol=s, name=n):
                 if getattr(self, "_dialog", None) and self._dialog.winfo_exists():
                     self._dialog.set_name(s, n)

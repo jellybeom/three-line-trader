@@ -179,7 +179,7 @@ three-line-trader/
 │   ├── watcher.py            # 키움 WebSocket 실시간 체결가(0B) 수신 / PING 응답 / 백오프 재연결
 │   ├── broker.py             # 키움 REST 시장가 주문(kt10000/1) / 계좌·종목 조회 / 체결통보(00) 해석
 │   ├── store.py              # SQLite 영속화 / 복원 (매매일 단위)
-│   ├── notifier.py           # Discord 알림 (예정)
+│   ├── notifier.py           # Discord webhook 발송 + 알림 수준 필터 (전체/매매만/에러만/끔)
 │   └── ui/                   # Tkinter UI (화면 단위 분리, 비즈니스 로직 없음)
 │       ├── __init__.py
 │       ├── app.py            # 메인 윈도우(FHD): 툴바(감시·배지·손익) + 한 줄 설정 5그룹 + 상태 바
@@ -225,7 +225,7 @@ uv run pytest -v           # 전체 테스트
 - [x] 키움 REST 주문/조회 (broker: 시장가 매수·매도, 예수금·잔고·종목정보, 체결통보 해석)
 - [x] main.py 코어 조립 (틱→판단→주문→체결 확정, 예수금 방어, reconcile, 재연결 보정)
 - [ ] 모의투자 장중 통합 검증 (--buy1 필드 실측 포함) → 실전 전환
-- [ ] Discord 알림 (notifier: webhook 발송, 알림 수준 필터는 UI·settings 준비 완료)
+- [x] Discord 알림 (notifier: webhook 발송, 알림 수준 필터, 백그라운드 발송, 실패 시 재귀 차단)
 - [x] Tkinter UI (관심종목 편집 / 상태 모니터 / 이벤트 로그, 큐 기반 코어 연동) + 개발용 시뮬레이터
 - [x] 관리자 개입 기능 (종료 → 대기 수동 전환, UI 우클릭)
 - [ ] 종료 시 복기 차트 자동 생성 → Discord 전송 (분봉 REST + mplfinance, 3선·평단·체결 마커). 종목 행의 📈 버튼(자리 확보됨)과 동일 생성기 공유

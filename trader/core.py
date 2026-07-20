@@ -24,6 +24,7 @@ from datetime import date, datetime
 
 from trader.broker import Broker, BrokerError, extract_fill
 from trader.kiwoom import KiwoomAuthError, load_auth
+from trader.notifier import DiscordNotifier, format_message, load_webhook, should_notify
 from dataclasses import replace
 
 from trader.state_machine import (
@@ -59,6 +60,8 @@ class Core:
         self._config_path = config_path
         self._store: Store | None = None
         self._broker: Broker | None = None
+        self._notifier: DiscordNotifier | None = None
+        self._notify_level = "전체"
         self._watcher: Watcher | None = None
         self._watcher_task: asyncio.Task | None = None
         self._running = False
@@ -74,6 +77,7 @@ class Core:
     async def run(self) -> None:
         self._store = Store(self._db_path)
         self._mode_real = self._store.get_setting("mode", "모의") == "실전"
+        self._notify_level = self._store.get_setting("notify_level", "전체")
         self._load_date(self._date)
         self._emit_date_loaded()
         self._emit_funds()
@@ -122,11 +126,21 @@ class Core:
                     return
                 name, _ = await asyncio.to_thread(self._broker.stock_info, s)
                 self._bus.events.put(bus.SymbolInfo(s, name))
+            case bus.ConnectDiscord():
+                await self._connect_discord()
             case bus.SetNotifyLevel(level=lv):
+                self._notify_level = lv
                 self._store.set_setting("notify_level", lv)
                 self._bus.events.put(bus.NotifyLevel(lv))
                 self._log("시스템", "설정", f"Discord 알림 수준: {lv}")
             case bus.Register(symbol=s, name=n, params=p, position=pos):
+                if self._running:
+                    self._log(
+                        s,
+                        "에러",
+                        "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
+                    )
+                    return
                 if pos is None:  # 편집: 현재 포지션 유지
                     if s not in self._entries:
                         self._log(s, "에러", "편집 대상 종목이 없습니다")
@@ -142,6 +156,11 @@ class Core:
                 self._log(s, "등록", f"{n} (상태: {pos.state.value})")
                 await self._sync_watcher_symbols()
             case bus.Delete(symbol=s):
+                if self._running:
+                    self._log(
+                        s, "에러", "감시 중에는 삭제할 수 없습니다 — 먼저 중지하세요"
+                    )
+                    return
                 self._store.delete_symbol(self._date, s)
                 self._entries.pop(s, None)
                 self._buy2_blocked.discard(s)
@@ -177,6 +196,13 @@ class Core:
                 tp_rates=rates,
                 tp_ratios=ratios,
             ):
+                if self._running:
+                    self._log(
+                        "시스템",
+                        "에러",
+                        "감시 중에는 설정을 변경할 수 없습니다 — 먼저 중지하세요",
+                    )
+                    return
                 for key, val in (
                     ("funds_total", t),
                     ("funds_max", m),
@@ -262,6 +288,28 @@ class Core:
             self._watcher_task.cancel()
         self._watcher = self._watcher_task = self._broker = None
         self._bus.events.put(bus.KiwoomStatus(False, reason))
+
+    async def _connect_discord(self) -> None:
+        try:
+            notifier = DiscordNotifier(load_webhook(self._config_path))
+            await asyncio.to_thread(
+                notifier.send, "🔔 three-line-trader 연결되었습니다"
+            )
+        except Exception as e:  # noqa: BLE001
+            self._bus.events.put(bus.DiscordStatus(False, "연결 실패"))
+            self._log("시스템", "에러", f"Discord 연결 실패: {e}", notify=False)
+            return
+        self._notifier = notifier
+        self._bus.events.put(bus.DiscordStatus(True, ""))
+        self._log("시스템", "연결", f"Discord 연결됨 (알림 수준: {self._notify_level})")
+
+    async def _send_discord(self, text: str) -> None:
+        try:
+            await asyncio.to_thread(self._notifier.send, text)
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 — 발송 실패가 재귀 알림이 되지 않게 notify=False
+            self._log("시스템", "경고", f"Discord 발송 실패: {e}", notify=False)
 
     async def _refresh_account(self) -> None:
         if self._broker is None:
@@ -524,10 +572,16 @@ class Core:
             )
         )
 
-    def _log(self, symbol: str, kind: str, text: str) -> None:
+    def _log(self, symbol: str, kind: str, text: str, notify: bool = True) -> None:
         self._store.log(self._date, symbol, kind, text)
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
+        if (
+            notify
+            and self._notifier
+            and should_notify(self._notify_level, symbol, kind)
+        ):
+            asyncio.create_task(self._send_discord(format_message(symbol, kind, text)))
 
     def _notify(self, symbol: str, text: str) -> None:
-        """Discord 알림 자리 — notifier 구현 시 여기서 발송한다."""
-        self._log(symbol, "알림", f"[Discord 예정] {text}")
+        """중요 이벤트 — '알림' 종류로 기록되며 알림 수준 필터를 거쳐 Discord 로 발송된다."""
+        self._log(symbol, "알림", text)

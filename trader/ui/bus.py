@@ -56,6 +56,14 @@ class SymbolInfo:
 
 
 @dataclass(frozen=True)
+class DiscordStatus:
+    """Discord 연결 상태."""
+
+    connected: bool
+    detail: str
+
+
+@dataclass(frozen=True)
 class NotifyLevel:
     """Discord 알림 수준 (시작 시 복원값 또는 변경 확정값)."""
 
@@ -162,6 +170,11 @@ class LookupSymbol:
     """종목코드 → 종목명 조회 요청 (등록 창의 '조회' 버튼)."""
 
     symbol: str
+
+
+@dataclass(frozen=True)
+class ConnectDiscord:
+    """config.toml 의 webhook 으로 Discord 연결 (테스트 발송 포함)."""
 
 
 @dataclass(frozen=True)

@@ -51,6 +51,8 @@ _HEADINGS = (
     "",
 )
 _ADD_ROW = "__add__"
+_CSV_ROW = "__csv__"
+_SPECIAL = {_ADD_ROW, _CSV_ROW}
 _BASE_HEADINGS = dict(zip(_COLUMNS, _HEADINGS))
 
 
@@ -63,6 +65,7 @@ class PositionsView(ttk.Frame):
         on_reset: Callable[[str], None],
         on_delete: Callable[[str], None],
         on_chart: Callable[[str], None],
+        on_csv: Callable[[], None],
     ):
         super().__init__(master)
         self._on_add = on_add
@@ -70,6 +73,7 @@ class PositionsView(ttk.Frame):
         self._on_reset = on_reset
         self._on_delete = on_delete
         self._on_chart = on_chart
+        self._on_csv = on_csv
         self._avg: dict[str, float] = {}  # 수익률 계산용 평단 캐시
         self._closed: set[str] = set()  # 종료 종목: 수익률을 종료 시점 값으로 고정
         self._sort_reverse: dict[str, bool] = {}
@@ -92,6 +96,7 @@ class PositionsView(ttk.Frame):
         self.tree.tag_configure("loss", foreground="#1565c0")  # 손실 = 파랑
         self.tree.tag_configure("closed", foreground="#9e9e9e")
         self.tree.tag_configure("addrow", foreground="#1565c0")
+        self.tree.tag_configure("staged", foreground="#f9a825")  # 3선 미입력 대기
 
         scroll = ttk.Scrollbar(self, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -162,7 +167,7 @@ class PositionsView(ttk.Frame):
         self._ensure_add_row()
 
     def tick(self, symbol: str, price: float) -> None:
-        if not self.tree.exists(symbol) or symbol == _ADD_ROW:
+        if not self.tree.exists(symbol) or symbol in _SPECIAL:
             return
         self.tree.set(symbol, "price", f"{price:,.0f}")
         if symbol in self._closed:  # 종료: 수익률·색상 고정
@@ -190,16 +195,40 @@ class PositionsView(ttk.Frame):
 
     def selected(self) -> str | None:
         sel = self.tree.selection()
-        return sel[0] if sel and sel[0] != _ADD_ROW else None
+        return sel[0] if sel and sel[0] not in _SPECIAL else None
 
     # ── 행 내 조작 ──────────────────────────────────────────────
 
     def _ensure_add_row(self) -> None:
-        if not self.tree.exists(_ADD_ROW):
-            values = [""] * len(_COLUMNS)
-            values[1] = "＋ 종목 추가하기"  # 종목명 열 아래에 표시
-            self.tree.insert("", "end", iid=_ADD_ROW, values=values, tags=("addrow",))
-        self.tree.move(_ADD_ROW, "", "end")  # 항상 맨 아래 유지
+        for iid, label in (
+            (_ADD_ROW, "＋ 종목 추가하기"),
+            (_CSV_ROW, "＋ 종목 CSV 불러오기"),
+        ):
+            if not self.tree.exists(iid):
+                values = [""] * len(_COLUMNS)
+                values[1] = label  # 종목명 열 아래에 표시
+                self.tree.insert("", "end", iid=iid, values=values, tags=("addrow",))
+            self.tree.move(iid, "", "end")  # 항상 맨 아래 유지 (추가 → CSV 순)
+
+    def upsert_staged(self, code: str, name: str) -> None:
+        """CSV 로 불러온 3선 미입력 종목 — ✎ 로 가격을 입력하면 정식 등록된다."""
+        vals = {c: "" for c in _COLUMNS}
+        vals.update(
+            code=code,
+            name=name,
+            state="3선 미입력",
+            line1="-",
+            line2="-",
+            line3="-",
+            edit="✎",
+        )
+        vals["del"] = "✕"
+        values = [vals[c] for c in _COLUMNS]
+        if self.tree.exists(code):
+            self.tree.item(code, values=values, tags=("staged",))
+        else:
+            self.tree.insert("", "end", iid=code, values=values, tags=("staged",))
+        self._ensure_add_row()
 
     def _on_click(self, event) -> None:
         row = self.tree.identify_row(event.y)
@@ -207,6 +236,9 @@ class PositionsView(ttk.Frame):
             return
         if row == _ADD_ROW:
             self._on_add()
+            return
+        if row == _CSV_ROW:
+            self._on_csv()
             return
         col_id = self.tree.identify_column(event.x)  # '#N' (1부터)
         index = int(col_id.lstrip("#"))
@@ -222,7 +254,7 @@ class PositionsView(ttk.Frame):
 
     def _on_double_click(self, event) -> None:
         row = self.tree.identify_row(event.y)
-        if row and row != _ADD_ROW:
+        if row and row not in _SPECIAL:
             self._on_edit(row)
 
     def _confirm_delete(self, symbol: str) -> None:
@@ -240,7 +272,7 @@ class PositionsView(ttk.Frame):
     def _sort(self, col: str) -> None:
         if col in ("chart", "edit", "del"):
             return  # 조작 열은 정렬 대상 아님
-        rows = [iid for iid in self.tree.get_children() if iid != _ADD_ROW]
+        rows = [iid for iid in self.tree.get_children() if iid not in _SPECIAL]
         keyed = [(self.tree.set(iid, col), iid) for iid in rows]
         reverse = self._sort_reverse[col] = not self._sort_reverse.get(col, False)
 
@@ -268,7 +300,7 @@ class PositionsView(ttk.Frame):
 
     def _popup_menu(self, event) -> None:
         row = self.tree.identify_row(event.y)
-        if row and row != _ADD_ROW:
+        if row and row not in _SPECIAL:
             self._menu_target = row
             self.tree.selection_set(row)
             self._menu.post(event.x_root, event.y_root)

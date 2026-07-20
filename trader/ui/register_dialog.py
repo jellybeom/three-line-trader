@@ -32,6 +32,9 @@ class RegisterDialog(tk.Toplevel):
             tuple[str, str, Params] | None
         ) = None,  # (symbol, name, params) — 편집 모드
         on_lookup: Callable[[str], None] | None = None,  # 종목코드 → 종목명 조회 요청
+        prefill: (
+            tuple[str, str] | None
+        ) = None,  # (code, name) — CSV 대기 종목의 3선 입력
     ):
         super().__init__(master)
         self._edit_mode = edit is not None
@@ -85,6 +88,12 @@ class RegisterDialog(tk.Toplevel):
         entry_row("1선 가격", "line1", numeric=True)
         entry_row("2선 가격", "line2", numeric=True)
         entry_row("3선 가격", "line3", numeric=True)
+
+        if prefill and not self._edit_mode:
+            code, name = prefill
+            self._vars["symbol"].set(code)
+            symbol_entry.configure(state="disabled")  # CSV 에서 온 코드는 고정
+            self._vars["name"].set(name)
 
         if self._edit_mode:
             symbol, name, params = edit
