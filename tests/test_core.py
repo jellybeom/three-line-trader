@@ -157,6 +157,49 @@ def test_차단_상태에서도_손절은_동작(core):
     assert core._broker.orders[-1] == ("매도", "005930", 100)
 
 
+# ── 최대 종목 수 제한 ──────────────────────────────────────────
+
+
+def test_최대_종목_수_도달시_추가_진입은_주문없이_종료(core):
+    core._max_symbols = 1
+    register(core)  # 005930
+    core._store.register_symbol(core._date, "000660", "하이닉스", P)
+    core._entries["000660"] = {
+        "name": "하이닉스",
+        "params": P,
+        "pos": Position(),
+        "price": 0,
+    }
+    asyncio.run(tick(core, 10_000))
+    asyncio.run(fill(core, "ORD1", 100, 10_000))  # 1슬롯 점유
+    from trader.watcher import Tick as T
+
+    asyncio.run(core._on_tick(T("000660", 9_950, "")))  # 2번째 진입 시도
+    assert core._entries["000660"]["pos"].state is State.CLOSED  # 주문 없이 종료
+    assert core._broker.orders == [("매수", "005930", 100)]  # 추가 주문 없음
+
+
+def test_슬롯이_비면_다시_진입_가능(core):
+    core._max_symbols = 1
+    register(core)
+    core._store.register_symbol(core._date, "000660", "하이닉스", P)
+    core._entries["000660"] = {
+        "name": "하이닉스",
+        "params": P,
+        "pos": Position(),
+        "price": 0,
+    }
+    for i, price in enumerate(
+        [10_000, 7_900], start=1
+    ):  # 매수 → 3선 갭 손절로 슬롯 반환
+        asyncio.run(tick(core, price))
+        asyncio.run(fill(core, f"ORD{i}", 100, price))
+    from trader.watcher import Tick as T
+
+    asyncio.run(core._on_tick(T("000660", 9_950, "")))  # 이제 진입 가능
+    assert core._broker.orders[-1] == ("매수", "000660", 100)
+
+
 # ── 감시 중지 / 재연결 보정 ────────────────────────────────────
 
 

@@ -173,6 +173,13 @@ class LookupSymbol:
 
 
 @dataclass(frozen=True)
+class CarryOver:
+    """보유 종목을 다음 영업일 리스트로 이월 (상태·평단·잔량 유지)."""
+
+    symbol: str
+
+
+@dataclass(frozen=True)
 class ConnectDiscord:
     """config.toml 의 webhook 으로 Discord 연결 (테스트 발송 포함)."""
 

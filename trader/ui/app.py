@@ -176,20 +176,17 @@ class App(tk.Tk):
         box = ttk.Frame(g_mode)
         box.pack(expand=True)  # 상하 가운데 정렬
         self._mode_var = tk.StringVar(value="모의")
-        ttk.Radiobutton(
-            box,
-            text="모의",
-            value="모의",
-            variable=self._mode_var,
-            command=self._on_mode_selected,
-        ).pack(anchor="w", pady=(0, 2))
-        ttk.Radiobutton(
-            box,
-            text="실전",
-            value="실전",
-            variable=self._mode_var,
-            command=self._on_mode_selected,
-        ).pack(anchor="w")
+        self._mode_radios = []
+        for text, pady in (("모의", (0, 2)), ("실전", 0)):
+            rb = ttk.Radiobutton(
+                box,
+                text=text,
+                value=text,
+                variable=self._mode_var,
+                command=self._on_mode_selected,
+            )
+            rb.pack(anchor="w", pady=pady)
+            self._mode_radios.append(rb)
 
         g_date = ttk.LabelFrame(row, text="매매일", padding=(10, 2, 10, 6))
         g_date.pack(side="left", fill="both", expand=True, padx=(8, 0))
@@ -198,9 +195,10 @@ class App(tk.Tk):
         self._date_var = tk.StringVar()
         line = ttk.Frame(box)
         line.pack(pady=(0, 3))
-        ttk.Button(line, text="◀", width=2, command=lambda: self._shift_date(-1)).pack(
-            side="left", padx=(0, 3)
+        self._date_prev = ttk.Button(
+            line, text="◀", width=2, command=lambda: self._shift_date(-1)
         )
+        self._date_prev.pack(side="left", padx=(0, 3))
         if DateEntry:  # 날짜 영역을 클릭해도 캘린더가 펼쳐지도록 바인딩
             self._date_picker = DateEntry(
                 line,
@@ -220,9 +218,10 @@ class App(tk.Tk):
             e = ttk.Entry(line, textvariable=self._date_var, width=12, justify="center")
             e.pack(side="left")
             e.bind("<Return>", lambda _e: self._change_date())
-        ttk.Button(line, text="▶", width=2, command=lambda: self._shift_date(1)).pack(
-            side="left", padx=(3, 0)
+        self._date_next = ttk.Button(
+            line, text="▶", width=2, command=lambda: self._shift_date(1)
         )
+        self._date_next.pack(side="left", padx=(3, 0))
         self._weekday = ttk.Label(box, text="-", anchor="center")
         self._weekday.pack(fill="x")
 
@@ -232,9 +231,10 @@ class App(tk.Tk):
         box.pack(expand=True)
         line = ttk.Frame(box)
         line.pack(fill="x", pady=(0, 3))
-        ttk.Button(line, text="연결", width=6, command=self._connect_kiwoom).pack(
-            side="left"
+        self._kiwoom_connect_btn = ttk.Button(
+            line, text="연결", width=6, command=self._connect_kiwoom
         )
+        self._kiwoom_connect_btn.pack(side="left")
         self._kiwoom_status = ttk.Label(line, text="● 미연결", foreground=muted)
         self._kiwoom_status.pack(side="left", padx=(8, 0))
         line = ttk.Frame(box)
@@ -297,6 +297,7 @@ class App(tk.Tk):
 
         grid = ttk.Frame(box)
         grid.pack(side="left")
+        self._lock_widgets: list = []  # 감시 중 비활성화할 설정 위젯들
         for r, (label, key, width) in enumerate(
             [("총 운용금액", "total", 12), ("최대 종목", "max", 12)]
         ):
@@ -307,7 +308,10 @@ class App(tk.Tk):
                 grid, textvariable=self._funds_vars[key], width=width, justify="center"
             )
             e.grid(row=r, column=1, pady=1)
-            e.bind("<KeyRelease>", self._auto_fill_funds)
+            if key == "total":
+                self._make_money_entry(e, self._funds_vars[key])
+            e.bind("<KeyRelease>", self._auto_fill_funds, add="+")
+            self._lock_widgets.append(e)
         ttk.Label(grid, text="종목당", foreground=muted).grid(
             row=2, column=0, sticky="e", padx=(0, 6)
         )
@@ -318,9 +322,12 @@ class App(tk.Tk):
             ttk.Label(grid, text=f"{r}차", foreground=muted).grid(
                 row=r, column=3, sticky="e", padx=(16, 6)
             )
-            ttk.Entry(
+            e = ttk.Entry(
                 grid, textvariable=self._funds_vars[key], width=11, justify="center"
-            ).grid(row=r, column=4, pady=1)
+            )
+            e.grid(row=r, column=4, pady=1)
+            self._make_money_entry(e, self._funds_vars[key])
+            self._lock_widgets.append(e)
 
         ttk.Separator(box, orient="vertical").pack(
             side="left", fill="y", padx=12, pady=2
@@ -337,16 +344,19 @@ class App(tk.Tk):
                 row=r, column=0, sticky="e", padx=(0, 6)
             )
             for i in (1, 2, 3):
-                ttk.Entry(
+                e = ttk.Entry(
                     grid,
                     textvariable=self._funds_vars[f"{prefix}{i}"],
                     width=6,
                     justify="center",
-                ).grid(row=r, column=i, padx=2, pady=1)
+                )
+                e.grid(row=r, column=i, padx=2, pady=1)
+                self._lock_widgets.append(e)
 
-        ttk.Button(box, text="적용", width=6, command=self._apply_funds).pack(
-            side="left", fill="y", padx=(12, 0), pady=2
+        self._apply_btn = ttk.Button(
+            box, text="적용", width=6, command=self._apply_funds
         )
+        self._apply_btn.pack(side="left", fill="y", padx=(12, 0), pady=2)
 
     def _build_main_area(self) -> None:
         paned = ttk.PanedWindow(self, orient="vertical")
@@ -359,6 +369,7 @@ class App(tk.Tk):
             on_delete=self._delete,
             on_chart=self._open_chart,
             on_csv=self._import_csv,
+            on_carry=self._carry_over,
         )
         self.events = EventsView(paned)
         paned.add(self.positions, weight=5)
@@ -409,7 +420,7 @@ class App(tk.Tk):
             return
         self._dialog = RegisterDialog(
             self,
-            on_submit=self._bus.commands.put,
+            on_submit=self._submit_register,
             funds=self._funds,
             on_lookup=lambda s: (
                 self._bus.commands.put(bus.LookupSymbol(s)) if s else None
@@ -428,7 +439,7 @@ class App(tk.Tk):
         if symbol in self._staged:  # CSV 대기 종목: 3선 입력 → 정식 등록
             RegisterDialog(
                 self,
-                on_submit=self._bus.commands.put,
+                on_submit=self._submit_register,
                 funds=self._funds,
                 prefill=(symbol, self._staged[symbol]),
             )
@@ -512,6 +523,22 @@ class App(tk.Tk):
             self._mode_var.set("모의")
             return
         self._bus.commands.put(bus.SetMode(want_real))
+
+    @staticmethod
+    def _make_money_entry(entry: ttk.Entry, var: tk.StringVar) -> None:
+        """숫자만 입력 허용 + 입력 중에도 세 자리 콤마 유지 (지웠다 다시 써도 적용)."""
+        vcmd = (entry.register(lambda p: p == "" or p.replace(",", "").isdigit()), "%P")
+        entry.configure(validate="key", validatecommand=vcmd)
+
+        def reformat(_event=None):
+            raw = var.get().replace(",", "")
+            if raw.isdigit():
+                var.set(f"{int(raw):,}")
+                entry.icursor("end")
+
+        entry.bind(
+            "<KeyRelease>", reformat
+        )  # 다른 KeyRelease 핸들러는 add="+" 로 뒤에 연결
 
     def _auto_fill_funds(self, _event=None) -> None:
         """총액/최대 종목 입력 시 종목당 배분 표시 및 1·2차 금액 절반씩 자동 채움."""
@@ -603,6 +630,22 @@ class App(tk.Tk):
             text=f"({weekday})", foreground="#f9a825" if dt.weekday() >= 5 else ""
         )  # 주말이면 주황 경고
 
+    def _carry_over(self, symbol: str) -> None:
+        if symbol in self._staged:
+            messagebox.showwarning("이월 불가", "3선 미입력 종목은 이월할 수 없습니다.")
+            return
+        self._bus.commands.put(bus.CarryOver(symbol))
+
+    def _submit_register(self, cmd: bus.Register) -> None:
+        """등록 창 제출 — 신규 등록이 기존 종목을 덮어쓰지 않게 여기서 한 번 더 막는다."""
+        if cmd.position is not None and cmd.symbol in self._registry:
+            messagebox.showwarning(
+                "중복 종목",
+                f"{cmd.symbol} 은 이미 등록되어 있습니다.\n수정하려면 편집(✎)을 사용하세요.",
+            )
+            return
+        self._bus.commands.put(cmd)
+
     def _open_chart(self, symbol: str) -> None:
         messagebox.showinfo("안내", f"{symbol} 차트 보기는 추후 구현 예정입니다.")
 
@@ -650,6 +693,7 @@ class App(tk.Tk):
                 self._update_summary()
             case bus.WatchStatus(running=r):
                 self._running = r
+                self._set_settings_locked(r)
                 self._toggle_btn.configure(text="중지" if r else "감시 시작")
                 self._status.configure(
                     text="감시 중" if r else "정지됨",
@@ -713,6 +757,25 @@ class App(tk.Tk):
         self._summary.configure(
             text=f"감시 {len(self._registry)}종목 · 보유 {holding}종목"
         )
+
+    def _set_settings_locked(self, locked: bool) -> None:
+        """감시 중에는 매매 조건에 영향을 주는 설정 위젯을 시각적으로도 잠근다.
+        (예수금 새로고침·알림 수준·Discord 연결은 매매와 무관하므로 항상 허용)"""
+        state = "disabled" if locked else "normal"
+        widgets = (
+            self._lock_widgets
+            + self._mode_radios
+            + [
+                self._date_prev,
+                self._date_next,
+                self._apply_btn,
+                self._kiwoom_connect_btn,
+            ]
+        )
+        for w in widgets:
+            w.configure(state=state)
+        if self._date_picker:
+            self._date_picker.configure(state="disabled" if locked else "readonly")
 
     def _maybe_deselect(self, event) -> None:
         """리스트 바깥(또는 리스트의 빈 영역) 클릭 시 행 선택 해제."""

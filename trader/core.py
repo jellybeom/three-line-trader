@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime, timedelta
 
 from trader.broker import Broker, BrokerError, extract_fill
 from trader.kiwoom import KiwoomAuthError, load_auth
@@ -68,6 +68,7 @@ class Core:
         self._broker: Broker | None = None
         self._notifier: DiscordNotifier | None = None
         self._notify_level = "전체"
+        self._max_symbols = 10
         self._watcher: Watcher | None = None
         self._watcher_task: asyncio.Task | None = None
         self._running = False
@@ -84,6 +85,7 @@ class Core:
         self._store = Store(self._db_path)
         self._mode_real = self._store.get_setting("mode", "모의") == "실전"
         self._notify_level = self._store.get_setting("notify_level", "전체")
+        self._max_symbols = int(self._store.get_setting("funds_max", "10"))
         self._load_date(self._date)
         self._emit_date_loaded()
         self._emit_funds()
@@ -122,6 +124,30 @@ class Core:
 
     async def _handle_command(self, cmd) -> None:
         match cmd:
+            case bus.CarryOver(symbol=s):
+                if self._running:
+                    self._log(
+                        s, "에러", "감시 중에는 이월할 수 없습니다 — 먼저 중지하세요"
+                    )
+                    return
+                e = self._entries.get(s)
+                if e is None:
+                    return
+                if e["pos"].pending:
+                    self._log(s, "에러", "체결 대기 중인 종목은 이월할 수 없습니다")
+                    return
+                target = date.fromisoformat(self._date) + timedelta(days=1)
+                while target.weekday() >= 5:  # 주말 건너뛰고 다음 영업일
+                    target += timedelta(days=1)
+                self._store.register_symbol(
+                    target.isoformat(), s, e["name"], e["params"], e["pos"]
+                )
+                self._log(
+                    s,
+                    "이월",
+                    f"{target.isoformat()} 리스트로 이월 (상태: {e['pos'].state.value}, "
+                    f"잔량 {e['pos'].remaining}주)",
+                )
             case bus.ConnectKiwoom():
                 await self._connect()
             case bus.RefreshAccount():
@@ -145,6 +171,13 @@ class Core:
                         s,
                         "에러",
                         "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
+                    )
+                    return
+                if pos is not None and s in self._entries:
+                    self._log(
+                        s,
+                        "에러",
+                        "이미 등록된 종목입니다 — 수정하려면 편집(✎)을 사용하세요",
                     )
                     return
                 if pos is None:  # 편집: 현재 포지션 유지
@@ -218,6 +251,7 @@ class Core:
                     ("funds_ratios", ",".join(map(str, ratios))),
                 ):
                     self._store.set_setting(key, str(val))
+                self._max_symbols = m
                 self._emit_funds()
                 self._apply_globals_to_waiting(b1, b2, rates, ratios)
                 self._log(
@@ -386,6 +420,24 @@ class Core:
                 self._notify_trade(symbol, d.reason, 0, price)
             return
 
+        if (
+            d.side is Side.BUY and pos.state is State.WAITING
+        ):  # 1차(또는 갭 동시) 진입 시점
+            active = sum(
+                1
+                for x in self._entries.values()
+                if x["pos"].state not in (State.WAITING, State.CLOSED)
+            )
+            if active >= self._max_symbols:
+                nd = Decision(
+                    State.CLOSED,
+                    None,
+                    0,
+                    f"최대 종목 수({self._max_symbols}) 도달 → 진입 금지, 당일 종료",
+                )
+                await self._execute(symbol, nd, price)
+                return
+
         if d.side is Side.BUY and not await self._can_buy(symbol, d, price):
             return
 
@@ -503,17 +555,32 @@ class Core:
         self._log("시스템", "연결", msg)
 
     async def _on_ws_reconnect(self) -> None:
-        """재연결 후 공백 구간 보정: 보유·대기 종목 현재가를 REST 로 1회 조회해 재판정."""
+        """재연결 후 공백 구간 보정: 보유·대기 종목 현재가를 REST 로 1회 조회해 재판정.
+
+        장 운영시간 밖(새벽 서버 세션 정리 등)에는 시세 조회가 오류를 내므로 생략하고,
+        실패는 종목별 알림 대신 요약 1건으로만 남긴다 (Discord 제한 방지).
+        """
+        now = datetime.now()
+        if now.weekday() >= 5 or not (dtime(8, 30) <= now.time() <= dtime(15, 40)):
+            self._log("시스템", "연결", "장외 재연결 — 가격 보정 생략", notify=False)
+            return
+        failed: list[str] = []
         for symbol, e in list(self._entries.items()):
             if e["pos"].state is State.CLOSED:
                 continue
             try:
                 _, price = await asyncio.to_thread(self._broker.stock_info, symbol)
-            except BrokerError as err:
-                self._log(symbol, "경고", f"재연결 가격 보정 실패: {err}")
+            except BrokerError:
+                failed.append(symbol)
                 continue
             if price > 0:
                 await self._on_tick(Tick(symbol, price, ""))
+        if failed:
+            self._log(
+                "시스템",
+                "경고",
+                f"재연결 가격 보정 실패 {len(failed)}종목: {', '.join(failed)}",
+            )
 
     # ── 상태 로드 / 발행 ────────────────────────────────────────
 

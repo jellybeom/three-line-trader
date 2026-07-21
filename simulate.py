@@ -15,7 +15,7 @@ from __future__ import annotations
 import random
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from dataclasses import replace
 
@@ -55,6 +55,7 @@ class SimCore:
         self._date = date.today().isoformat()  # 활성 매매일
         self._notifier: DiscordNotifier | None = None
         self._notify_level = store.get_setting("notify_level", "전체")
+        self._max_symbols = int(store.get_setting("funds_max", "10"))
         # symbol -> {"name", "params", "pos", "price"}
         self._entries: dict[str, dict] = {}
         self._load_date(self._date)
@@ -113,6 +114,29 @@ class SimCore:
                     self._bus.events.put(bus.Account(10_000_000))
                 case bus.LookupSymbol(symbol=s):
                     self._bus.events.put(bus.SymbolInfo(s, f"시뮬종목{s[-2:]}"))
+                case bus.CarryOver(symbol=s):
+                    if self._running:
+                        self._log(
+                            s,
+                            "에러",
+                            "감시 중에는 이월할 수 없습니다 — 먼저 중지하세요",
+                        )
+                        continue
+                    e = self._entries.get(s)
+                    if e is None:
+                        continue
+                    target = date.fromisoformat(self._date) + timedelta(days=1)
+                    while target.weekday() >= 5:
+                        target += timedelta(days=1)
+                    self._store.register_symbol(
+                        target.isoformat(), s, e["name"], e["params"], e["pos"]
+                    )
+                    self._log(
+                        s,
+                        "이월",
+                        f"{target.isoformat()} 리스트로 이월 (상태: {e['pos'].state.value}, "
+                        f"잔량 {e['pos'].remaining}주)",
+                    )
                 case bus.ConnectDiscord():
                     try:
                         notifier = DiscordNotifier(load_webhook())
@@ -158,6 +182,13 @@ class SimCore:
                             "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
                         )
                         continue
+                    if pos is not None and s in self._entries:
+                        self._log(
+                            s,
+                            "에러",
+                            "이미 등록된 종목입니다 — 수정하려면 편집(✎)을 사용하세요",
+                        )
+                        continue
                     if pos is None:  # 편집: 현재 포지션 유지, 설정만 교체
                         pos = self._entries[s]["pos"] if s in self._entries else None
                     if pos is None:
@@ -192,6 +223,7 @@ class SimCore:
                             "감시 중에는 설정을 변경할 수 없습니다 — 먼저 중지하세요",
                         )
                         continue
+                    self._max_symbols = m
                     for key, val in (
                         ("funds_total", t),
                         ("funds_max", m),
@@ -270,6 +302,21 @@ class SimCore:
         if d is None:
             return
         from_state = pos.state
+        if d.side is Side.BUY and pos.state is State.WAITING:  # 최대 종목 수 제한
+            active = sum(
+                1
+                for x in self._entries.values()
+                if x["pos"].state not in (State.WAITING, State.CLOSED)
+            )
+            if active >= self._max_symbols:
+                from trader.state_machine import Decision
+
+                d = Decision(
+                    State.CLOSED,
+                    None,
+                    0,
+                    f"최대 종목 수({self._max_symbols}) 도달 → 진입 금지, 당일 종료",
+                )
         if d.side is None:  # 주문 없는 즉시 전이
             pos = apply_transition(pos, d)
         else:  # 주문 → (즉시 체결 가정) → 확정

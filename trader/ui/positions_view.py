@@ -66,6 +66,7 @@ class PositionsView(ttk.Frame):
         on_delete: Callable[[str], None],
         on_chart: Callable[[str], None],
         on_csv: Callable[[], None],
+        on_carry: Callable[[str], None],
     ):
         super().__init__(master)
         self._on_add = on_add
@@ -74,6 +75,7 @@ class PositionsView(ttk.Frame):
         self._on_delete = on_delete
         self._on_chart = on_chart
         self._on_csv = on_csv
+        self._on_carry = on_carry
         self._avg: dict[str, float] = {}  # 수익률 계산용 평단 캐시
         self._closed: set[str] = set()  # 종료 종목: 수익률을 종료 시점 값으로 고정
         self._sort_reverse: dict[str, bool] = {}
@@ -108,6 +110,10 @@ class PositionsView(ttk.Frame):
         self._menu.add_command(label="편집", command=lambda: self._call(self._on_edit))
         self._menu.add_command(
             label="종료 → 대기 초기화", command=lambda: self._call(self._on_reset)
+        )
+        self._menu.add_command(
+            label="다음 매매일로 이월 (상태 유지)",
+            command=lambda: self._call(self._on_carry),
         )
         self._menu.add_separator()
         self._menu.add_command(

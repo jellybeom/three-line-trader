@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import tomllib
 from pathlib import Path
 
@@ -85,13 +87,37 @@ def format_message(symbol: str, kind: str, text: str) -> str:
 
 
 class DiscordNotifier:
+    _MIN_INTERVAL = 1.5  # webhook 분당 제한(약 30건) 방어용 최소 발송 간격
+    _MUTE_SEC = 60.0  # 429 수신 시 발송 중단 시간
+
     def __init__(self, webhook_url: str):
         self._url = webhook_url
+        self._lock = threading.Lock()  # 발송 스레드 간 간격 보장
+        self._last_send = 0.0
+        self._mute_until = 0.0
 
-    def send(self, text: str) -> None:
-        """blocking 발송. Discord 는 성공 시 204(내용 없음)를 돌려준다."""
-        resp = requests.post(self._url, json={"content": text[:1900]}, timeout=10)
-        if resp.status_code not in (200, 204):
-            raise NotifierError(
-                f"Discord 발송 실패 (HTTP {resp.status_code}): {resp.text[:200]}"
-            )
+    def send(self, text: str) -> bool:
+        """blocking 발송 (발송 스레드에서 호출). 성공 True, 제한 중 생략 False.
+
+        연속 발송은 최소 간격을 두고 순서대로 나가며, 429(전송 제한)를 받으면
+        일정 시간 발송을 통째로 생략해 제한 반복을 막는다.
+        """
+        with self._lock:
+            now = time.monotonic()
+            if now < self._mute_until:
+                return False  # 제한 중 — 조용히 생략 (호출부 로그 불필요)
+            wait = self._last_send + self._MIN_INTERVAL - now
+            if wait > 0:
+                time.sleep(wait)
+            self._last_send = time.monotonic()
+            resp = requests.post(self._url, json={"content": text[:1900]}, timeout=10)
+            if resp.status_code == 429:
+                self._mute_until = time.monotonic() + self._MUTE_SEC
+                raise NotifierError(
+                    f"Discord 전송 제한(429) — {self._MUTE_SEC:.0f}초간 알림을 생략합니다"
+                )
+            if resp.status_code not in (200, 204):
+                raise NotifierError(
+                    f"Discord 발송 실패 (HTTP {resp.status_code}): {resp.text[:200]}"
+                )
+            return True
