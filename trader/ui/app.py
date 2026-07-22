@@ -125,6 +125,7 @@ class App(tk.Tk):
         self._staged: dict[str, str] = (
             {}
         )  # CSV 로 불러온 3선 미입력 종목 {코드: 종목명}
+        self._backend_sim = False  # 상태 바 "(시뮬레이션)" 표기용
         self._last_tick: str = "--:--:--"
         self._current_date: str = datetime.now().strftime("%Y-%m-%d")
 
@@ -700,7 +701,14 @@ class App(tk.Tk):
                     foreground="#2e7d32" if r else "#9e9e9e",
                 )
                 self._ws_label.configure(
-                    text="● WS 수신 중 (시뮬레이션)" if r else "● WS 미연결",
+                    text=(
+                        (
+                            "● WS 수신 중"
+                            + (" (시뮬레이션)" if self._backend_sim else "")
+                        )
+                        if r
+                        else "● WS 미연결"
+                    ),
                     foreground="#2e7d32" if r else "#9e9e9e",
                 )
             case bus.Funds() as f:
@@ -716,6 +724,7 @@ class App(tk.Tk):
             case bus.TradeDate(date=d):
                 self._current_date = d
                 self._set_date_display(d)
+                self.events.clear_view()
                 self._staged.clear()
                 self._registry.clear()
                 self._last_price.clear()
@@ -733,6 +742,7 @@ class App(tk.Tk):
                 if getattr(self, "_dialog", None) and self._dialog.winfo_exists():
                     self._dialog.set_name(s, n)
             case bus.KiwoomStatus(connected=ok, detail=detail):
+                self._backend_sim = "시뮬레이션" in detail
                 self._kiwoom_status.configure(
                     text=f"● 연결됨 · {detail}" if ok else f"● 미연결 · {detail}",
                     foreground="#2e7d32" if ok else "#9e9e9e",

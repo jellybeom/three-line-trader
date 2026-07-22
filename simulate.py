@@ -169,11 +169,8 @@ class SimCore:
                         continue
                     self._load_date(d)
                     self._emit_date_loaded()
-                    self._log(
-                        "시스템",
-                        "설정",
-                        f"매매일 {d} 리스트 로드 ({len(self._entries)}종목)",
-                    )
+                    for ts, s2, k2, t2 in self._store.recent_events(d):
+                        self._bus.events.put(bus.LogLine(ts, s2, k2, t2))
                 case bus.Register(symbol=s, name=n, params=p, position=pos):
                     if self._running:
                         self._log(
@@ -378,6 +375,7 @@ class SimCore:
         )
 
     def _log(self, symbol: str, kind: str, text: str, notify: bool = True) -> None:
+        self._store.log(self._date, symbol, kind, text)
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
         if (
             notify

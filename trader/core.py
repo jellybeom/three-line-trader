@@ -88,6 +88,7 @@ class Core:
         self._max_symbols = int(self._store.get_setting("funds_max", "10"))
         self._load_date(self._date)
         self._emit_date_loaded()
+        self._replay_logs()
         self._emit_funds()
         self._bus.events.put(bus.Mode(self._mode_real))
         self._bus.events.put(
@@ -276,11 +277,7 @@ class Core:
                     return
                 self._load_date(d)
                 self._emit_date_loaded()
-                self._log(
-                    "시스템",
-                    "설정",
-                    f"매매일 {d} 리스트 로드 ({len(self._entries)}종목)",
-                )
+                self._replay_logs()
                 self._warn_restored_pending()
                 await self._sync_watcher_symbols()
 
@@ -606,6 +603,11 @@ class Core:
                     "체결 대기 중 종료된 포지션 복원 — 계좌 체결 내역과 대조 후 "
                     "필요 시 편집으로 상태를 바로잡으세요",
                 )
+
+    def _replay_logs(self) -> None:
+        """해당 매매일의 저장된 로그를 화면에 복원한다 (재시작·날짜 전환 대비)."""
+        for ts, symbol, kind, text in self._store.recent_events(self._date):
+            self._bus.events.put(bus.LogLine(ts, symbol, kind, text))
 
     def _emit_date_loaded(self) -> None:
         self._bus.events.put(bus.TradeDate(self._date))

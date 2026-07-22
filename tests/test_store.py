@@ -246,3 +246,36 @@ def test_주문_기록과_체결_갱신(store):
         9_950,
         "A123",
     )
+
+
+def test_저장된_로그_복원은_일반_로그만_오래된_순(store):
+    store.log("2026-07-22", "005930", "주문", "매수 접수")
+    store.log("2026-07-22", "005930", "체결", "체결 확정")
+    store.log("2026-07-23", "005930", "주문", "다른 날짜")  # 날짜 필터 확인
+    from trader.state_machine import Decision, Params, Position, Side, State
+
+    p = Params(
+        line1=10_000,
+        line2=9_000,
+        line3=8_000,
+        buy1_amount=1_000_000,
+        buy2_amount=900_000,
+    )
+    store.register_symbol("2026-07-22", "005930", "삼성전자", p)
+    store.save_transition(  # 전이 상세 행 — 복원 목록에서 제외되어야 함
+        "2026-07-22",
+        "005930",
+        State.WAITING,
+        Position(state=State.BUY1, avg_price=10_000, total_bought=10, remaining=10),
+        Decision(State.BUY1, Side.BUY, 10, "1선 이탈 → 1차 매수"),
+        10_000,
+    )
+    rows = store.recent_events("2026-07-22")
+    kinds = [(s, k, t) for _, s, k, t in rows]
+    assert ("005930", "주문", "매수 접수") in kinds
+    assert ("005930", "체결", "체결 확정") in kinds
+    assert kinds.index(("005930", "주문", "매수 접수")) < kinds.index(
+        ("005930", "체결", "체결 확정")
+    )
+    assert not any(k == "전이" for _, _, k, _ in rows)  # 전이 상세는 제외
+    assert not any(t == "다른 날짜" for _, _, _, t in rows)  # 다른 매매일 제외

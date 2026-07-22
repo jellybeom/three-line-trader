@@ -54,6 +54,10 @@ class EventsView(ttk.Frame):
             self.tree.delete(children[0])
         self.tree.see(children[-1])  # 자동 스크롤
 
+    def clear_view(self) -> None:
+        """화면 표시만 비운다 (매매일 전환 시 복원 로그가 이어서 채움)."""
+        self.tree.delete(*self.tree.get_children())
+
     def deselect(self) -> None:
         if sel := self.tree.selection():
             self.tree.selection_remove(*sel)

@@ -289,6 +289,22 @@ class Store:
         with self._conn:
             self._insert_event(trade_date, symbol, kind=kind, reason=reason)
 
+    def recent_events(
+        self, trade_date: str, limit: int = 500
+    ) -> list[tuple[str, str, str, str]]:
+        """해당 매매일의 일반 로그 (ts, symbol, kind, reason) — 오래된 순.
+
+        재시작·매매일 전환 시 로그 화면 복원용. 전이 상세 행(from_state 있음)은
+        실시간 로그와 목록을 일치시키기 위해 제외한다 (전이는 별도 로그 줄로 이미 기록됨).
+        """
+        rows = self._conn.execute(
+            "SELECT ts, symbol, kind, reason FROM events "
+            "WHERE trade_date = ? AND from_state IS NULL "
+            "ORDER BY rowid DESC LIMIT ?",
+            (trade_date, limit),
+        ).fetchall()
+        return [(r["ts"], r["symbol"], r["kind"], r["reason"]) for r in reversed(rows)]
+
     # ── 주문 기록 (broker 연동 시 사용) ─────────────────────────
 
     def record_order(self, symbol: str, side: str, qty: int) -> int:
