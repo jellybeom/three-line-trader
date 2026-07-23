@@ -26,6 +26,7 @@ class PositionUpdate:
     name: str
     position: Position
     params: Params
+    memo: str = ""
 
 
 @dataclass(frozen=True)
@@ -112,9 +113,10 @@ class KiwoomStatus:
 
 @dataclass(frozen=True)
 class Account:
-    """계좌 요약 (주문가능금액)."""
+    """계좌 요약 (주문가능금액 + 표시용 계좌 라벨)."""
 
     deposit: float
+    account: str = ""  # config.toml 의 표시용 계좌 문자열 (예: 5790-8081 위탁종합)
 
 
 @dataclass(frozen=True)
@@ -127,13 +129,19 @@ class SymbolRemoved:
 
 @dataclass(frozen=True)
 class Register:
-    """관심종목 등록/갱신. position=None 이면 편집 모드 — 현재 포지션을 유지한 채
-    설정(params)만 교체한다 (편집 창이 열려 있는 동안 상태가 바뀌어도 안전)."""
+    """관심종목 등록/갱신.
+
+    - position=None: 편집(설정만 교체, 현재 포지션 유지)
+    - position + edit=True: 편집에서 상태·평단·수량까지 통째로 교체 (기존 종목 덮어쓰기 허용)
+    - position + edit=False: 신규 등록 (기존 종목이면 거부 — 실수 덮어쓰기 방지)
+    """
 
     symbol: str
     name: str
     params: Params
     position: Position | None
+    edit: bool = False
+    memo: str = ""
 
 
 @dataclass(frozen=True)
@@ -168,6 +176,13 @@ class RefreshAccount:
 @dataclass(frozen=True)
 class LookupSymbol:
     """종목코드 → 종목명 조회 요청 (등록 창의 '조회' 버튼)."""
+
+    symbol: str
+
+
+@dataclass(frozen=True)
+class ManualSell:
+    """수동 전량 청산 (시장가) — 소량 보유 등 사용자 판단 개입. 감시 중에도 허용."""
 
     symbol: str
 

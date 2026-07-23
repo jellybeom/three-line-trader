@@ -100,7 +100,7 @@ def test_체결통보_수신시_상태_확정과_기록(core):
     pos = core._entries["005930"]["pos"]
     assert pos.state is State.BUY1 and pos.pending is False
     assert pos.avg_price == 9_960  # 평단은 실제 체결가 기준
-    _, _, restored = core._store.load_all(core._date)["005930"]
+    _, _, restored, _ = core._store.load_all(core._date)["005930"]
     assert restored == pos  # DB 에도 확정 상태 저장
 
 

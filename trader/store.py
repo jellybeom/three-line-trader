@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS symbols (
     buy2_amount REAL NOT NULL,
     tp_rate1  REAL NOT NULL, tp_rate2  REAL NOT NULL, tp_rate3  REAL NOT NULL,
     tp_ratio1 REAL NOT NULL, tp_ratio2 REAL NOT NULL, tp_ratio3 REAL NOT NULL,
+    memo TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
     PRIMARY KEY (trade_date, symbol)
 );
@@ -87,7 +88,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 5  # 스키마 변경 시 1 증가. 구버전 DB 파일은 명확한 에러로 안내한다.
+_SCHEMA_VERSION = 6  # 스키마 변경 시 1 증가. 구버전 DB 파일은 명확한 에러로 안내한다.
 
 
 class Store:
@@ -130,6 +131,7 @@ class Store:
         name: str,
         params: Params,
         position: Position = Position(),
+        memo: str = "",
     ) -> None:
         """관심종목 등록/갱신. 기존 설정과 포지션을 통째로 대체한다.
 
@@ -143,8 +145,8 @@ class Store:
                 """INSERT INTO symbols
                    (trade_date, symbol, name, line1, line2, line3, buy1_amount, buy2_amount,
                     tp_rate1, tp_rate2, tp_rate3, tp_ratio1, tp_ratio2, tp_ratio3,
-                    updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    memo, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(trade_date, symbol) DO UPDATE SET
                     name=excluded.name, line1=excluded.line1, line2=excluded.line2,
                     line3=excluded.line3, buy1_amount=excluded.buy1_amount,
@@ -152,6 +154,7 @@ class Store:
                     tp_rate1=excluded.tp_rate1, tp_rate2=excluded.tp_rate2,
                     tp_rate3=excluded.tp_rate3, tp_ratio1=excluded.tp_ratio1,
                     tp_ratio2=excluded.tp_ratio2, tp_ratio3=excluded.tp_ratio3,
+                    memo=excluded.memo,
                     updated_at=excluded.updated_at""",
                 (
                     trade_date,
@@ -164,6 +167,7 @@ class Store:
                     params.buy2_amount,
                     *params.tp_rates,
                     *params.tp_ratios,
+                    memo,
                     _now(),
                 ),
             )
@@ -188,12 +192,12 @@ class Store:
 
     # ── 복원 ────────────────────────────────────────────────────
 
-    def load_all(self, trade_date: str) -> dict[str, tuple[str, Params, Position]]:
-        """해당 매매일의 전 종목 복원: {종목코드: (종목명, 설정, 포지션)}.
+    def load_all(self, trade_date: str) -> dict[str, tuple[str, Params, Position, str]]:
+        """해당 매매일의 전 종목 복원: {종목코드: (종목명, 설정, 포지션, 메모)}.
 
         Position 생성자 검증을 통과하지 못하는 행이 있으면 즉시 실패한다.
         """
-        result: dict[str, tuple[str, Params, Position]] = {}
+        result: dict[str, tuple[str, Params, Position, str]] = {}
         rows = self._conn.execute(
             """SELECT s.*, p.state, p.avg_price, p.total_bought, p.remaining,
                       p.realized_pnl, p.pending
@@ -224,7 +228,7 @@ class Store:
                 raise ValueError(
                     f"복원 실패 — 종목 {r['symbol']} 데이터 이상: {e}"
                 ) from e
-            result[r["symbol"]] = (r["name"], params, position)
+            result[r["symbol"]] = (r["name"], params, position, r["memo"])
         return result
 
     # ── 상태 변경 기록 ──────────────────────────────────────────

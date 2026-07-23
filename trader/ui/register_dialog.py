@@ -15,7 +15,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
-from trader.state_machine import Params, Position, State
+from trader.state_machine import Params, Position, State  # noqa: F401
 from trader.ui import bus
 
 _HOLDING_STATES = [s for s in State if s not in (State.WAITING, State.CLOSED)]
@@ -28,9 +28,8 @@ class RegisterDialog(tk.Toplevel):
         master,
         on_submit: Callable[[bus.Register], None],
         funds: bus.Funds,  # 전역 설정 (매수 금액·익절률·비중의 출처)
-        edit: (
-            tuple[str, str, Params] | None
-        ) = None,  # (symbol, name, params) — 편집 모드
+        edit: tuple[str, str, Params, Position, str] | None = None,
+        # (symbol, name, params, position, memo) — 편집 모드: 상태·수량까지 수정 가능
         on_lookup: Callable[[str], None] | None = None,  # 종목코드 → 종목명 조회 요청
         prefill: (
             tuple[str, str] | None
@@ -88,6 +87,7 @@ class RegisterDialog(tk.Toplevel):
         entry_row("1선 가격", "line1", numeric=True)
         entry_row("2선 가격", "line2", numeric=True)
         entry_row("3선 가격", "line3", numeric=True)
+        entry_row("메모", "memo")
 
         if prefill and not self._edit_mode:
             code, name = prefill
@@ -95,41 +95,47 @@ class RegisterDialog(tk.Toplevel):
             symbol_entry.configure(state="disabled")  # CSV 에서 온 코드는 고정
             self._vars["name"].set(name)
 
+        # 상태 — 등록: 시작 상태 지정 / 편집: 상태·평단·수량까지 수정 가능
+        # (외부에서 직접 매도한 경우 등 계좌와 프로그램 상태를 맞추는 용도)
+        ttk.Label(form, text="상태").grid(row=row, column=0, sticky="w", pady=(10, 2))
+        self._state = ttk.Combobox(
+            form,
+            values=[s.value for s in State],
+            state="readonly",
+            width=19,
+            justify="center",
+        )
+        self._state.set(State.WAITING.value)
+        self._state.grid(row=row, column=1, sticky="ew", pady=(10, 2))
+        self._state.bind("<<ComboboxSelected>>", self._toggle_holding_fields)
+        row += 1
+
+        self._holding_entries = [
+            entry_row("평단가", "avg_price", "0", numeric=True),
+            entry_row("누적 매수량", "total_bought", "0", numeric=True),
+            entry_row("잔량", "remaining", "0", numeric=True),
+        ]
+        for e in self._holding_entries:
+            e.configure(state="disabled")
+
         if self._edit_mode:
-            symbol, name, params = edit
+            symbol, name, params, pos, memo = edit
+            self._prev_position = pos
             self._vars["symbol"].set(symbol)
             symbol_entry.configure(state="disabled")
             self._vars["name"].set(name)
+            self._vars["memo"].set(memo)
             for key, value in (
-                ("line1", f"{params.line1:g}"),
-                ("line2", f"{params.line2:g}"),
-                ("line3", f"{params.line3:g}"),
+                ("line1", f"{params.line1:,.0f}"),
+                ("line2", f"{params.line2:,.0f}"),
+                ("line3", f"{params.line3:,.0f}"),
+                ("avg_price", f"{pos.avg_price:,.0f}"),
+                ("total_bought", f"{pos.total_bought:,}"),
+                ("remaining", f"{pos.remaining:,}"),
             ):
                 self._vars[key].set(value)
-        else:
-            # 시작 상태 — 기본은 대기, 오버나이트 보유분은 직접 지정
-            ttk.Label(form, text="시작 상태").grid(
-                row=row, column=0, sticky="w", pady=(10, 2)
-            )
-            self._state = ttk.Combobox(
-                form,
-                values=[s.value for s in State],
-                state="readonly",
-                width=19,
-                justify="center",
-            )
-            self._state.set(State.WAITING.value)
-            self._state.grid(row=row, column=1, sticky="ew", pady=(10, 2))
-            self._state.bind("<<ComboboxSelected>>", self._toggle_holding_fields)
-            row += 1
-
-            self._holding_entries = [
-                entry_row("평단가", "avg_price", "0", numeric=True),
-                entry_row("누적 매수량", "total_bought", "0", numeric=True),
-                entry_row("잔량", "remaining", "0", numeric=True),
-            ]
-            for e in self._holding_entries:
-                e.configure(state="disabled")
+            self._state.set(pos.state.value)
+            self._toggle_holding_fields()
 
         ttk.Button(
             form, text="저장" if self._edit_mode else "등록", command=self._submit
@@ -155,9 +161,9 @@ class RegisterDialog(tk.Toplevel):
             self._vars["name"].set(name)
 
     def _toggle_holding_fields(self, _event=None) -> None:
-        holding = State(self._state.get()) in _HOLDING_STATES
+        editable = State(self._state.get()) is not State.WAITING  # 대기만 0 고정
         for entry in self._holding_entries:
-            entry.configure(state="normal" if holding else "disabled")
+            entry.configure(state="normal" if editable else "disabled")
 
     def _submit(self) -> None:
         v = {k: var.get().strip().replace(",", "") for k, var in self._vars.items()}
@@ -173,25 +179,29 @@ class RegisterDialog(tk.Toplevel):
                 tp_rates=self._funds.tp_rates,
                 tp_ratios=self._funds.tp_ratios,
             )
-            if self._edit_mode:
-                position = None  # 현재 포지션 유지
+            state = State(self._state.get())
+            realized = self._prev_position.realized_pnl if self._edit_mode else 0.0
+            if state is State.WAITING:
+                position = Position()
             else:
-                state = State(self._state.get())
-                if state is State.WAITING:
-                    position = Position()
-                elif state is State.CLOSED:
-                    position = Position(state=State.CLOSED)
-                else:
-                    position = Position(
-                        state=state,
-                        avg_price=float(v["avg_price"]),
-                        total_bought=int(v["total_bought"]),
-                        remaining=int(v["remaining"]),
-                    )
+                position = Position(
+                    state=state,
+                    avg_price=float(v["avg_price"] or 0),
+                    total_bought=int(v["total_bought"] or 0),
+                    remaining=int(v["remaining"] or 0),
+                    realized_pnl=realized,
+                )  # 편집이 손익 기록을 지우지 않게 보존
         except ValueError as e:
             messagebox.showerror("입력 오류", str(e), parent=self)
             return
         self._on_submit(
-            bus.Register(v["symbol"], v["name"] or v["symbol"], params, position)
+            bus.Register(
+                v["symbol"],
+                v["name"] or v["symbol"],
+                params,
+                position,
+                edit=self._edit_mode,
+                memo=self._vars["memo"].get().strip(),
+            )
         )
         self.destroy()

@@ -54,6 +54,19 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _load_account_label(config_path: str, real: bool) -> str:
+    """config.toml 의 표시용 계좌 문자열 (선택 항목 account). 없으면 빈 문자열."""
+    import tomllib
+    from pathlib import Path
+
+    path = Path(config_path)
+    if not path.exists():
+        return ""
+    kiwoom = tomllib.loads(path.read_text(encoding="utf-8")).get("kiwoom", {})
+    section = kiwoom.get("real" if real else "mock") or kiwoom
+    return str(section.get("account", ""))
+
+
 class Core:
     def __init__(
         self,
@@ -67,6 +80,7 @@ class Core:
         self._store: Store | None = None
         self._broker: Broker | None = None
         self._notifier: DiscordNotifier | None = None
+        self._account_label = ""
         self._notify_level = "전체"
         self._max_symbols = 10
         self._watcher: Watcher | None = None
@@ -125,6 +139,8 @@ class Core:
 
     async def _handle_command(self, cmd) -> None:
         match cmd:
+            case bus.ManualSell(symbol=s):
+                await self._manual_sell(s)
             case bus.CarryOver(symbol=s):
                 if self._running:
                     self._log(
@@ -141,7 +157,12 @@ class Core:
                 while target.weekday() >= 5:  # 주말 건너뛰고 다음 영업일
                     target += timedelta(days=1)
                 self._store.register_symbol(
-                    target.isoformat(), s, e["name"], e["params"], e["pos"]
+                    target.isoformat(),
+                    s,
+                    e["name"],
+                    e["params"],
+                    e["pos"],
+                    memo=e.get("memo", ""),
                 )
                 self._log(
                     s,
@@ -166,7 +187,9 @@ class Core:
                 self._store.set_setting("notify_level", lv)
                 self._bus.events.put(bus.NotifyLevel(lv))
                 self._log("시스템", "설정", f"Discord 알림 수준: {lv}")
-            case bus.Register(symbol=s, name=n, params=p, position=pos):
+            case bus.Register(
+                symbol=s, name=n, params=p, position=pos, edit=edit, memo=memo
+            ):
                 if self._running:
                     self._log(
                         s,
@@ -174,26 +197,36 @@ class Core:
                         "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
                     )
                     return
-                if pos is not None and s in self._entries:
+                if pos is not None and not edit and s in self._entries:
                     self._log(
                         s,
                         "에러",
                         "이미 등록된 종목입니다 — 수정하려면 편집(✎)을 사용하세요",
                     )
                     return
-                if pos is None:  # 편집: 현재 포지션 유지
+                if pos is None:  # 편집(설정만): 현재 포지션 유지
                     if s not in self._entries:
                         self._log(s, "에러", "편집 대상 종목이 없습니다")
                         return
                     pos = self._entries[s]["pos"]
-                self._store.register_symbol(self._date, s, n, p, pos)
+                self._store.register_symbol(self._date, s, n, p, pos, memo=memo)
                 price = (
                     self._entries[s]["price"] if s in self._entries else pos.avg_price
                 )
-                self._entries[s] = {"name": n, "params": p, "pos": pos, "price": price}
+                self._entries[s] = {
+                    "name": n,
+                    "params": p,
+                    "pos": pos,
+                    "price": price,
+                    "memo": memo,
+                }
                 self._buy2_blocked.discard(s)
                 self._emit_position(s)
-                self._log(s, "등록", f"{n} (상태: {pos.state.value})")
+                self._log(
+                    s,
+                    "등록" if not edit else "편집",
+                    f"{n} (상태: {pos.state.value}, 잔량 {pos.remaining}주)",
+                )
                 await self._sync_watcher_symbols()
             case bus.Delete(symbol=s):
                 if self._running:
@@ -283,6 +316,26 @@ class Core:
 
     # ── 키움 연결 ───────────────────────────────────────────────
 
+    async def _manual_sell(self, symbol: str) -> None:
+        """사용자 판단 수동 전량 청산 (시장가). 감시 중에도 허용 — 주문 행위이지 설정 변경이 아니다."""
+        e = self._entries.get(symbol)
+        if e is None:
+            return
+        pos = e["pos"]
+        if self._broker is None:
+            self._log(symbol, "에러", "수동 청산은 키움 연결 후 가능합니다")
+            return
+        if pos.pending:
+            self._log(symbol, "에러", "체결 대기 중에는 수동 청산할 수 없습니다")
+            return
+        if pos.remaining <= 0:
+            self._log(symbol, "에러", "청산할 잔량이 없습니다")
+            return
+        d = Decision(
+            State.CLOSED, Side.SELL, pos.remaining, "사용자 판단 → 수동 전량 청산"
+        )
+        await self._execute(symbol, d, e["price"] or pos.avg_price)
+
     async def _connect(self) -> None:
         try:
             auth = load_auth(self._config_path, real=self._mode_real)
@@ -294,6 +347,7 @@ class Core:
             self._log("시스템", "에러", f"키움 연결 실패: {e}")
             return
         self._broker = Broker(auth)
+        self._account_label = _load_account_label(self._config_path, self._mode_real)
         self._bus.events.put(
             bus.KiwoomStatus(True, f"만료 {auth._expires_at:%m-%d %H:%M}")
         )
@@ -366,7 +420,7 @@ class Core:
             self._log("시스템", "에러", "키움 연결 후 조회할 수 있습니다")
             return
         deposit = await asyncio.to_thread(self._broker.deposit)
-        self._bus.events.put(bus.Account(deposit))
+        self._bus.events.put(bus.Account(deposit, self._account_label))
 
     async def _reconcile(self) -> None:
         """저장된 포지션 잔량과 계좌 실보유를 대조. 불일치는 경고만 (수동 확인)."""
@@ -585,12 +639,15 @@ class Core:
         self._date = trade_date
         self._entries = {}
         self._buy2_blocked = set()
-        for symbol, (name, params, pos) in self._store.load_all(trade_date).items():
+        for symbol, (name, params, pos, memo) in self._store.load_all(
+            trade_date
+        ).items():
             self._entries[symbol] = {
                 "name": name,
                 "params": params,
                 "pos": pos,
                 "price": pos.avg_price,
+                "memo": memo,
             }
 
     def _warn_restored_pending(self) -> None:
@@ -617,7 +674,9 @@ class Core:
     def _emit_position(self, symbol: str) -> None:
         e = self._entries[symbol]
         self._bus.events.put(
-            bus.PositionUpdate(symbol, e["name"], e["pos"], e["params"])
+            bus.PositionUpdate(
+                symbol, e["name"], e["pos"], e["params"], e.get("memo", "")
+            )
         )
 
     def _apply_globals_to_waiting(self, b1, b2, rates, ratios) -> None:
@@ -638,7 +697,12 @@ class Core:
                 self._log(symbol, "에러", f"새 전역 설정 적용 불가: {err}")
                 continue
             self._store.register_symbol(
-                self._date, symbol, e["name"], e["params"], e["pos"]
+                self._date,
+                symbol,
+                e["name"],
+                e["params"],
+                e["pos"],
+                memo=e.get("memo", ""),
             )
             self._emit_position(symbol)
             updated += 1

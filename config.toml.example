@@ -6,10 +6,12 @@
 [kiwoom.mock]
 appkey = "모의투자 앱키"
 secretkey = "모의투자 시크릿키"
+account = ""      # 화면 표시용 (예: "1234-5678 위탁종합") — 키에 계좌가 묶여 있어 표기만 하면 됨
 
 [kiwoom.real]
 appkey = ""      # 실전 전환 시 실전용 키 기입
 secretkey = ""
+account = ""
 
 [discord]
 webhook_url = ""  # notifier 구현 후 사용

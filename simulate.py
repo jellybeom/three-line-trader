@@ -64,13 +64,16 @@ class SimCore:
         """해당 매매일의 관심종목 리스트를 로드한다."""
         self._date = trade_date
         self._entries = {}
-        for symbol, (name, params, pos) in self._store.load_all(trade_date).items():
+        for symbol, (name, params, pos, memo) in self._store.load_all(
+            trade_date
+        ).items():
             price = pos.avg_price if pos.avg_price else params.line1 * 1.03
             self._entries[symbol] = {
                 "name": name,
                 "params": params,
                 "pos": pos,
                 "price": price,
+                "memo": memo,
             }
 
     def loop(self) -> None:
@@ -114,6 +117,18 @@ class SimCore:
                     self._bus.events.put(bus.Account(10_000_000))
                 case bus.LookupSymbol(symbol=s):
                     self._bus.events.put(bus.SymbolInfo(s, f"시뮬종목{s[-2:]}"))
+                case bus.ManualSell(symbol=s):
+                    e = self._entries.get(s)
+                    if e and e["pos"].remaining > 0:
+                        from trader.state_machine import Decision
+
+                        d = Decision(
+                            State.CLOSED,
+                            Side.SELL,
+                            e["pos"].remaining,
+                            "사용자 판단 → 수동 전량 청산",
+                        )
+                        self._apply_decision(s, d, e["price"] or e["pos"].avg_price)
                 case bus.CarryOver(symbol=s):
                     if self._running:
                         self._log(
@@ -129,7 +144,12 @@ class SimCore:
                     while target.weekday() >= 5:
                         target += timedelta(days=1)
                     self._store.register_symbol(
-                        target.isoformat(), s, e["name"], e["params"], e["pos"]
+                        target.isoformat(),
+                        s,
+                        e["name"],
+                        e["params"],
+                        e["pos"],
+                        memo=e.get("memo", ""),
                     )
                     self._log(
                         s,
@@ -171,7 +191,9 @@ class SimCore:
                     self._emit_date_loaded()
                     for ts, s2, k2, t2 in self._store.recent_events(d):
                         self._bus.events.put(bus.LogLine(ts, s2, k2, t2))
-                case bus.Register(symbol=s, name=n, params=p, position=pos):
+                case bus.Register(
+                    symbol=s, name=n, params=p, position=pos, edit=edit, memo=memo
+                ):
                     if self._running:
                         self._log(
                             s,
@@ -179,7 +201,7 @@ class SimCore:
                             "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
                         )
                         continue
-                    if pos is not None and s in self._entries:
+                    if pos is not None and not edit and s in self._entries:
                         self._log(
                             s,
                             "에러",
@@ -191,7 +213,7 @@ class SimCore:
                     if pos is None:
                         self._log(s, "에러", "편집 대상 종목이 없습니다")
                         continue
-                    self._store.register_symbol(self._date, s, n, p, pos)
+                    self._store.register_symbol(self._date, s, n, p, pos, memo=memo)
                     price = (
                         self._entries[s]["price"]
                         if s in self._entries
@@ -202,6 +224,7 @@ class SimCore:
                         "params": p,
                         "pos": pos,
                         "price": price,
+                        "memo": memo,
                     }
                     self._emit_position(s)
                     self._log(s, "등록", f"{n} (상태: {pos.state.value})")
@@ -241,7 +264,12 @@ class SimCore:
                                 tp_ratios=ratios,
                             )
                             self._store.register_symbol(
-                                self._date, s, e["name"], e["params"], e["pos"]
+                                self._date,
+                                s,
+                                e["name"],
+                                e["params"],
+                                e["pos"],
+                                memo=e.get("memo", ""),
                             )
                             self._emit_position(s)
                     self._log(
@@ -314,6 +342,13 @@ class SimCore:
                     0,
                     f"최대 종목 수({self._max_symbols}) 도달 → 진입 금지, 당일 종료",
                 )
+        self._apply_decision(symbol, d, price)
+
+    def _apply_decision(self, symbol: str, d, price: float) -> None:
+        """판단 결과 적용 (즉시 체결 가정) — _step 과 수동 청산이 공유한다."""
+        e = self._entries[symbol]
+        pos = e["pos"]
+        from_state = pos.state
         if d.side is None:  # 주문 없는 즉시 전이
             pos = apply_transition(pos, d)
         else:  # 주문 → (즉시 체결 가정) → 확정
@@ -353,7 +388,9 @@ class SimCore:
     def _emit_position(self, symbol: str) -> None:
         e = self._entries[symbol]
         self._bus.events.put(
-            bus.PositionUpdate(symbol, e["name"], e["pos"], e["params"])
+            bus.PositionUpdate(
+                symbol, e["name"], e["pos"], e["params"], e.get("memo", "")
+            )
         )
 
     def _emit_funds(self) -> None:

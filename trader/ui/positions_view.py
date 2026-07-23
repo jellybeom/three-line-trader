@@ -30,6 +30,8 @@ _COLUMNS = (
     "line1",
     "line2",
     "line3",
+    "range",
+    "memo",
     "chart",
     "edit",
     "del",
@@ -46,6 +48,8 @@ _HEADINGS = (
     "1선",
     "2선",
     "3선",
+    "1↔3선",
+    "메모",
     "",
     "",
     "",
@@ -67,6 +71,7 @@ class PositionsView(ttk.Frame):
         on_chart: Callable[[str], None],
         on_csv: Callable[[], None],
         on_carry: Callable[[str], None],
+        on_manual_sell: Callable[[str], None],
     ):
         super().__init__(master)
         self._on_add = on_add
@@ -76,6 +81,7 @@ class PositionsView(ttk.Frame):
         self._on_chart = on_chart
         self._on_csv = on_csv
         self._on_carry = on_carry
+        self._on_manual_sell = on_manual_sell
         self._avg: dict[str, float] = {}  # 수익률 계산용 평단 캐시
         self._closed: set[str] = set()  # 종료 종목: 수익률을 종료 시점 값으로 고정
         self._sort_reverse: dict[str, bool] = {}
@@ -87,6 +93,10 @@ class PositionsView(ttk.Frame):
                 self.tree.column(col, width=32, anchor="center", stretch=False)
             elif col == "code":
                 self.tree.column(col, width=76, anchor="center", stretch=False)
+            elif col == "range":
+                self.tree.column(col, width=60, anchor="e")
+            elif col == "memo":
+                self.tree.column(col, width=110, anchor="center")
             else:
                 width = 150 if col == "state" else (100 if col == "name" else 90)
                 anchor = "center" if col in ("name", "state") else "e"
@@ -115,6 +125,10 @@ class PositionsView(ttk.Frame):
             label="다음 매매일로 이월 (상태 유지)",
             command=lambda: self._call(self._on_carry),
         )
+        self._menu.add_command(
+            label="수동 전량 청산 (시장가)",
+            command=lambda: self._call(self._on_manual_sell),
+        )
         self._menu.add_separator()
         self._menu.add_command(
             label="관심종목 제외", command=lambda: self._call(self._confirm_delete)
@@ -127,7 +141,9 @@ class PositionsView(ttk.Frame):
 
     # ── 이벤트 반영 (app.py 가 호출) ────────────────────────────
 
-    def upsert(self, symbol: str, name: str, pos: Position, params: Params) -> None:
+    def upsert(
+        self, symbol: str, name: str, pos: Position, params: Params, memo: str = ""
+    ) -> None:
         self._avg[symbol] = pos.avg_price
         qty = f"{pos.remaining}/{pos.total_bought}" if pos.total_bought else "-"
         avg = f"{pos.avg_price:,.0f}" if pos.avg_price else "-"
@@ -148,6 +164,9 @@ class PositionsView(ttk.Frame):
             tag = tag[0] if tag and tag[0] in ("profit", "loss") else ""
             pnl_cell = self._cell(symbol, "pnl")
         realized = f"{pos.realized_pnl:+,.0f}" if pos.realized_pnl else "-"
+        line_range = (
+            params.line1 - params.line3
+        ) / params.line1  # 1선 대비 3선까지 낙폭
         values = (
             name,
             state_text,
@@ -159,6 +178,8 @@ class PositionsView(ttk.Frame):
             f"{params.line1:,.0f}",
             f"{params.line2:,.0f}",
             f"{params.line3:,.0f}",
+            f"{line_range:.1%}",
+            memo,
             "📈",
             "✎",
             "✕",
@@ -216,13 +237,14 @@ class PositionsView(ttk.Frame):
                 self.tree.insert("", "end", iid=iid, values=values, tags=("addrow",))
             self.tree.move(iid, "", "end")  # 항상 맨 아래 유지 (추가 → CSV 순)
 
-    def upsert_staged(self, code: str, name: str) -> None:
+    def upsert_staged(self, code: str, name: str, memo: str = "") -> None:
         """CSV 로 불러온 3선 미입력 종목 — ✎ 로 가격을 입력하면 정식 등록된다."""
         vals = {c: "" for c in _COLUMNS}
         vals.update(
             code=code,
             name=name,
             state="3선 미입력",
+            memo=memo,
             line1="-",
             line2="-",
             line3="-",
