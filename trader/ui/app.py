@@ -469,12 +469,12 @@ class App(tk.Tk):
             return
         if symbol not in self._registry:
             return
-        name, params, _pos = self._registry[symbol]
+        name, params, pos, memo = self._registry[symbol]
         RegisterDialog(
             self,
-            on_submit=self._bus.commands.put,
+            on_submit=self._submit_register,
             funds=self._funds,
-            edit=(symbol, name, params),
+            edit=(symbol, name, params, pos, memo),
         )
 
     def _import_csv(self) -> None:
