@@ -173,3 +173,98 @@ def test_접수_통보는_체결량_0으로_해석():
 
 def test_해석_불가_통보는_None():
     assert extract_fill({"911": "abc"}) is None
+
+
+# ── 호출 간격·재시도 (2026-07-24 실측 장애 회귀 방지) ──────────
+# 재연결 시 22종목 시세를 간격 없이 조회하다 10건이 거부된 사고에서 도입.
+
+
+def test_연속_조회는_최소_간격을_두고_나간다(auth, monkeypatch):
+    import time
+
+    times = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        times.append(time.monotonic())
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {"return_code": 0, "stk_nm": "삼성전자", "cur_prc": "100"}
+
+        return R()
+
+    monkeypatch.setattr("trader.broker.requests.post", fake_post)
+    broker = Broker(auth)
+    for _ in range(3):
+        broker.stock_info("005930")
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert all(g >= Broker._MIN_INTERVAL * 0.9 for g in gaps), gaps
+
+
+def test_조회는_실패시_재시도한다(auth, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                if calls["n"] < 3:  # 앞의 두 번은 한도 초과처럼 실패
+                    return {"return_code": 3, "return_msg": "요청 한도 초과"}
+                return {"return_code": 0, "stk_nm": "삼성전자", "cur_prc": "100"}
+
+        return R()
+
+    monkeypatch.setattr("trader.broker.requests.post", fake_post)
+    assert Broker(auth).stock_info("005930") == ("삼성전자", 100)
+    assert calls["n"] == 3
+
+
+def test_주문은_절대_재시도하지_않는다(auth, monkeypatch):
+    """응답만 유실되고 주문은 접수됐을 수 있어 — 중복 주문 방지."""
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls["n"] += 1
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {"return_code": 3, "return_msg": "일시 오류"}
+
+        return R()
+
+    monkeypatch.setattr("trader.broker.requests.post", fake_post)
+    with pytest.raises(BrokerError):
+        Broker(auth).buy("005930", 1)
+    assert calls["n"] == 1
+
+
+def test_예수금_필드는_한번_찾으면_기억해_호출을_줄인다(auth, monkeypatch):
+    bodies = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        bodies.append(json)
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                # 일반조회(2)는 전부 0, 추정조회(3)에만 실제 금액
+                if bodies[-1].get("qry_tp") == "3":
+                    return {"return_code": 0, "entr": "500000"}
+                return {"return_code": 0, "entr": "0", "ord_alow_amt": "0"}
+
+        return R()
+
+    monkeypatch.setattr("trader.broker.requests.post", fake_post)
+    broker = Broker(auth)
+    assert broker.deposit() == 500_000
+    first_round = len(bodies)
+    assert broker.deposit() == 500_000
+    assert len(bodies) - first_round == 1  # 두 번째부터는 조회 1회

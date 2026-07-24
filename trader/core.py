@@ -23,7 +23,7 @@ import time
 from datetime import date, datetime, time as dtime, timedelta
 
 from trader.broker import Broker, BrokerError, extract_fill
-from trader.kiwoom import KiwoomAuthError, load_auth
+from trader.kiwoom import load_auth
 from trader.notifier import (
     DiscordNotifier,
     format_message,
@@ -117,13 +117,9 @@ class Core:
         self._warn_restored_pending()
 
         while True:
-            self._drain_commands_sync_part()
             await self._drain_commands()
             self._check_pending_timeout()
             await asyncio.sleep(_LOOP_SEC)
-
-    def _drain_commands_sync_part(self) -> None:
-        pass  # 자리 유지용 (명령 처리는 전부 async 경로)
 
     # ── 명령 처리 (UI → 코어) ───────────────────────────────────
 
@@ -610,19 +606,28 @@ class Core:
 
         장 운영시간 밖(새벽 서버 세션 정리 등)에는 시세 조회가 오류를 내므로 생략하고,
         실패는 종목별 알림 대신 요약 1건으로만 남긴다 (Discord 제한 방지).
+
+        조회는 Broker 가 최소 간격을 두고 재시도까지 처리하므로 여기서는 순서대로 부르기만
+        한다 (종목이 많으면 수 초가 걸리지만 그동안에도 실시간 틱 처리는 계속된다).
         """
         now = datetime.now()
         if now.weekday() >= 5 or not (dtime(8, 30) <= now.time() <= dtime(15, 40)):
             self._log("시스템", "연결", "장외 재연결 — 가격 보정 생략", notify=False)
             return
         failed: list[str] = []
-        for symbol, e in list(self._entries.items()):
-            if e["pos"].state is State.CLOSED:
-                continue
+        first_error = ""
+        # 보유 중(손절·익절 판정이 걸린) 종목을 먼저 보정한다 — 종목이 많으면 뒤로 갈수록
+        # 시간이 걸리므로, 위험을 지고 있는 포지션의 공백을 먼저 메우는 것이 안전하다.
+        targets = sorted(
+            (s for s, e in self._entries.items() if e["pos"].state is not State.CLOSED),
+            key=lambda s: self._entries[s]["pos"].state is State.WAITING,
+        )
+        for symbol in targets:
             try:
                 _, price = await asyncio.to_thread(self._broker.stock_info, symbol)
-            except BrokerError:
+            except BrokerError as err:
                 failed.append(symbol)
+                first_error = first_error or str(err)
                 continue
             if price > 0:
                 await self._on_tick(Tick(symbol, price, ""))
@@ -630,7 +635,15 @@ class Core:
             self._log(
                 "시스템",
                 "경고",
-                f"재연결 가격 보정 실패 {len(failed)}종목: {', '.join(failed)}",
+                f"재연결 가격 보정 실패 {len(failed)}/{len(targets)}종목 "
+                f"({', '.join(failed[:5])}{' 외' if len(failed) > 5 else ''}) — {first_error}",
+            )
+        else:
+            self._log(
+                "시스템",
+                "연결",
+                f"재연결 가격 보정 완료 ({len(targets)}종목)",
+                notify=False,
             )
 
     # ── 상태 로드 / 발행 ────────────────────────────────────────

@@ -17,6 +17,8 @@ broker 의 extract_fill 로 해석). 필드는 키움 FID 관례:
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 
 import requests
@@ -70,10 +72,24 @@ def extract_fill(values: dict) -> Fill | None:
 
 
 class Broker:
-    """키움 REST 주문·조회. watcher 와 KiwoomAuth 하나를 공유한다."""
+    """키움 REST 주문·조회. watcher 와 KiwoomAuth 하나를 공유한다.
+
+    키움 REST 는 초당 호출 수 제한이 있어, 연속 호출(재연결 시 전 종목 시세 보정 등)은
+    최소 간격을 두고 순서대로 내보낸다. 실측: 22종목을 간격 없이 조회하자 12건 성공 후
+    10건이 거부됨 (2026-07-24 14:00). 조회는 실패 시 재시도하되, **주문은 재시도하지
+    않는다** — 응답만 유실되고 주문은 접수됐을 수 있어 중복 주문 위험이 있기 때문이다.
+    """
+
+    _MIN_INTERVAL = 0.25  # REST 호출 최소 간격 (초) — 초당 4회
+    _QUERY_RETRIES = 2  # 조회 전용 재시도 횟수
 
     def __init__(self, auth: KiwoomAuth):
         self._auth = auth
+        self._lock = threading.Lock()  # 여러 스레드(to_thread)의 호출 간격 보장
+        self._last_call = 0.0
+        self._deposit_hint: tuple[str, str] | None = (
+            None  # (qry_tp, key) 성공 조합 기억
+        )
 
     # ── 주문 (시장가) ───────────────────────────────────────────
 
@@ -121,20 +137,28 @@ class Broker:
     )
 
     def deposit(self) -> float:
-        """주문가능금액 (예수금 방어의 기준). 일반조회 → 추정조회 순으로 시도한다."""
+        """주문가능금액 (예수금 방어의 기준). 일반조회 → 추정조회 순으로 시도한다.
+
+        한 번 성공한 (조회구분, 필드) 조합을 기억해 다음부터는 REST 호출 1회로 끝낸다
+        (계좌 유형마다 값이 실리는 필드가 달라 탐색이 필요하지만, 매번 할 필요는 없다).
+        """
+        if self._deposit_hint:
+            qry_tp, key = self._deposit_hint
+            value = self._extract_deposit(self.deposit_detail(qry_tp), (key,))
+            if value:
+                return value
+            self._deposit_hint = None  # 힌트가 더 이상 맞지 않으면 다시 탐색
+
         found_any = False
         for qry_tp in ("2", "3"):
             data = self.deposit_detail(qry_tp)
             for key in self._DEPOSIT_KEYS:
-                raw = data.get(key)
-                if raw in (None, ""):
-                    continue
-                try:
-                    value = float(raw)
-                except (ValueError, TypeError):
+                value = self._extract_deposit(data, (key,))
+                if value is None:
                     continue
                 found_any = True
                 if value > 0:
+                    self._deposit_hint = (qry_tp, key)
                     return value
         if found_any:  # 전 후보가 0 — 실제 잔고 없음
             return 0.0
@@ -142,14 +166,31 @@ class Broker:
             "주문가능금액 필드를 찾지 못함 (kt00001 응답 필드 변경 가능성)"
         )
 
+    @staticmethod
+    def _extract_deposit(data: dict, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            raw = data.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                continue
+        return None
+
     def deposit_detail(self, qry_tp: str = "2") -> dict:
         """예수금상세현황(kt00001) 원본 응답 — 필드 진단용. qry_tp 2=일반, 3=추정."""
-        return self._request(_PATH_ACCOUNT, _TR_DEPOSIT, {"qry_tp": qry_tp})
+        return self._request(
+            _PATH_ACCOUNT, _TR_DEPOSIT, {"qry_tp": qry_tp}, retries=self._QUERY_RETRIES
+        )
 
     def holdings(self) -> dict[str, int]:
         """계좌 실제 보유 수량 {종목코드: 잔량} — 시작 시 reconcile 용."""
         data = self._request(
-            _PATH_ACCOUNT, _TR_HOLDINGS, {"qry_tp": "1", "dmst_stex_tp": _EXCHANGE}
+            _PATH_ACCOUNT,
+            _TR_HOLDINGS,
+            {"qry_tp": "1", "dmst_stex_tp": _EXCHANGE},
+            retries=self._QUERY_RETRIES,
         )
         result: dict[str, int] = {}
         for row in data.get("acnt_evlt_remn_indv_tot", []):
@@ -163,7 +204,9 @@ class Broker:
 
     def stock_info(self, symbol: str) -> tuple[str, float]:
         """(종목명, 현재가). 등록 창 자동 조회 및 재연결 후 가격 보정용."""
-        data = self._request(_PATH_STOCK, _TR_STOCK_INFO, {"stk_cd": symbol})
+        data = self._request(
+            _PATH_STOCK, _TR_STOCK_INFO, {"stk_cd": symbol}, retries=self._QUERY_RETRIES
+        )
         name = data.get("stk_nm", "")
         try:
             price = abs(float(data.get("cur_prc") or 0))  # 등락 부호 제거
@@ -175,7 +218,28 @@ class Broker:
 
     # ── 내부 ────────────────────────────────────────────────────
 
-    def _request(self, path: str, api_id: str, body: dict) -> dict:
+    def _request(self, path: str, api_id: str, body: dict, retries: int = 0) -> dict:
+        """REST 호출 (레이트 리밋 적용). retries 는 조회 전용 — 주문에는 쓰지 않는다."""
+        last_error: BrokerError | None = None
+        for attempt in range(retries + 1):
+            try:
+                return self._request_once(path, api_id, body)
+            except BrokerError as e:
+                last_error = e
+                if attempt < retries:
+                    time.sleep(0.5 * (attempt + 1))  # 한도 초과 완화용 백오프
+        raise last_error
+
+    def _throttle(self) -> None:
+        now = time.monotonic()
+        wait = self._last_call + self._MIN_INTERVAL - now
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
+
+    def _request_once(self, path: str, api_id: str, body: dict) -> dict:
+        with self._lock:
+            self._throttle()
         resp = requests.post(
             f"{self._auth.host}{path}",
             headers={

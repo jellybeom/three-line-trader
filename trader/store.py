@@ -298,12 +298,13 @@ class Store:
     ) -> list[tuple[str, str, str, str]]:
         """해당 매매일의 일반 로그 (ts, symbol, kind, reason) — 오래된 순.
 
-        재시작·매매일 전환 시 로그 화면 복원용. 전이 상세 행(from_state 있음)은
-        실시간 로그와 목록을 일치시키기 위해 제외한다 (전이는 별도 로그 줄로 이미 기록됨).
+        재시작·매매일 전환 시 로그 화면 복원용. 상태 정보를 담은 감사 행(등록·전이 등,
+        from_state/to_state 중 하나라도 있음)은 제외한다 — 같은 사건을 화면 로그 줄이
+        이미 남기고 있어, 포함하면 복원 시 같은 줄이 두 번 보인다.
         """
         rows = self._conn.execute(
             "SELECT ts, symbol, kind, reason FROM events "
-            "WHERE trade_date = ? AND from_state IS NULL "
+            "WHERE trade_date = ? AND from_state IS NULL AND to_state IS NULL "
             "ORDER BY rowid DESC LIMIT ?",
             (trade_date, limit),
         ).fetchall()

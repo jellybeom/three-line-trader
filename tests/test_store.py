@@ -279,3 +279,22 @@ def test_저장된_로그_복원은_일반_로그만_오래된_순(store):
     )
     assert not any(k == "전이" for _, _, k, _ in rows)  # 전이 상세는 제외
     assert not any(t == "다른 날짜" for _, _, _, t in rows)  # 다른 매매일 제외
+
+
+def test_복원_로그에_등록_감사행이_중복되지_않는다(store):
+    """등록은 감사 행(상태 포함)과 화면 로그 줄이 각각 남는다 — 복원 시 한 줄만 보여야 한다."""
+    from trader.state_machine import Params
+
+    p = Params(
+        line1=10_000,
+        line2=9_000,
+        line3=8_000,
+        buy1_amount=1_000_000,
+        buy2_amount=900_000,
+    )
+    store.register_symbol("2026-07-24", "066590", "스모트로닉", p)  # 감사 행
+    store.log(
+        "2026-07-24", "066590", "등록", "스모트로닉 (상태: 대기, 잔량 0주)"
+    )  # 화면 줄
+    rows = store.recent_events("2026-07-24")
+    assert len([r for r in rows if r[3].startswith("스모트로닉")]) == 1
