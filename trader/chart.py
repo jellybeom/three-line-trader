@@ -135,15 +135,20 @@ def _candles(ax, bars: list[Bar]) -> None:
     width = 0.6
     for i, b in enumerate(bars):
         color = _UP if b.close >= b.open else _DOWN
-        ax.plot([i, i], [b.low, b.high], color=color, linewidth=0.7, zorder=1)
         body_low, body_high = min(b.open, b.close), max(b.open, b.close)
+        # 심지는 몸통 위·아래 두 구간으로 나눠 긋는다 — 몸통이 투명(hollow)이라
+        # 한 줄로 그으면 몸통 안을 관통하는 세로선이 비쳐 보인다.
+        if b.low < body_low:
+            ax.plot([i, i], [b.low, body_low], color=color, linewidth=0.7, zorder=1)
+        if b.high > body_high:
+            ax.plot([i, i], [body_high, b.high], color=color, linewidth=0.7, zorder=1)
         height = max(body_high - body_low, (b.high - b.low) * 0.001 or 0.01)
         ax.add_patch(
             Rectangle(
                 (i - width / 2, body_low),
                 width,
                 height,
-                facecolor="white",
+                facecolor="none",
                 edgecolor=color,
                 linewidth=0.9,
                 zorder=2,
@@ -166,17 +171,25 @@ def _hollow_bars(ax, bars: list[Bar], heights: list[float]) -> None:
     ax.set_ylim(0, max(heights) * 1.1 if heights and max(heights) > 0 else 1)
 
 
-def _hlines(ax, lines: tuple[float, float, float], n_bars: int) -> None:
+def _hlines(ax, lines: tuple[float, float, float]) -> None:
     for level in lines:  # 캔들보다 위에 보이도록 zorder 를 높인다 (캔들 1~2, 이평 3)
         ax.axhline(level, color=_MAGENTA, linewidth=1.8, zorder=4)
         ax.annotate(
-            f" {level:,.0f}",
-            (n_bars - 1, level),
+            f"{level:,.0f}",
+            xy=(1.0, level),
+            xycoords=ax.get_yaxis_transform(),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
             fontsize=7,
-            color=_MAGENTA,
-            va="bottom",
-            ha="right",
-            zorder=4,
+            color="white",
+            zorder=6,
+            annotation_clip=False,
+            bbox={
+                "boxstyle": "round,pad=0.2",
+                "facecolor": _MAGENTA,
+                "edgecolor": "none",
+            },
         )
 
 
@@ -267,7 +280,7 @@ def render_daily(
             ax_main.plot(
                 xs, [line[i] for i in xs], color=color, linewidth=0.9, zorder=3
             )
-    _hlines(ax_main, lines, len(visible))
+    _hlines(ax_main, lines)
     _fill_markers(ax_main, visible, fills, daily=True)
     last = visible[-1]
     _last_value_tag(
@@ -281,7 +294,9 @@ def render_daily(
     vol_div, vol_unit = _unit(max(b.volume for b in visible))
     vols = [b.volume / vol_div for b in visible]
     _hollow_bars(ax_vol, visible, vols)
-    _last_value_tag(ax_vol, len(visible) - 1, vols[-1], "#616161")
+    _last_value_tag(
+        ax_vol, len(visible) - 1, vols[-1], _UP if last.close >= last.open else _DOWN
+    )
     ax_vol.set_ylabel(f"거래량({vol_unit}주)", fontsize=7)
     _comma_axis(ax_vol)
     _style(ax_vol)
@@ -292,7 +307,7 @@ def render_daily(
         range(len(visible)), vals, width=0.6, color=_VALUE_FILL
     )  # 거래대금만 채움
     ax_val.set_xlim(-1, len(visible) + 2)
-    _last_value_tag(ax_val, len(visible) - 1, vals[-1], "#616161")
+    _last_value_tag(ax_val, len(visible) - 1, vals[-1], _VALUE_FILL)
     ax_val.set_ylabel(f"거래대금({val_unit}원)", fontsize=7)
     _comma_axis(ax_val)
     _style(ax_val)
@@ -355,12 +370,11 @@ def render_minute(
     바닥 대비 % 계단(검정): 그날 누적 최저가 × (1+3/5/7/10/15/20%) — 날마다 리셋.
     """
     plt = _setup_matplotlib(font)
-    width = min(16.0, max(10.0, len(bars) * 0.045))
     fig, (ax, ax_vol) = plt.subplots(
         2,
         1,
-        figsize=(width, 8.0),
-        dpi=100,
+        figsize=(9.6, 12.8),
+        dpi=100,  # 일봉과 같은 3:4 세로형
         gridspec_kw={"height_ratios": [85, 15], "hspace": 0.05},
     )
 
@@ -382,7 +396,7 @@ def render_minute(
             drawstyle="steps-post",
             zorder=2,
         )
-    _hlines(ax, lines, len(bars))
+    _hlines(ax, lines)
     _fill_markers(ax, bars, fills, daily=False)
 
     day_starts = [
@@ -397,7 +411,9 @@ def render_minute(
     mvol_div, mvol_unit = _unit(max(b.volume for b in bars))
     mvols = [b.volume / mvol_div for b in bars]
     _hollow_bars(ax_vol, bars, mvols)
-    _last_value_tag(ax_vol, len(bars) - 1, mvols[-1], "#616161")
+    _last_value_tag(
+        ax_vol, len(bars) - 1, mvols[-1], _UP if last.close >= last.open else _DOWN
+    )
     ax_vol.set_ylabel(f"거래량({mvol_unit}주)", fontsize=7)
     _comma_axis(ax_vol)
     ticks = [0, *day_starts]

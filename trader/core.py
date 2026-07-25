@@ -1000,12 +1000,17 @@ class Core:
 
         fills = [Fill(ts, side, price) for ts, side, price in fills_raw]
 
-        # 3분봉 범위: 진입일 09:00 부터 + 전일 여분 8봉
+        # 3분봉 범위: 최근 3거래일(맥락) vs 진입일 중 이른 쪽부터 + 직전 여분 8봉.
+        # 3:4 세로형에서 3일치(약 400봉)가 가독 한계라 기본을 3일로 두되,
+        # 이월 종목은 진입일부터 전부 보여준다 (서버 한도 약 6.9일).
         entry_day = (
             fills[0].ts[:10].replace("-", "") if fills else self._date.replace("-", "")
         )
+        days = sorted({b.key[:8] for b in minute_all})
+        base_day = days[-3] if len(days) >= 3 else days[0]
+        start_day = min(entry_day, base_day)
         start_idx = next(
-            (i for i, b in enumerate(minute_all) if b.key[:8] >= entry_day), 0
+            (i for i, b in enumerate(minute_all) if b.key[:8] >= start_day), 0
         )
         minute = minute_all[max(0, start_idx - 8) :]
 
@@ -1045,9 +1050,7 @@ class Core:
         name = self._entries[symbol]["name"] if symbol in self._entries else symbol
         try:  # 일봉·3분봉을 한 메시지로 (요청 1회, 사진 2장 나란히)
             await asyncio.to_thread(
-                self._notifier.send_images,
-                list(paths),
-                f"📈 {name}({symbol}) 복기 차트",
+                self._notifier.send_images, list(paths), f"📈 {name}({symbol}) 차트"
             )
         except Exception as e:  # noqa: BLE001
             self._log(symbol, "경고", f"차트 전송 실패: {e}", notify=False)

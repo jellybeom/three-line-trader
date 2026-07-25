@@ -199,6 +199,50 @@ def test_지수는_100배_스케일을_보정한다(auth, monkeypatch):
     assert bars[0][2] == 6700.0
 
 
+def test_거래대금_단위는_자동으로_원으로_보정된다(auth, monkeypatch):
+    """영웅문 표기처럼 백만원 단위로 와도 종가×거래량 대조로 10^n 스케일을 맞춘다."""
+    from trader.broker import Broker
+
+    rows = [
+        {
+            "dt": f"202607{d:02d}",
+            "open_pric": "2500",
+            "high_pric": "2600",
+            "low_pric": "2400",
+            "cur_prc": "2500",
+            "trde_qty": "1000000",
+            "trde_prica": "2500",
+        }  # 실제 25억원(2500×100만)이 '백만원' 단위 2,500 으로 옴
+        for d in range(1, 11)
+    ]
+    monkeypatch.setattr(
+        "trader.broker.requests.post", lambda *a, **k: _chart_response(rows)
+    )
+    bars = Broker(auth).daily_chart("005930")
+    assert bars[-1][6] == 2_500_000_000  # 원 단위로 복원
+
+
+def test_거래대금이_이미_원_단위면_그대로_둔다(auth, monkeypatch):
+    from trader.broker import Broker
+
+    rows = [
+        {
+            "dt": f"202607{d:02d}",
+            "cur_prc": "2500",
+            "open_pric": "2500",
+            "high_pric": "2600",
+            "low_pric": "2400",
+            "trde_qty": "1000",
+            "trde_prica": "2500000",
+        }
+        for d in range(1, 11)
+    ]
+    monkeypatch.setattr(
+        "trader.broker.requests.post", lambda *a, **k: _chart_response(rows)
+    )
+    assert Broker(auth).daily_chart("005930")[-1][6] == 2_500_000
+
+
 def test_종가가_없는_행은_건너뛴다(auth, monkeypatch):
     from trader.broker import Broker
 

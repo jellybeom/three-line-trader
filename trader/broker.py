@@ -250,6 +250,30 @@ class Broker:
         bars.sort(key=lambda b: b[0])
         return bars
 
+    @staticmethod
+    def _calibrate_value(bars: list[tuple]) -> list[tuple]:
+        """거래대금 단위 자동 보정 → 원.
+
+        TR 마다 거래대금 단위가 다를 수 있다(원/천원/백만원 — 영웅문 표기는 백만원).
+        각 봉의 종가×거래량은 거래대금의 근사치(2배 이내)이므로, 응답값과의 비율을
+        10ⁿ 으로 반올림해 스케일을 맞춘다. 단위가 이미 원이면 n=0 이라 그대로다.
+        """
+        import math
+        import statistics
+
+        ratios = [
+            math.log10((c * v) / val)
+            for _, _, _, _, c, v, val in bars[-20:]
+            if v > 0 and val > 0 and c > 0
+        ]
+        if not ratios:
+            return bars
+        n = round(statistics.median(ratios))
+        if n == 0:
+            return bars
+        factor = 10.0**n
+        return [(k, o, h, low, c, v, val * factor) for k, o, h, low, c, v, val in bars]
+
     def daily_chart(self, symbol: str, count: int = 180) -> list[tuple]:
         """일봉 (최근 count 개, 오름차순). 이동평균 워밍업을 위해 표시분보다 길게 요청한다."""
         from datetime import date as _date
@@ -264,7 +288,7 @@ class Broker:
             },
             retries=self._QUERY_RETRIES,
         )
-        return self._parse_bars(data, minute=False)[-count:]
+        return self._calibrate_value(self._parse_bars(data, minute=False)[-count:])
 
     def minute_chart(self, symbol: str, interval: int = 3) -> list[tuple]:
         """분봉 (서버가 주는 최대 분량, 오름차순). 3분봉 기준 약 6일치."""
