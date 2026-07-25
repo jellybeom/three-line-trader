@@ -29,6 +29,7 @@ from trader.state_machine import (
 )
 from trader.notifier import (
     DiscordNotifier,
+    format_daily_summary,
     format_message,
     format_trade,
     load_webhook,
@@ -74,6 +75,8 @@ class SimCore:
                 "pos": pos,
                 "price": price,
                 "memo": memo,
+                "high": pos.high_price,
+                "low": pos.low_price,
             }
 
     def loop(self) -> None:
@@ -157,6 +160,19 @@ class SimCore:
                         f"{target.isoformat()} 리스트로 이월 (상태: {e['pos'].state.value}, "
                         f"잔량 {e['pos'].remaining}주)",
                     )
+                case bus.RequestDailySummary():
+                    symbols, fills = self._store.daily_report(self._date)
+                    text = format_daily_summary(self._date, symbols, fills, 10_000_000)
+                    self._log(
+                        "시스템",
+                        "요약",
+                        f"일일 요약 — 체결 {len(fills)}건",
+                        notify=False,
+                    )
+                    if self._notifier:
+                        threading.Thread(
+                            target=self._send_discord, args=(text,), daemon=True
+                        ).start()
                 case bus.ConnectDiscord():
                     try:
                         notifier = DiscordNotifier(load_webhook())
@@ -225,6 +241,8 @@ class SimCore:
                         "pos": pos,
                         "price": price,
                         "memo": memo,
+                        "high": pos.high_price,
+                        "low": pos.low_price,
                     }
                     self._emit_position(s)
                     self._log(s, "등록", f"{n} (상태: {pos.state.value})")
@@ -321,6 +339,11 @@ class SimCore:
         drift = -0.0008 if e["pos"].state is State.WAITING else 0.0
         e["price"] = max(1, round(e["price"] * (1 + random.gauss(drift, _VOLATILITY))))
         price, pos, params = e["price"], e["pos"], e["params"]
+        if (
+            pos.total_bought and pos.state is not State.CLOSED
+        ):  # 보유 구간 최고/최저 추적
+            e["high"] = max(e.get("high") or 0.0, price)
+            e["low"] = min(e.get("low") or price, price)
         self._bus.events.put(bus.Tick(symbol, price))
 
         d = decide(pos, params, price)
@@ -352,7 +375,16 @@ class SimCore:
         if d.side is None:  # 주문 없는 즉시 전이
             pos = apply_transition(pos, d)
         else:  # 주문 → (즉시 체결 가정) → 확정
+            fee = float(
+                int(price * d.qty * (0.00015 + (0.0015 if d.side is Side.SELL else 0)))
+            )
             pos = apply_fill(mark_pending(pos), d, fill_price=price, fill_qty=d.qty)
+            if d.side is Side.BUY and not e.get("high"):
+                e["high"] = e["low"] = price
+            pos = replace(pos, fees=pos.fees + fee)
+        pos = replace(
+            pos, high_price=e.get("high") or 0.0, low_price=e.get("low") or 0.0
+        )
         e["pos"] = pos
         self._store.save_transition(self._date, symbol, from_state, pos, d, price)
         self._emit_position(symbol)

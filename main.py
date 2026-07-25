@@ -1,4 +1,4 @@
-"""실전 진입점 — 코어 스레드(asyncio) 기동 후 Tkinter 앱 실행. 조립만 담당한다.
+"""실전 진입점 — 중복 실행을 막고, 코어 스레드(asyncio) 기동 후 Tkinter 앱을 실행한다.
 
     uv run main.py
 
@@ -9,12 +9,47 @@
 from __future__ import annotations
 
 import asyncio
+import socket
+import sys
 import threading
+import tkinter as tk
+from tkinter import messagebox
 
 from trader.ui import bus
 
+_LOCK_PORT = 47321  # 중복 실행 감지용 로컬 포트 (통신하지 않고 점유만 한다)
+
+
+def acquire_single_instance() -> socket.socket | None:
+    """이미 실행 중이면 None. 성공하면 소켓을 돌려주고 프로세스 수명 동안 점유한다.
+
+    파일 잠금 대신 포트를 쓰는 이유: 프로그램이 비정상 종료돼도 OS 가 포트를 회수하므로
+    잠금 찌꺼기가 남아 다음 실행을 막는 일이 없다. 두 인스턴스가 동시에 돌면 같은 조건에
+    각각 주문을 내 이중 매수가 되므로, **주문이 가능한 코어를 띄우기 전에** 확인한다.
+    """
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock.bind(("127.0.0.1", _LOCK_PORT))
+    except OSError:
+        lock.close()
+        return None
+    lock.listen(1)
+    return lock
+
 
 def main() -> None:
+    lock = acquire_single_instance()
+    if lock is None:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "이미 실행 중",
+            "three-line-trader 가 이미 실행 중입니다.\n"
+            "두 개가 동시에 돌면 같은 조건에 주문이 두 번 나갈 수 있어 종료합니다.",
+        )
+        root.destroy()
+        sys.exit(1)
+
     b = bus.Bus()
 
     def run_core() -> None:
@@ -27,7 +62,10 @@ def main() -> None:
 
     from trader.ui.app import App
 
-    App(b).mainloop()
+    try:
+        App(b).mainloop()
+    finally:
+        lock.close()
 
 
 if __name__ == "__main__":

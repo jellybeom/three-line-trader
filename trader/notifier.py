@@ -81,6 +81,94 @@ def format_trade(
     return msg
 
 
+def _holding_time(fills: list[dict]) -> str:
+    """첫 체결 ~ 마지막 체결 경과 시간 (요약 표시용)."""
+    if len(fills) < 2:
+        return ""
+    from datetime import datetime
+
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        start = datetime.strptime(fills[0]["ts"], fmt)
+        end = datetime.strptime(fills[-1]["ts"], fmt)
+    except (ValueError, KeyError):
+        return ""
+    minutes = int((end - start).total_seconds() // 60)
+    return f"{minutes // 60}시간 {minutes % 60}분" if minutes >= 60 else f"{minutes}분"
+
+
+def format_daily_summary(
+    trade_date: str,
+    symbols: list[dict],
+    fills: list[dict],
+    deposit: float | None = None,
+) -> str:
+    """하루 매매 요약 — 실현손익(세전/세후), 종목별 결과, 이월 필요 종목."""
+    weekday = "월화수목금토일"[
+        __import__("datetime").date.fromisoformat(trade_date).weekday()
+    ]
+    traded = [s for s in symbols if s["total_bought"] > 0]
+    closed = [s for s in traded if s["state"] == "종료"]
+    holding = [s for s in traded if s["state"] != "종료"]
+    realized = sum(s["realized_pnl"] for s in traded)
+    fees = sum(s["fees"] for s in traded)
+    invested = sum(s["avg_price"] * s["total_bought"] for s in traded)
+
+    lines = [f"📊 **{trade_date} ({weekday}) 매매 요약**", ""]
+    lines.append(
+        f"체결 {len(fills)}건 · 진입 {len(traded)}종목 / 청산 {len(closed)}종목"
+    )
+    if traded:
+        lines.append(
+            f"실현손익 **{realized:+,.0f}원** (세전) · **{realized - fees:+,.0f}원** (세후)"
+        )
+        if invested:
+            lines.append(
+                f"투입 {invested:,.0f}원 대비 {(realized - fees) / invested:+.2%}"
+            )
+    lines.append("")
+
+    for s in traded:
+        own = [f for f in fills if f["symbol"] == s["symbol"]]
+        bought = sum(f["qty"] for f in own if f["side"] == "매수")
+        sold = sum(f["qty"] for f in own if f["side"] == "매도")
+        mark = "  ⚠ 이월 필요" if s["state"] != "종료" else ""
+        lines.append(f"▸ **{s['name']}({s['symbol']})** · {s['state']}{mark}")
+        detail = f"   매수 {bought}주 (평단 {s['avg_price']:,.0f})"
+        if sold:
+            detail += f" · 매도 {sold}주"
+        if s["remaining"]:
+            detail += f" · 잔량 {s['remaining']}주"
+        lines.append(detail)
+        if s["realized_pnl"]:  # 청산이 있었던 종목만 손익 표시
+            lines.append(
+                f"   실현 {s['realized_pnl']:+,.0f} → 세후 "
+                f"**{s['realized_pnl'] - s['fees']:+,.0f}원**"
+            )
+        if s["avg_price"] and s["high_price"]:  # 보유 중 최고/최저 (MFE/MAE)
+            high = (s["high_price"] - s["avg_price"]) / s["avg_price"]
+            low = (s["low_price"] - s["avg_price"]) / s["avg_price"]
+            extra = f"   최고 {high:+.1%} / 최저 {low:+.1%}"
+            if held := _holding_time(own):
+                extra += f" · 보유 {held}"
+            lines.append(extra)
+
+    if not traded:
+        lines.append("체결된 매매가 없습니다.")
+    lines.append("")
+    lines.append(
+        f"미진입 {len(symbols) - len(traded)}종목"
+        + (
+            f" · 보유 중 {len(holding)}종목 (다음 매매일로 이월하세요)"
+            if holding
+            else ""
+        )
+    )
+    if deposit is not None:
+        lines.append(f"예수금 {deposit:,.0f}원")
+    return "\n".join(lines)
+
+
 def format_message(symbol: str, kind: str, text: str) -> str:
     prefix = f"**[{kind}]**"
     return f"{prefix} {text}" if symbol == "시스템" else f"{prefix} {symbol} · {text}"

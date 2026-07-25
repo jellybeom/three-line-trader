@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from trader.broker import BrokerError
 from trader.core import Core
 from trader.state_machine import Params, Position, State
 from trader.store import Store
@@ -36,6 +37,9 @@ class StubBroker:
 
     def deposit(self):
         return self.deposit_value
+
+    def holdings(self):
+        return getattr(self, "holdings_result", {})
 
 
 @pytest.fixture
@@ -209,3 +213,104 @@ def test_감시_중지_상태에서는_시세만_표시하고_판단_없음(core
     asyncio.run(tick(core, 9_950))
     assert core._broker.orders == []
     assert core._entries["005930"]["pos"].state is State.WAITING
+
+
+# ── 주문 실패 쿨다운 / 체결 대기 복구 ──────────────────────────
+
+
+class RejectingBroker(StubBroker):
+    """모든 주문을 거부하는 broker — 실패 반복 방지 검증용."""
+
+    def buy(self, symbol, qty):
+        self.orders.append(("매수", symbol, qty))
+        raise BrokerError("주문가능금액 부족")
+
+    def sell(self, symbol, qty):
+        self.orders.append(("매도", symbol, qty))
+        raise BrokerError("거부")
+
+
+def test_주문_실패해도_틱마다_재주문하지_않는다(core):
+    core._broker = RejectingBroker()
+    register(core)
+    for _ in range(50):  # 같은 조건의 틱이 연속으로 들어와도
+        asyncio.run(tick(core, 9_950))
+    assert len(core._broker.orders) == 1  # 주문 시도는 1회뿐
+
+
+def test_연속_실패시_당일_해당_종목_주문_차단(core):
+    core._broker = RejectingBroker()
+    register(core)
+    for _ in range(3):
+        asyncio.run(tick(core, 9_950))
+        core._order_fail["005930"]["until"] = 0  # 쿨다운만 만료 (실패 누적은 유지)
+    assert "005930" in core._order_blocked
+    asyncio.run(tick(core, 9_950))
+    assert len(core._broker.orders) == 3  # 차단 후에는 시도조차 하지 않음
+
+
+def test_체결통보_미도착시_계좌_잔고로_대기_해제(core, monkeypatch):
+    """pending 이 풀리지 않으면 손절·익절이 하루 종일 멈춘다 — 계좌를 근거로 복구한다."""
+    import trader.core as core_mod
+
+    register(core)
+    asyncio.run(tick(core, 9_950))
+    assert core._entries["005930"]["pos"].pending is True
+    asyncio.run(tick(core, 7_000))  # 손절선인데도 pending 이라 판정이 멈춘 상태
+    assert core._entries["005930"]["pos"].state is State.WAITING
+
+    core._broker.holdings_result = {"005930": 60}  # 실제로는 60주만 체결
+    monkeypatch.setattr(core_mod, "_PENDING_RECOVER_SEC", 0)
+    asyncio.run(core._check_pending())
+
+    pos = core._entries["005930"]["pos"]
+    assert pos.pending is False and pos.remaining == 60 and pos.state is State.BUY1
+
+
+def test_잔고가_비어있으면_종료로_복구(core, monkeypatch):
+    import trader.core as core_mod
+
+    register(core)
+    asyncio.run(tick(core, 9_950))
+    core._broker.holdings_result = {}
+    monkeypatch.setattr(core_mod, "_PENDING_RECOVER_SEC", 0)
+    asyncio.run(core._check_pending())
+    assert core._entries["005930"]["pos"].state is State.CLOSED
+
+
+# ── 거래비용 / MFE·MAE ─────────────────────────────────────────
+
+
+def test_체결마다_거래비용이_누적된다(core):
+    core._commission_rate, core._tax_rate = 0.001, 0.002
+    register(core)
+    asyncio.run(tick(core, 10_000))
+    asyncio.run(fill(core, "ORD1", 100, 10_000))  # 매수 100만 × 0.1% = 1,000
+    assert core._entries["005930"]["pos"].fees == 1_000
+    asyncio.run(tick(core, 10_300))
+    asyncio.run(fill(core, "ORD2", 40, 10_300))  # 매도 41.2만 × 0.3% = 1,236
+    assert core._entries["005930"]["pos"].fees == 1_000 + 1_236
+
+
+def test_보유_중_최고최저가가_기록된다(core):
+    register(core)
+    asyncio.run(tick(core, 10_000))
+    asyncio.run(fill(core, "ORD1", 100, 10_000))
+    for price in (10_200, 9_700, 10_100):  # 보유 중 등락
+        asyncio.run(tick(core, price))
+    asyncio.run(tick(core, 10_300))
+    asyncio.run(fill(core, "ORD2", 40, 10_300))
+    pos = core._entries["005930"]["pos"]
+    assert pos.high_price == 10_300 and pos.low_price == 9_700
+
+
+def test_진입_전_가격은_최저가에_반영되지_않는다(core):
+    register(core)
+    asyncio.run(tick(core, 12_000))  # 아직 대기 — 추적 대상 아님
+    asyncio.run(tick(core, 10_000))
+    asyncio.run(fill(core, "ORD1", 100, 10_000))
+    asyncio.run(tick(core, 10_500))
+    asyncio.run(tick(core, 10_600))
+    asyncio.run(fill(core, "ORD2", 40, 10_600))
+    pos = core._entries["005930"]["pos"]
+    assert pos.low_price == 10_000  # 12,000 은 기록되지 않음

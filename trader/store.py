@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS positions (
     total_bought INTEGER NOT NULL,
     remaining    INTEGER NOT NULL,
     realized_pnl REAL NOT NULL DEFAULT 0,
+    fees         REAL NOT NULL DEFAULT 0,   -- 누적 거래비용 (수수료 + 매도 거래세)
+    high_price   REAL NOT NULL DEFAULT 0,   -- 보유 중 최고가 (MFE)
+    low_price    REAL NOT NULL DEFAULT 0,   -- 보유 중 최저가 (MAE)
     pending      INTEGER NOT NULL DEFAULT 0,
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (trade_date, symbol),
@@ -88,7 +91,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 6  # 스키마 변경 시 1 증가. 구버전 DB 파일은 명확한 에러로 안내한다.
+_SCHEMA_VERSION = 7  # 스키마 변경 시 1 증가. 구버전 DB 파일은 명확한 에러로 안내한다.
 
 
 class Store:
@@ -200,7 +203,7 @@ class Store:
         result: dict[str, tuple[str, Params, Position, str]] = {}
         rows = self._conn.execute(
             """SELECT s.*, p.state, p.avg_price, p.total_bought, p.remaining,
-                      p.realized_pnl, p.pending
+                      p.realized_pnl, p.fees, p.high_price, p.low_price, p.pending
                FROM symbols s JOIN positions p USING(trade_date, symbol)
                WHERE s.trade_date=?""",
             (trade_date,),
@@ -223,6 +226,9 @@ class Store:
                     remaining=r["remaining"],
                     pending=bool(r["pending"]),
                     realized_pnl=r["realized_pnl"],
+                    fees=r["fees"],
+                    high_price=r["high_price"],
+                    low_price=r["low_price"],
                 )
             except ValueError as e:
                 raise ValueError(
@@ -292,6 +298,32 @@ class Store:
         """전이 외 일반 이벤트 기록 (에러, 재연결, 잔고 불일치 경고 등)."""
         with self._conn:
             self._insert_event(trade_date, symbol, kind=kind, reason=reason)
+
+    def daily_report(self, trade_date: str) -> tuple[list[dict], list[dict]]:
+        """일일 요약용 원자료 — (종목 스냅샷 목록, 체결 목록).
+
+        체결은 `events` 의 전이 행 중 주문이 동반된 것(side 있음)만 모은다.
+        """
+        symbol_rows = [
+            dict(r)
+            for r in self._conn.execute(
+                """SELECT s.symbol, s.name, s.memo, p.state, p.avg_price, p.total_bought,
+                      p.remaining, p.realized_pnl, p.fees, p.high_price, p.low_price
+               FROM symbols s JOIN positions p USING(trade_date, symbol)
+               WHERE s.trade_date=? ORDER BY s.symbol""",
+                (trade_date,),
+            ).fetchall()
+        ]
+        fills = [
+            dict(r)
+            for r in self._conn.execute(
+                """SELECT ts, symbol, side, qty, price, reason FROM events
+               WHERE trade_date=? AND kind='전이' AND side IS NOT NULL
+               ORDER BY id""",
+                (trade_date,),
+            ).fetchall()
+        ]
+        return symbol_rows, fills
 
     def recent_events(
         self, trade_date: str, limit: int = 500
@@ -390,12 +422,13 @@ class Store:
         self._conn.execute(
             """INSERT INTO positions
                (trade_date, symbol, state, avg_price, total_bought, remaining,
-                realized_pnl, pending, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?)
+                realized_pnl, fees, high_price, low_price, pending, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(trade_date, symbol) DO UPDATE SET
                 state=excluded.state, avg_price=excluded.avg_price,
                 total_bought=excluded.total_bought, remaining=excluded.remaining,
-                realized_pnl=excluded.realized_pnl,
+                realized_pnl=excluded.realized_pnl, fees=excluded.fees,
+                high_price=excluded.high_price, low_price=excluded.low_price,
                 pending=excluded.pending, updated_at=excluded.updated_at""",
             (
                 trade_date,
@@ -405,6 +438,9 @@ class Store:
                 pos.total_bought,
                 pos.remaining,
                 pos.realized_pnl,
+                pos.fees,
+                pos.high_price,
+                pos.low_price,
                 int(pos.pending),
                 _now(),
             ),

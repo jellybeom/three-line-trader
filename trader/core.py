@@ -21,12 +21,14 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import date, datetime, time as dtime, timedelta
+from pathlib import Path
 
 from trader.broker import Broker, BrokerError, extract_fill
 from trader.kiwoom import load_auth
 from trader.notifier import (
     DiscordNotifier,
     format_message,
+    format_daily_summary,
     format_trade,
     load_webhook,
     should_notify,
@@ -47,11 +49,98 @@ from trader.ui import bus
 from trader.watcher import Tick, Watcher
 
 _PENDING_WARN_SEC = 60  # 체결통보 미도착 경고 기준
+_PENDING_RECOVER_SEC = 90  # 이 시간까지 미완결이면 계좌 잔고를 근거로 대기 해제
+_ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
+_ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _LOOP_SEC = 0.1
 
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _mode_file(db_dir: Path) -> Path:
+    """현재 투자 모드를 담는 작은 파일.
+
+    모드별로 DB 파일을 나누면 '어느 DB 를 열지' 를 정하기 위해 모드를 먼저 알아야 하는데,
+    모드가 DB 안(settings)에 있으면 순환이 된다. 그래서 모드만 DB 밖으로 뺀다.
+    """
+    return db_dir / "mode.txt"
+
+
+def read_mode(db_dir: str | Path = "data") -> bool:
+    """저장된 모드를 읽는다 (True = 실전). 파일이 없으면 안전하게 모의로 시작."""
+    path = _mode_file(Path(db_dir))
+    if not path.exists():
+        return False
+    return path.read_text(encoding="utf-8").strip() == "실전"
+
+
+def write_mode(real: bool, db_dir: str | Path = "data") -> None:
+    directory = Path(db_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    _mode_file(directory).write_text("실전" if real else "모의", encoding="utf-8")
+
+
+def db_path_for(real: bool, db_dir: str | Path = "data") -> str:
+    """모드별 DB 파일 경로. 모의와 실전 기록이 절대 섞이지 않게 파일 자체를 분리한다."""
+    return str(Path(db_dir) / ("trader-real.db" if real else "trader-mock.db"))
+
+
+def _load_schedule(config_path: str) -> dict:
+    """config.toml 의 [schedule] — 감시 자동 시작/중지와 일일 요약 발송 시각.
+
+    휴장일 목록은 두지 않는다. 휴장일에는 체결 틱 자체가 없어 감시가 켜져도
+    아무 일도 일어나지 않으므로, 요일만 확인하면 충분하다.
+    """
+    import tomllib
+    from pathlib import Path
+
+    default = {
+        "enabled": False,
+        "start": dtime(8, 55),
+        "stop": dtime(15, 30),
+        "summary": dtime(15, 35),
+    }
+    path = Path(config_path)
+    if not path.exists():
+        return default
+    section = tomllib.loads(path.read_text(encoding="utf-8")).get("schedule", {})
+    result = dict(default)
+    result["enabled"] = bool(section.get("enabled", False))
+    for key in ("start", "stop", "summary"):
+        raw = section.get(key)
+        if not raw:
+            continue
+        try:
+            hour, minute = (int(x) for x in str(raw).split(":"))
+            result[key] = dtime(hour, minute)
+        except (ValueError, TypeError):
+            pass  # 형식이 잘못되면 기본값 유지
+    return result
+
+
+def _load_fee_rates(config_path: str) -> tuple[float, float]:
+    """(수수료율, 거래세율). config.toml 의 [fees] 에서 읽고, 없으면 보수적 기본값.
+
+    수수료율은 증권사·계좌마다 다르고 거래세율은 제도 변경이 잦으므로 설정으로 뺀다.
+    거래세는 매도에만 부과된다.
+    """
+    import tomllib
+    from pathlib import Path
+
+    default = (0.00015, 0.0015)
+    path = Path(config_path)
+    if not path.exists():
+        return default
+    fees = tomllib.loads(path.read_text(encoding="utf-8")).get("fees", {})
+    try:
+        return (
+            float(fees.get("commission_rate", default[0])),
+            float(fees.get("tax_rate", default[1])),
+        )
+    except (TypeError, ValueError):
+        return default
 
 
 def _load_account_label(config_path: str, real: bool) -> str:
@@ -69,13 +158,10 @@ def _load_account_label(config_path: str, real: bool) -> str:
 
 class Core:
     def __init__(
-        self,
-        b: bus.Bus,
-        db_path: str = "data/trader.db",
-        config_path: str = "config.toml",
+        self, b: bus.Bus, db_dir: str = "data", config_path: str = "config.toml"
     ):
         self._bus = b
-        self._db_path = db_path
+        self._db_dir = db_dir
         self._config_path = config_path
         self._store: Store | None = None
         self._broker: Broker | None = None
@@ -92,34 +178,62 @@ class Core:
         # order_no -> {symbol, from_state, decision, order_id, ts, warned}
         self._pending: dict[str, dict] = {}
         self._buy2_blocked: set[str] = set()
+        self._order_fail: dict[str, dict] = {}  # 종목별 주문 실패 누적 {count, until}
+        self._order_blocked: set[str] = set()  # 연속 실패로 당일 주문 차단된 종목
+        self._commission_rate = 0.0
+        self._tax_rate = 0.0
+        self._schedule = {"enabled": False}
+        self._sched_done: dict[str, str] = {}  # 항목별 마지막 실행 날짜
 
     # ── 메인 루프 ───────────────────────────────────────────────
 
     async def run(self) -> None:
-        self._store = Store(self._db_path)
-        self._mode_real = self._store.get_setting("mode", "모의") == "실전"
-        self._notify_level = self._store.get_setting("notify_level", "전체")
-        self._max_symbols = int(self._store.get_setting("funds_max", "10"))
-        self._load_date(self._date)
-        self._emit_date_loaded()
-        self._replay_logs()
-        self._emit_funds()
-        self._bus.events.put(bus.Mode(self._mode_real))
-        self._bus.events.put(
-            bus.NotifyLevel(self._store.get_setting("notify_level", "전체"))
-        )
-        self._bus.events.put(bus.WatchStatus(False))
+        self._mode_real = read_mode(self._db_dir)
+        self._commission_rate, self._tax_rate = _load_fee_rates(self._config_path)
+        self._schedule = _load_schedule(self._config_path)
+        self._open_store()
+        if self._schedule["enabled"]:
+            self._log(
+                "시스템",
+                "설정",
+                f"자동 스케줄 사용: {self._schedule['start']:%H:%M} 감시 시작 · "
+                f"{self._schedule['stop']:%H:%M} 중지 · "
+                f"{self._schedule['summary']:%H:%M} 요약 발송",
+                notify=False,
+            )
         self._log(
             "시스템",
             "시작",
-            f"코어 시작 · 매매일 {self._date} ({len(self._entries)}종목 복원)",
+            f"코어 시작 · {'실전' if self._mode_real else '모의'}투자 DB · "
+            f"매매일 {self._date} ({len(self._entries)}종목 복원) · "
+            f"수수료 {self._commission_rate:.4%} / 거래세 {self._tax_rate:.4%}",
         )
-        self._warn_restored_pending()
 
         while True:
             await self._drain_commands()
-            self._check_pending_timeout()
+            await self._check_pending()
+            await self._check_schedule()
             await asyncio.sleep(_LOOP_SEC)
+
+    def _open_store(self) -> None:
+        """현재 모드의 DB 를 열고 화면 상태를 전부 다시 발행한다 (시작·모드 전환 공용)."""
+        if self._store is not None:
+            self._store.close()
+        self._store = Store(db_path_for(self._mode_real, self._db_dir))
+        self._notify_level = self._store.get_setting("notify_level", "전체")
+        self._max_symbols = int(self._store.get_setting("funds_max", "10"))
+        self._buy2_blocked.clear()
+        self._order_fail.clear()
+        self._order_blocked.clear()
+        self._pending.clear()
+        self._load_date(self._date)
+        self._emit_date_loaded()  # TradeDate 이벤트가 UI 목록을 비우고 다시 채운다
+        self._replay_logs()
+        self._emit_funds()
+        self._bus.events.put(bus.Mode(self._mode_real))
+        self._bus.events.put(bus.NotifyLevel(self._notify_level))
+        self._bus.events.put(bus.WatchStatus(False))
+        self._warn_restored_pending()
 
     # ── 명령 처리 (UI → 코어) ───────────────────────────────────
 
@@ -178,6 +292,8 @@ class Core:
                 self._bus.events.put(bus.SymbolInfo(s, name))
             case bus.ConnectDiscord():
                 await self._connect_discord()
+            case bus.RequestDailySummary():
+                await self.send_daily_summary()
             case bus.SetNotifyLevel(level=lv):
                 self._notify_level = lv
                 self._store.set_setting("notify_level", lv)
@@ -215,6 +331,8 @@ class Core:
                     "pos": pos,
                     "price": price,
                     "memo": memo,
+                    "high": pos.high_price,
+                    "low": pos.low_price,
                 }
                 self._buy2_blocked.discard(s)
                 self._emit_position(s)
@@ -291,12 +409,18 @@ class Core:
                     f"/ 익절 {'/'.join(f'{r:.0%}' for r in rates)}",
                 )
             case bus.SetMode(real=real):
-                self._store.set_setting("mode", "실전" if real else "모의")
-                self._mode_real = real
-                self._bus.events.put(bus.Mode(real))
+                if self._running:
+                    self._log("시스템", "에러", "감시 중에는 모드를 전환할 수 없습니다")
+                    return
                 await self._disconnect("모드 전환 — 다시 연결하세요")
+                self._mode_real = real
+                write_mode(real, self._db_dir)
+                self._open_store()  # 모드별 DB 로 교체 후 전체 재로드
                 self._log(
-                    "시스템", "설정", f"{'실전' if real else '모의'}투자 모드로 전환"
+                    "시스템",
+                    "설정",
+                    f"{'실전' if real else '모의'}투자 모드로 전환 "
+                    f"(DB: {db_path_for(real, self._db_dir)})",
                 )
             case bus.SetTradeDate(date=d):
                 if self._running:
@@ -390,6 +514,11 @@ class Core:
         self._bus.events.put(bus.DiscordStatus(True, ""))
         self._log("시스템", "연결", f"Discord 연결됨 (알림 수준: {self._notify_level})")
 
+    def _fee(self, side: Side, amount: float) -> float:
+        """체결 1건의 거래비용. 매도에는 거래세가 더해진다 (원 미만 절사)."""
+        rate = self._commission_rate + (self._tax_rate if side is Side.SELL else 0.0)
+        return float(int(amount * rate))
+
     def _notify_trade(self, symbol: str, reason: str, qty: int, price: float) -> None:
         """체결 확정·종료 전이 시 사용자 친화 요약을 Discord 로 발송한다."""
         if not (self._notifier and should_notify(self._notify_level, symbol, "체결")):
@@ -442,6 +571,10 @@ class Core:
         if e is None:
             return
         e["price"] = tick.price
+        pos = e["pos"]
+        if pos.total_bought and pos.state is not State.CLOSED:  # 보유 구간만 추적
+            e["high"] = max(e.get("high") or 0.0, tick.price)
+            e["low"] = min(e.get("low") or tick.price, tick.price)
         self._bus.events.put(bus.Tick(tick.symbol, tick.price))
         if not self._running:
             return  # 감시 중지 상태: 시세 표시만
@@ -455,7 +588,11 @@ class Core:
         pos, from_state = e["pos"], e["pos"].state
 
         if d.side is None:  # 주문 없는 즉시 전이 (진입 금지 종료, 수량 0 익절 등)
-            e["pos"] = apply_transition(pos, d)
+            e["pos"] = replace(
+                apply_transition(pos, d),
+                high_price=e.get("high") or 0.0,
+                low_price=e.get("low") or 0.0,
+            )
             self._store.save_transition(
                 self._date, symbol, from_state, e["pos"], d, price
             )
@@ -487,13 +624,16 @@ class Core:
 
         if d.side is Side.BUY and not await self._can_buy(symbol, d, price):
             return
+        if not self._order_allowed(symbol):
+            return
 
         try:
             order_fn = self._broker.buy if d.side is Side.BUY else self._broker.sell
             order_no = await asyncio.to_thread(order_fn, symbol, d.qty)
         except BrokerError as err:
-            self._log(symbol, "에러", f"주문 실패: {err}")
+            self._on_order_failed(symbol, err)
             return
+        self._order_fail.pop(symbol, None)  # 성공하면 실패 누적 초기화
         order_id = self._store.record_order(symbol, d.side.value, d.qty)
         e["pos"] = mark_pending(pos)
         self._store.save_position(self._date, symbol, e["pos"])
@@ -568,7 +708,18 @@ class Core:
                 "경고",
                 f"체결 수량 상이: 주문 {d.qty}주 vs 체결 {fill.filled_qty}주",
             )
-        e["pos"] = apply_fill(e["pos"], d, fill.fill_price, fill.filled_qty)
+        fee = self._fee(d.side, fill.fill_price * fill.filled_qty)
+        filled = apply_fill(e["pos"], d, fill.fill_price, fill.filled_qty)
+        if d.side is Side.BUY and not e.get(
+            "high"
+        ):  # 첫 체결 시점부터 MFE/MAE 추적 시작
+            e["high"] = e["low"] = fill.fill_price
+        e["pos"] = replace(
+            filled,
+            fees=filled.fees + fee,
+            high_price=e.get("high") or 0.0,
+            low_price=e.get("low") or 0.0,
+        )
         self._store.save_transition(
             self._date, symbol, info["from_state"], e["pos"], d, fill.fill_price
         )
@@ -582,19 +733,117 @@ class Core:
         self._emit_position(symbol)
         text = f"{d.reason} → 체결 {fill.filled_qty}주 @ {fill.fill_price:,.0f}"
         if e["pos"].state is State.CLOSED:
-            text += f" (실현손익 {e['pos'].realized_pnl:+,.0f})"
+            net = e["pos"].realized_pnl - e["pos"].fees
+            text += (
+                f" (실현손익 {e['pos'].realized_pnl:+,.0f} · 비용 {e['pos'].fees:,.0f} "
+            )
+            text += f"→ 세후 {net:+,.0f})"
         self._log(symbol, "체결", text, notify=False)
         self._notify_trade(symbol, d.reason, fill.filled_qty, fill.fill_price)
 
-    def _check_pending_timeout(self) -> None:
-        for order_no, info in self._pending.items():
-            if not info["warned"] and time.monotonic() - info["ts"] > _PENDING_WARN_SEC:
+    def _order_allowed(self, symbol: str) -> bool:
+        """주문 실패 직후 같은 종목이 매 틱 재주문하는 것을 막는다.
+
+        틱은 초당 수십 건씩 들어오므로 실패를 그대로 두면 주문·로그·알림이 폭주하고,
+        '응답만 유실되고 주문은 접수된' 경우에는 중복 주문까지 될 수 있다.
+        """
+        if symbol in self._order_blocked:
+            return False
+        fail = self._order_fail.get(symbol)
+        return not (fail and time.monotonic() < fail["until"])
+
+    def _on_order_failed(self, symbol: str, err: Exception) -> None:
+        fail = self._order_fail.setdefault(symbol, {"count": 0, "until": 0.0})
+        fail["count"] += 1
+        fail["until"] = time.monotonic() + _ORDER_FAIL_COOLDOWN_SEC
+        self._log(
+            symbol,
+            "에러",
+            f"주문 실패({fail['count']}회): {err} — {_ORDER_FAIL_COOLDOWN_SEC}초간 재시도 보류",
+        )
+        if fail["count"] >= _ORDER_FAIL_BLOCK_COUNT:
+            self._order_blocked.add(symbol)
+            self._log(
+                symbol,
+                "경고",
+                f"주문 연속 실패 {fail['count']}회 → 당일 이 종목 주문을 중단합니다. "
+                "계좌 상태를 직접 확인하세요",
+            )
+
+    async def _check_pending(self) -> None:
+        """체결통보가 오지 않는 주문을 경고하고, 더 지연되면 강제로 대기를 해제한다."""
+        now = time.monotonic()
+        for order_no, info in list(self._pending.items()):
+            age = now - info["ts"]
+            if not info["warned"] and age > _PENDING_WARN_SEC:
                 info["warned"] = True
                 self._log(
                     info["symbol"],
                     "경고",
-                    f"주문 {order_no} 체결통보 {_PENDING_WARN_SEC}초 미도착 — 수동 확인 필요",
+                    f"주문 {order_no} 체결통보 {_PENDING_WARN_SEC}초 미도착 — 확인 중",
                 )
+            if age > _PENDING_RECOVER_SEC and not info.get("recovering"):
+                info["recovering"] = True
+                await self._recover_pending(order_no, info)
+
+    async def _recover_pending(self, order_no: str, info: dict) -> None:
+        """체결 대기 잠김 해제 — 계좌 실보유를 근거로 잔량을 맞추고 판정을 되살린다.
+
+        체결통보가 유실되거나 부분 체결로 미완결이면 그 종목은 pending 에 묶여
+        손절·익절 판정이 멈춘다. 하루 종일 방치되는 것이 가장 위험하므로, 일정 시간이
+        지나면 **추측이 아니라 계좌 잔고를 근거로** 상태를 맞추고 대기를 푼다.
+        평단·실현손익은 정확히 복원할 수 없으므로 경고를 남겨 수동 확인을 요청한다.
+        """
+        symbol = info["symbol"]
+        e = self._entries.get(symbol)
+        if e is None:
+            self._pending.pop(order_no, None)
+            return
+        try:
+            holdings = await asyncio.to_thread(self._broker.holdings)
+        except BrokerError as err:
+            info["recovering"] = False  # 다음 주기에 다시 시도
+            self._log(symbol, "경고", f"체결 대기 복구용 잔고 조회 실패: {err}")
+            return
+
+        self._pending.pop(order_no, None)
+        actual = holdings.get(symbol, 0)
+        pos, d = e["pos"], info["decision"]
+        try:
+            if actual == 0:
+                new_pos = replace(pos, state=State.CLOSED, remaining=0, pending=False)
+            else:
+                state = pos.state
+                if state in (State.WAITING, State.CLOSED):  # 첫 매수가 걸린 경우
+                    state = d.to_state
+                avg = pos.avg_price or e["price"] or 0.0
+                new_pos = replace(
+                    pos,
+                    state=state,
+                    pending=False,
+                    remaining=actual,
+                    total_bought=max(pos.total_bought, actual),
+                    avg_price=avg,
+                )
+        except ValueError as err:  # 계좌와 상태가 끝내 모순이면 그대로 두고 경고만
+            self._log(
+                symbol,
+                "에러",
+                f"체결 대기 복구 실패 ({err}) — 편집으로 상태를 직접 맞춰주세요",
+            )
+            return
+
+        e["pos"] = new_pos
+        self._store.save_position(self._date, symbol, new_pos)
+        self._store.update_order(info["order_id"], "미확인")
+        self._emit_position(symbol)
+        self._log(
+            symbol,
+            "경고",
+            f"주문 {order_no} 체결통보 미도착 {_PENDING_RECOVER_SEC}초 경과 → "
+            f"계좌 잔고({actual}주) 기준으로 대기 해제. 평단·실현손익이 실제와 다를 수 있으니 "
+            "계좌 체결 내역과 대조 후 편집으로 보정하세요",
+        )
 
     # ── WebSocket 상태 ──────────────────────────────────────────
 
@@ -646,6 +895,82 @@ class Core:
                 notify=False,
             )
 
+    # ── 자동 스케줄 ─────────────────────────────────────────────
+
+    async def _check_schedule(self) -> None:
+        if not self._schedule.get("enabled"):
+            return
+        now = datetime.now()
+        if now.weekday() >= 5:  # 주말
+            return
+        today, t = now.date().isoformat(), now.time()
+
+        if (
+            self._sched_done.get("start") != today
+            and self._schedule["start"] <= t < self._schedule["stop"]
+        ):
+            self._sched_done["start"] = today
+            await self._auto_start(today)
+
+        if (
+            self._sched_done.get("stop") != today
+            and t >= self._schedule["stop"]
+            and self._running
+        ):
+            self._sched_done["stop"] = today
+            self._running = False
+            self._bus.events.put(bus.WatchStatus(False))
+            self._log("시스템", "감시", "자동 스케줄 — 감시 중지")
+
+        if self._sched_done.get("summary") != today and t >= self._schedule["summary"]:
+            self._sched_done["summary"] = today
+            await self.send_daily_summary()
+
+    async def _auto_start(self, today: str) -> None:
+        """무인 운용: 필요한 연결까지 스스로 하고 감시를 시작한다."""
+        if self._running:
+            return
+        if self._date != today:  # 지난 날짜 리스트로 매매하는 사고 방지
+            self._log(
+                "시스템",
+                "경고",
+                f"자동 시작 취소 — 화면의 매매일({self._date})이 오늘이 아닙니다",
+            )
+            return
+        if self._broker is None:
+            await self._connect()
+        if self._notifier is None:
+            await self._connect_discord()
+        if self._broker is None:
+            self._log("시스템", "에러", "자동 시작 실패 — 키움 연결에 실패했습니다")
+            return
+        self._running = True
+        self._bus.events.put(bus.WatchStatus(True))
+        self._log(
+            "시스템", "감시", f"자동 스케줄 — 감시 시작 ({len(self._entries)}종목)"
+        )
+
+    async def send_daily_summary(self) -> None:
+        """하루 매매 요약을 Discord 로 발송한다 (알림 수준과 무관하게 항상 발송)."""
+        symbols, fills = self._store.daily_report(self._date)
+        deposit = None
+        if self._broker is not None:
+            try:
+                deposit = await asyncio.to_thread(self._broker.deposit)
+            except BrokerError:
+                deposit = None
+        text = format_daily_summary(self._date, symbols, fills, deposit)
+        holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
+        self._log(
+            "시스템",
+            "요약",
+            f"일일 요약 — 체결 {len(fills)}건"
+            + (f", 이월 필요 {len(holding)}종목" if holding else ""),
+            notify=False,
+        )
+        if self._notifier:
+            await self._send_discord(text)
+
     # ── 상태 로드 / 발행 ────────────────────────────────────────
 
     def _load_date(self, trade_date: str) -> None:
@@ -661,6 +986,8 @@ class Core:
                 "pos": pos,
                 "price": pos.avg_price,
                 "memo": memo,
+                "high": pos.high_price,
+                "low": pos.low_price,
             }
 
     def _warn_restored_pending(self) -> None:

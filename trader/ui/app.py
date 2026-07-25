@@ -394,7 +394,10 @@ class App(tk.Tk):
             on_carry=self._carry_over,
             on_manual_sell=self._manual_sell,
         )
-        self.events = EventsView(paned)
+        self.events = EventsView(
+            paned,
+            on_daily_summary=lambda: self._bus.commands.put(bus.RequestDailySummary()),
+        )
         paned.add(self.positions, weight=5)
         paned.add(self.events, weight=2)
 

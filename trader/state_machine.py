@@ -100,6 +100,10 @@ class Position:
     remaining: int = 0  # 현재 잔량
     pending: bool = False  # 주문 접수 후 체결 대기 중이면 True (중복 주문 방지)
     realized_pnl: float = 0.0  # 당일 누적 실현손익 (세전). 매도 체결마다 누적
+    # 아래 세 값은 코어가 채우는 부가 기록으로, 전이 판정에는 전혀 쓰이지 않는다.
+    fees: float = 0.0  # 누적 거래비용 (수수료 + 매도 거래세)
+    high_price: float = 0.0  # 보유 중 최고가 (MFE 계산용, 0 = 미기록)
+    low_price: float = 0.0  # 보유 중 최저가 (MAE 계산용, 0 = 미기록)
 
     def __post_init__(self) -> None:
         if self.state in _HOLDING_STATES:

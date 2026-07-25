@@ -16,7 +16,7 @@ _COLUMNS = ("ts", "symbol", "name", "kind", "text")
 
 
 class EventsView(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, on_daily_summary=None):
         super().__init__(master)
 
         body = ttk.Frame(self)
@@ -45,6 +45,11 @@ class EventsView(ttk.Frame):
         self._menu = tk.Menu(self, tearoff=0)
         self._menu.add_command(label="로그 지우기 (화면만)", command=self._clear)
         self._menu.add_command(label="CSV 내보내기", command=self._export)
+        if on_daily_summary:
+            self._menu.add_separator()
+            self._menu.add_command(
+                label="일일 요약 Discord 발송", command=on_daily_summary
+            )
         self.tree.bind("<Button-3>", lambda e: self._menu.post(e.x_root, e.y_root))
 
     def append(self, ts: str, symbol: str, name: str, kind: str, text: str) -> None:

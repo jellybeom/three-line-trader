@@ -195,6 +195,11 @@ class CarryOver:
 
 
 @dataclass(frozen=True)
+class RequestDailySummary:
+    """오늘 매매 요약을 Discord 로 즉시 발송 (스케줄과 별개로 수동 확인용)."""
+
+
+@dataclass(frozen=True)
 class ConnectDiscord:
     """config.toml 의 webhook 으로 Discord 연결 (테스트 발송 포함)."""
 
