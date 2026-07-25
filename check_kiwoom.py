@@ -37,6 +37,27 @@ async def main() -> None:
     broker = Broker(auth)
     name, price = broker.stock_info(symbol)
     print(f"      종목정보: {symbol} {name} · 현재가 {price:,.0f}")
+    if "--chart" in sys.argv:  # 차트 TR 실측: 일봉/분봉/지수 응답 규격 확인
+        for label, fetch in (
+            ("일봉", lambda: broker.daily_chart(symbol)),
+            ("3분봉", lambda: broker.minute_chart(symbol)),
+            ("KOSPI", lambda: broker.index_daily()),
+        ):
+            try:
+                bars = fetch()
+            except Exception as e:  # noqa: BLE001
+                print(f"      {label}: 실패 — {e}")
+                continue
+            if bars:
+                print(
+                    f"      {label}: {len(bars)}개 · 처음 {bars[0][0]} 종가 {bars[0][4]:,.0f}"
+                    f" · 마지막 {bars[-1][0]} 종가 {bars[-1][4]:,.0f}"
+                )
+            else:
+                print(
+                    f"      {label}: 0개 — 응답 필드명이 후보와 다를 수 있음 (원본 확인 필요)"
+                )
+
     deposit = broker.deposit()
     print(f"      주문가능금액: {deposit:,.0f}")
     if deposit == 0:  # 실전 필드 진단: 일반/추정 조회 각각 0이 아닌 필드를 보여준다

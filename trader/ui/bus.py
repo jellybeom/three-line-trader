@@ -57,6 +57,16 @@ class SymbolInfo:
 
 
 @dataclass(frozen=True)
+class ChartReady:
+    """복기 차트 PNG 생성 완료 — UI 가 창으로 표시한다."""
+
+    symbol: str
+    name: str
+    daily_path: str
+    minute_path: str
+
+
+@dataclass(frozen=True)
 class DiscordStatus:
     """Discord 연결 상태."""
 
@@ -192,6 +202,21 @@ class CarryOver:
     """보유 종목을 다음 영업일 리스트로 이월 (상태·평단·잔량 유지)."""
 
     symbol: str
+
+
+@dataclass(frozen=True)
+class ChartRequest:
+    """복기 차트 생성 요청 (📈 버튼). 생성되면 ChartReady 이벤트가 온다."""
+
+    symbol: str
+
+
+@dataclass(frozen=True)
+class SendChartDiscord:
+    """생성된 차트 이미지를 Discord 로 전송 (차트 창의 버튼)."""
+
+    symbol: str
+    paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)

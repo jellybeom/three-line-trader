@@ -160,6 +160,14 @@ class SimCore:
                         f"{target.isoformat()} 리스트로 이월 (상태: {e['pos'].state.value}, "
                         f"잔량 {e['pos'].remaining}주)",
                     )
+                case bus.ChartRequest(symbol=s):
+                    self._log(
+                        s,
+                        "안내",
+                        "시뮬레이터는 차트를 지원하지 않습니다 (실제 시세가 없음) — main.py 에서 사용하세요",
+                    )
+                case bus.SendChartDiscord():
+                    pass
                 case bus.RequestDailySummary():
                     symbols, fills = self._store.daily_report(self._date)
                     text = format_daily_summary(self._date, symbols, fills, 10_000_000)

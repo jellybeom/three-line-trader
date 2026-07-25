@@ -101,6 +101,7 @@ def _load_schedule(config_path: str) -> dict:
         "start": dtime(8, 55),
         "stop": dtime(15, 30),
         "summary": dtime(15, 35),
+        "summary2": dtime(20, 5),
     }
     path = Path(config_path)
     if not path.exists():
@@ -108,7 +109,7 @@ def _load_schedule(config_path: str) -> dict:
     section = tomllib.loads(path.read_text(encoding="utf-8")).get("schedule", {})
     result = dict(default)
     result["enabled"] = bool(section.get("enabled", False))
-    for key in ("start", "stop", "summary"):
+    for key in ("start", "stop", "summary", "summary2"):
         raw = section.get(key)
         if not raw:
             continue
@@ -118,6 +119,18 @@ def _load_schedule(config_path: str) -> dict:
         except (ValueError, TypeError):
             pass  # 형식이 잘못되면 기본값 유지
     return result
+
+
+def _load_chart_font(config_path: str) -> str | None:
+    import tomllib
+
+    path = Path(config_path)
+    if not path.exists():
+        return None
+    return (
+        tomllib.loads(path.read_text(encoding="utf-8")).get("chart", {}).get("font")
+        or None
+    )
 
 
 def _load_fee_rates(config_path: str) -> tuple[float, float]:
@@ -184,6 +197,7 @@ class Core:
         self._tax_rate = 0.0
         self._schedule = {"enabled": False}
         self._sched_done: dict[str, str] = {}  # 항목별 마지막 실행 날짜
+        self._chart_busy: set[str] = set()  # 종목별 차트 생성 중복 방지
 
     # ── 메인 루프 ───────────────────────────────────────────────
 
@@ -294,6 +308,19 @@ class Core:
                 await self._connect_discord()
             case bus.RequestDailySummary():
                 await self.send_daily_summary()
+            case bus.ChartRequest(symbol=s):
+                if self._broker is None:
+                    self._log(s, "에러", "차트는 키움 연결 후 생성할 수 있습니다")
+                    return
+                if s not in self._entries or s in self._chart_busy:
+                    return
+                self._log(s, "차트", "복기 차트 생성 중... (수 초 소요)", notify=False)
+                asyncio.create_task(self._chart_task(s, to_ui=True))
+            case bus.SendChartDiscord(symbol=s, paths=paths):
+                if self._notifier is None:
+                    self._log(s, "에러", "Discord 연결 후 전송할 수 있습니다")
+                    return
+                asyncio.create_task(self._send_chart_images(s, paths))
             case bus.SetNotifyLevel(level=lv):
                 self._notify_level = lv
                 self._store.set_setting("notify_level", lv)
@@ -740,6 +767,12 @@ class Core:
             text += f"→ 세후 {net:+,.0f})"
         self._log(symbol, "체결", text, notify=False)
         self._notify_trade(symbol, d.reason, fill.filled_qty, fill.fill_price)
+        if (
+            e["pos"].state is State.CLOSED
+            and e["pos"].total_bought
+            and self._notifier is not None
+        ):
+            asyncio.create_task(self._chart_task(symbol, to_discord=True))
 
     def _order_allowed(self, symbol: str) -> bool:
         """주문 실패 직후 같은 종목이 매 틱 재주문하는 것을 막는다.
@@ -895,6 +928,130 @@ class Core:
                 notify=False,
             )
 
+    # ── 복기 차트 ───────────────────────────────────────────────
+
+    async def _chart_task(
+        self, symbol: str, to_ui: bool = False, to_discord: bool = False
+    ) -> None:
+        """차트 생성은 느리므로(REST 2~3회 + 렌더링 1~3초) 전부 스레드에 위임한다.
+        매매 루프·틱 판정은 이 작업과 무관하게 계속 돈다."""
+        if symbol in self._chart_busy:
+            return
+        self._chart_busy.add(symbol)
+        # SQLite 는 스레드 전용이므로 DB 접근(체결 내역)은 여기 코어 스레드에서 끝내고,
+        # 워커 스레드에는 순수 데이터만 넘긴다.
+        _, fills_all = self._store.daily_report(self._date)
+        fills = [
+            (f["ts"], f["side"], f["price"]) for f in fills_all if f["symbol"] == symbol
+        ]
+        try:
+            daily_path, minute_path, kospi_error = await asyncio.to_thread(
+                self._build_charts, symbol, fills
+            )
+        except Exception as e:  # noqa: BLE001 — 차트 실패가 매매에 영향 주지 않게
+            self._log(symbol, "에러", f"차트 생성 실패: {e}")
+            return
+        finally:
+            self._chart_busy.discard(symbol)
+        if kospi_error:
+            self._log(
+                "시스템",
+                "경고",
+                f"KOSPI 지수 조회 실패 (패널 생략): {kospi_error}",
+                notify=False,
+            )
+        if to_ui:
+            self._bus.events.put(
+                bus.ChartReady(
+                    symbol, self._entries[symbol]["name"], daily_path, minute_path
+                )
+            )
+        if to_discord and self._notifier is not None:
+            await self._send_chart_images(symbol, (daily_path, minute_path))
+
+    def _build_charts(
+        self, symbol: str, fills_raw: list[tuple[str, str, float]]
+    ) -> tuple[str, str, str]:
+        """(워커 스레드에서 실행) REST 조회 → 일봉·3분봉 PNG 생성.
+
+        이 함수는 store 나 이벤트 로그를 절대 건드리지 않는다 — SQLite 는 스레드 전용이라
+        DB 접근은 호출부(코어 스레드)가 끝내고 순수 데이터만 넘긴다.
+        반환: (일봉 경로, 분봉 경로, KOSPI 실패 사유 또는 "").
+        """
+        from trader.chart import Bar, Fill, render_daily, render_minute
+
+        e = self._entries[symbol]
+        params, pos = e["params"], e["pos"]
+        broker = self._broker
+        if broker is None:
+            raise RuntimeError("키움 연결이 끊겼습니다")
+
+        daily = [Bar(*row) for row in broker.daily_chart(symbol)]
+        minute_all = [Bar(*row) for row in broker.minute_chart(symbol)]
+        kospi_error = ""
+        try:
+            kospi = [Bar(*row) for row in broker.index_daily()]
+        except BrokerError as err:  # 지수 TR 미확인 대비 — KOSPI 패널만 생략
+            kospi, kospi_error = None, str(err)
+        if not daily or not minute_all:
+            raise RuntimeError(
+                "차트 데이터가 비어 있습니다 (장 시작 전이거나 조회 실패)"
+            )
+
+        fills = [Fill(ts, side, price) for ts, side, price in fills_raw]
+
+        # 3분봉 범위: 진입일 09:00 부터 + 전일 여분 8봉
+        entry_day = (
+            fills[0].ts[:10].replace("-", "") if fills else self._date.replace("-", "")
+        )
+        start_idx = next(
+            (i for i, b in enumerate(minute_all) if b.key[:8] >= entry_day), 0
+        )
+        minute = minute_all[max(0, start_idx - 8) :]
+
+        lines = (params.line1, params.line2, params.line3)
+        net = pos.realized_pnl - pos.fees
+        title = f"{e['name']}({symbol}) 일봉"
+        if pos.total_bought:
+            title += f" · {pos.state.value} · 세후 {net:+,.0f}원"
+            if pos.avg_price and pos.high_price:
+                title += (
+                    f" · 최고 {(pos.high_price - pos.avg_price) / pos.avg_price:+.1%}"
+                    f"/최저 {(pos.low_price - pos.avg_price) / pos.avg_price:+.1%}"
+                )
+
+        out_dir = Path(self._db_dir) / "charts" / self._date
+        font = _load_chart_font(self._config_path)
+        daily_path = render_daily(
+            out_dir / f"{symbol}-daily.png",
+            title,
+            daily,
+            lines,
+            fills,
+            kospi=kospi,
+            font=font,
+        )
+        minute_path = render_minute(
+            out_dir / f"{symbol}-minute.png",
+            f"{e['name']}({symbol}) 3분봉",
+            minute,
+            lines,
+            fills,
+            font=font,
+        )
+        return daily_path, minute_path, kospi_error
+
+    async def _send_chart_images(self, symbol: str, paths: tuple[str, ...]) -> None:
+        name = self._entries[symbol]["name"] if symbol in self._entries else symbol
+        try:  # 일봉·3분봉을 한 메시지로 (요청 1회, 사진 2장 나란히)
+            await asyncio.to_thread(
+                self._notifier.send_images,
+                list(paths),
+                f"📈 {name}({symbol}) 복기 차트",
+            )
+        except Exception as e:  # noqa: BLE001
+            self._log(symbol, "경고", f"차트 전송 실패: {e}", notify=False)
+
     # ── 자동 스케줄 ─────────────────────────────────────────────
 
     async def _check_schedule(self) -> None:
@@ -926,6 +1083,14 @@ class Core:
             self._sched_done["summary"] = today
             await self.send_daily_summary()
 
+        if (
+            self._sched_done.get("summary2") != today
+            and t >= self._schedule["summary2"]
+            and self._date == today
+        ):
+            self._sched_done["summary2"] = today
+            await self._review_after_hours()
+
     async def _auto_start(self, today: str) -> None:
         """무인 운용: 필요한 연결까지 스스로 하고 감시를 시작한다."""
         if self._running:
@@ -948,6 +1113,68 @@ class Core:
         self._bus.events.put(bus.WatchStatus(True))
         self._log(
             "시스템", "감시", f"자동 스케줄 — 감시 시작 ({len(self._entries)}종목)"
+        )
+
+    async def _review_after_hours(self) -> None:
+        """20:05 시간외 리뷰 — 대체거래소(NXT) 거래가 실제로 있었던 종목만 3분봉 재전송.
+
+        NXT 상장 목록을 관리하는 대신, 분봉을 다시 조회해 15:30 이후 봉이 존재하는지로
+        판별한다 (데이터가 직접 알려주는 방식). 감시(WebSocket)와 무관한 REST 조회라
+        장 마감 후에도 동작한다.
+        """
+        if self._broker is None or self._notifier is None:
+            self._log(
+                "시스템",
+                "설정",
+                "시간외 리뷰 생략 — 키움/Discord 연결 없음",
+                notify=False,
+            )
+            return
+        symbols, _ = self._store.daily_report(self._date)
+        traded = [s["symbol"] for s in symbols if s["total_bought"] > 0]
+        today = self._date.replace("-", "")
+        reviewed = 0
+        for symbol in traded:
+            if symbol not in self._entries:
+                continue
+            try:
+                rows = await asyncio.to_thread(self._broker.minute_chart, symbol)
+            except BrokerError as err:
+                self._log(symbol, "경고", f"시간외 확인 실패: {err}", notify=False)
+                continue
+            has_after_hours = any(
+                r[0][:8] == today and r[0][8:12] > "1530" for r in rows
+            )
+            if not has_after_hours:
+                continue
+            _, fills_all = self._store.daily_report(self._date)
+            fills = [
+                (f["ts"], f["side"], f["price"])
+                for f in fills_all
+                if f["symbol"] == symbol
+            ]
+            try:
+                _, minute_path, _ = await asyncio.to_thread(
+                    self._build_charts, symbol, fills
+                )
+            except Exception as e:  # noqa: BLE001
+                self._log(symbol, "에러", f"시간외 차트 생성 실패: {e}")
+                continue
+            name = self._entries[symbol]["name"]
+            try:
+                await asyncio.to_thread(
+                    self._notifier.send_image,
+                    minute_path,
+                    f"🌙 {name}({symbol}) 시간외(NXT) 포함 3분봉",
+                )
+                reviewed += 1
+            except Exception as e:  # noqa: BLE001
+                self._log(symbol, "경고", f"시간외 차트 전송 실패: {e}", notify=False)
+        self._log(
+            "시스템",
+            "요약",
+            f"시간외 리뷰 완료 — 재전송 {reviewed}종목 / 확인 {len(traded)}종목",
+            notify=False,
         )
 
     async def send_daily_summary(self) -> None:

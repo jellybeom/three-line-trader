@@ -185,7 +185,51 @@ class DiscordNotifier:
         self._mute_until = 0.0
 
     def send(self, text: str) -> bool:
-        """blocking 발송 (발송 스레드에서 호출). 성공 True, 제한 중 생략 False.
+        """텍스트 발송 (blocking). 성공 True, 제한 중 생략 False."""
+        return self._post(
+            lambda: requests.post(self._url, json={"content": text[:1900]}, timeout=10)
+        )
+
+    def send_image(self, path: str, caption: str = "") -> bool:
+        """이미지 1장 발송 — send_images 의 단축형."""
+        return self.send_images([path], caption)
+
+    def send_images(self, paths: list[str], caption: str = "") -> bool:
+        """이미지 여러 장을 **한 메시지로** 발송 (blocking) — 복기 차트 전송용.
+
+        Discord webhook 의 multipart 업로드로 files[0], files[1], ... 을 함께 올리면
+        사진들이 하나의 메시지에 나란히 붙는다. 텍스트 발송과 같은 잠금을 공유해
+        최소 간격·429 뮤트가 그대로 적용된다. 업로드가 있어 타임아웃은 넉넉히 둔다.
+        """
+        import json
+        from contextlib import ExitStack
+        from pathlib import Path
+
+        def request():
+            with ExitStack() as stack:
+                files = {
+                    f"files[{i}]": (
+                        Path(p).name,
+                        stack.enter_context(open(p, "rb")),
+                        "image/png",
+                    )
+                    for i, p in enumerate(paths)
+                }
+                return requests.post(
+                    self._url,
+                    data={
+                        "payload_json": json.dumps(
+                            {"content": caption[:1900]}, ensure_ascii=False
+                        )
+                    },
+                    files=files,
+                    timeout=30 + 15 * len(paths),
+                )
+
+        return self._post(request)
+
+    def _post(self, request) -> bool:
+        """발송 공통부: 최소 간격 보장 → 요청 → 429 뮤트 / 오류 판정.
 
         연속 발송은 최소 간격을 두고 순서대로 나가며, 429(전송 제한)를 받으면
         일정 시간 발송을 통째로 생략해 제한 반복을 막는다.
@@ -198,7 +242,7 @@ class DiscordNotifier:
             if wait > 0:
                 time.sleep(wait)
             self._last_send = time.monotonic()
-            resp = requests.post(self._url, json={"content": text[:1900]}, timeout=10)
+            resp = request()
             if resp.status_code == 429:
                 self._mute_until = time.monotonic() + self._MUTE_SEC
                 raise NotifierError(

@@ -27,6 +27,7 @@ from trader.kiwoom import KiwoomAuth
 
 _PATH_ORDER = "/api/dostk/ordr"
 _PATH_ACCOUNT = "/api/dostk/acnt"
+_PATH_CHART = "/api/dostk/chart"
 _PATH_STOCK = "/api/dostk/stkinfo"
 
 _TR_BUY = "kt10000"
@@ -34,6 +35,9 @@ _TR_SELL = "kt10001"
 _TR_DEPOSIT = "kt00001"
 _TR_HOLDINGS = "kt00018"
 _TR_STOCK_INFO = "ka10001"
+_TR_DAILY_CHART = "ka10081"  # 주식 일봉차트
+_TR_MINUTE_CHART = "ka10080"  # 주식 분봉차트
+_TR_INDEX_DAILY = "ka20006"  # 업종(지수) 일봉 — KOSPI 는 업종코드 001
 
 _MARKET_ORDER = "3"  # 매매구분: 시장가
 _EXCHANGE = "KRX"
@@ -177,6 +181,121 @@ class Broker:
             except (ValueError, TypeError):
                 continue
         return None
+
+    # ── 차트 조회 (복기 차트용) ──────────────────────────────
+    # 응답의 봉 목록 키와 필드명은 TR 마다 달라 후보를 순서대로 탐색한다.
+    # 가격에 붙는 +/- 부호는 등락 표시이므로 절댓값으로 파싱한다.
+
+    _DATE_KEYS = ("dt", "date", "stck_bsop_date", "base_dt")
+    _TIME_KEYS = ("cntr_tm", "tm", "cntg_tm", "stck_cntg_hour")
+    _OPEN_KEYS = ("open_pric", "opnprc", "open_prc", "stck_oprc")
+    _HIGH_KEYS = ("high_pric", "hgprc", "hg_pric", "stck_hgpr")
+    _LOW_KEYS = ("low_pric", "lwprc", "lw_pric", "stck_lwpr")
+    _CLOSE_KEYS = ("cur_prc", "clsprc", "cls_pric", "close_pric", "stck_clpr")
+    _VOL_KEYS = ("trde_qty", "trqu", "cntg_vol", "acml_vol", "trde_vol")
+    _VALUE_KEYS = ("trde_prica", "trde_amt", "tr_prica", "acml_tr_pbmn")
+
+    @staticmethod
+    def _first_list(data: dict) -> list[dict]:
+        for value in data.values():
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                return value
+        return []
+
+    @staticmethod
+    def _num(row: dict, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            raw = row.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                return abs(float(str(raw).replace(",", "")))
+            except (ValueError, TypeError):
+                continue
+        return None
+
+    @classmethod
+    def _text(cls, row: dict, keys: tuple[str, ...]) -> str:
+        for key in keys:
+            raw = row.get(key)
+            if raw not in (None, ""):
+                return str(raw).strip()
+        return ""
+
+    def _parse_bars(self, data: dict, minute: bool) -> list[tuple]:
+        """(key, open, high, low, close, volume, value) 목록 — key 오름차순.
+
+        key: 일봉 YYYYMMDD, 분봉 YYYYMMDDHHMMSS. 필드가 비거나 종가 0 인 행은 건너뛴다.
+        """
+        bars = []
+        for row in self._first_list(data):
+            close = self._num(row, self._CLOSE_KEYS)
+            if not close:
+                continue
+            o = self._num(row, self._OPEN_KEYS) or close
+            h = self._num(row, self._HIGH_KEYS) or max(o, close)
+            low = self._num(row, self._LOW_KEYS) or min(o, close)
+            vol = self._num(row, self._VOL_KEYS) or 0.0
+            value = self._num(row, self._VALUE_KEYS) or 0.0
+            if minute:
+                t = self._text(row, self._TIME_KEYS)
+                if len(t) == 6:  # 시각만 오면 날짜 필드와 결합
+                    t = self._text(row, self._DATE_KEYS)[:8] + t
+                key = t[:14]
+            else:
+                key = self._text(row, self._DATE_KEYS)[:8]
+            if len(key) < 8:
+                continue
+            bars.append((key, o, h, low, close, vol, value))
+        bars.sort(key=lambda b: b[0])
+        return bars
+
+    def daily_chart(self, symbol: str, count: int = 180) -> list[tuple]:
+        """일봉 (최근 count 개, 오름차순). 이동평균 워밍업을 위해 표시분보다 길게 요청한다."""
+        from datetime import date as _date
+
+        data = self._request(
+            _PATH_CHART,
+            _TR_DAILY_CHART,
+            {
+                "stk_cd": symbol,
+                "base_dt": _date.today().strftime("%Y%m%d"),
+                "upd_stkpc_tp": "1",
+            },
+            retries=self._QUERY_RETRIES,
+        )
+        return self._parse_bars(data, minute=False)[-count:]
+
+    def minute_chart(self, symbol: str, interval: int = 3) -> list[tuple]:
+        """분봉 (서버가 주는 최대 분량, 오름차순). 3분봉 기준 약 6일치."""
+        data = self._request(
+            _PATH_CHART,
+            _TR_MINUTE_CHART,
+            {"stk_cd": symbol, "tic_scope": str(interval), "upd_stkpc_tp": "1"},
+            retries=self._QUERY_RETRIES,
+        )
+        return self._parse_bars(data, minute=True)
+
+    def index_daily(self, code: str = "001", count: int = 180) -> list[tuple]:
+        """업종(지수) 일봉 — KOSPI=001. TR 규격이 다르면 BrokerError 로 실패한다
+        (복기 차트는 이 실패를 치명으로 보지 않고 KOSPI 패널만 생략한다).
+
+        지수는 소수 2자리를 정수로 준다 (실측 2026-07-24: 응답 669062 = 지수 6,690.62)
+        → 가격 필드만 ÷100 보정한다.
+        """
+        from datetime import date as _date
+
+        data = self._request(
+            _PATH_CHART,
+            _TR_INDEX_DAILY,
+            {"inds_cd": code, "base_dt": _date.today().strftime("%Y%m%d")},
+            retries=self._QUERY_RETRIES,
+        )
+        bars = self._parse_bars(data, minute=False)[-count:]
+        return [
+            (k, o / 100, h / 100, low / 100, c / 100, v, val)
+            for k, o, h, low, c, v, val in bars
+        ]
 
     def deposit_detail(self, qry_tp: str = "2") -> dict:
         """예수금상세현황(kt00001) 원본 응답 — 필드 진단용. qry_tp 2=일반, 3=추정."""
