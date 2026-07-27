@@ -38,6 +38,7 @@ _TR_STOCK_INFO = "ka10001"
 _TR_DAILY_CHART = "ka10081"  # 주식 일봉차트
 _TR_MINUTE_CHART = "ka10080"  # 주식 분봉차트
 _TR_INDEX_DAILY = "ka20006"  # 업종(지수) 일봉 — KOSPI 는 업종코드 001
+_CHART_SUFFIX = "_AL"  # 차트 조회용 통합(KRX+NXT) 종목코드 접미사
 
 _MARKET_ORDER = "3"  # 매매구분: 시장가
 _EXCHANGE = "KRX"
@@ -188,7 +189,16 @@ class Broker:
 
     _DATE_KEYS = ("dt", "date", "stck_bsop_date", "base_dt")
     _TIME_KEYS = ("cntr_tm", "tm", "cntg_tm", "stck_cntg_hour")
-    _OPEN_KEYS = ("open_pric", "opnprc", "open_prc", "stck_oprc")
+    _OPEN_KEYS = (
+        "open_pric",
+        "opn_prc",
+        "opnprc",
+        "open_prc",
+        "stck_oprc",
+        "ovrs_nmix_oprc",
+        "strt_prc",
+        "bsis_prc",
+    )
     _HIGH_KEYS = ("high_pric", "hgprc", "hg_pric", "stck_hgpr")
     _LOW_KEYS = ("low_pric", "lwprc", "lw_pric", "stck_lwpr")
     _CLOSE_KEYS = ("cur_prc", "clsprc", "cls_pric", "close_pric", "stck_clpr")
@@ -215,6 +225,21 @@ class Broker:
         return None
 
     @classmethod
+    def _pick_open(cls, row: dict, low: float, high: float, close: float) -> float:
+        """시가 선택 — 후보 필드 중 **저가~고가 범위 안에 드는 첫 값**을 쓴다.
+
+        TR 마다 시가 필드명이 다르고, 이름이 비슷한 다른 값(기준가·전일종가 등)을 잘못
+        읽으면 캔들이 갭으로 시작하거나 양봉/음봉이 뒤집힌다(2026-07-27 실측: 종가·고가·
+        저가는 영웅문과 일치하는데 시가만 어긋남). 범위 검사가 그런 오독을 걸러낸다.
+        후보가 모두 범위 밖이면 종가로 대체해 도지로 그린다(잘못된 몸통보다 안전).
+        """
+        for key in cls._OPEN_KEYS:
+            value = cls._num(row, (key,))
+            if value is not None and low <= value <= high:
+                return value
+        return close
+
+    @classmethod
     def _text(cls, row: dict, keys: tuple[str, ...]) -> str:
         for key in keys:
             raw = row.get(key)
@@ -232,9 +257,12 @@ class Broker:
             close = self._num(row, self._CLOSE_KEYS)
             if not close:
                 continue
-            o = self._num(row, self._OPEN_KEYS) or close
-            h = self._num(row, self._HIGH_KEYS) or max(o, close)
-            low = self._num(row, self._LOW_KEYS) or min(o, close)
+            h = self._num(row, self._HIGH_KEYS) or close
+            low = self._num(row, self._LOW_KEYS) or close
+            o = self._pick_open(row, low, h, close)
+            h, low = max(h, o, close), min(
+                low, o, close
+            )  # 캔들이 깨지지 않게 최종 보정
             vol = self._num(row, self._VOL_KEYS) or 0.0
             value = self._num(row, self._VALUE_KEYS) or 0.0
             if minute:
@@ -274,31 +302,51 @@ class Broker:
         factor = 10.0**n
         return [(k, o, h, low, c, v, val * factor) for k, o, h, low, c, v, val in bars]
 
+    def _chart_request(
+        self, api_id: str, symbol: str, body: dict, minute: bool
+    ) -> list[tuple]:
+        """차트 조회 — **통합(KRX+NXT) 코드를 먼저** 시도하고, 비면 원래 코드로 되돌린다.
+
+        영웅문 '통합키움차트' 는 KRX+NXT 합산 시세라, 접미사 없는 코드로 받으면 시가·종가·
+        거래량이 HTS 화면과 다르다(2026-07-27 실측: 시가 0/7 일치, 거래량 2.4배 차이).
+        `_AL` 을 붙이면 5일 × 5항목이 HTS 와 정확히 일치한다. NXT 미상장 종목 등
+        접미사가 통하지 않는 경우를 대비해 결과가 비면 원래 코드로 한 번 더 조회한다.
+        """
+        for code in (f"{symbol}{_CHART_SUFFIX}", symbol):
+            data = self._request(
+                _PATH_CHART,
+                api_id,
+                {**body, "stk_cd": code},
+                retries=self._QUERY_RETRIES,
+            )
+            bars = self._parse_bars(data, minute=minute)
+            if bars:
+                return bars
+        return []
+
     def daily_chart(self, symbol: str, count: int = 180) -> list[tuple]:
         """일봉 (최근 count 개, 오름차순). 이동평균 워밍업을 위해 표시분보다 길게 요청한다."""
         from datetime import date as _date
 
-        data = self._request(
-            _PATH_CHART,
+        bars = self._chart_request(
             _TR_DAILY_CHART,
-            {
-                "stk_cd": symbol,
-                "base_dt": _date.today().strftime("%Y%m%d"),
-                "upd_stkpc_tp": "1",
-            },
-            retries=self._QUERY_RETRIES,
+            symbol,
+            {"base_dt": _date.today().strftime("%Y%m%d"), "upd_stkpc_tp": "1"},
+            minute=False,
         )
-        return self._calibrate_value(self._parse_bars(data, minute=False)[-count:])
+        return self._calibrate_value(bars[-count:])
 
     def minute_chart(self, symbol: str, interval: int = 3) -> list[tuple]:
-        """분봉 (서버가 주는 최대 분량, 오름차순). 3분봉 기준 약 6일치."""
-        data = self._request(
-            _PATH_CHART,
+        """분봉 (서버가 주는 최대 분량, 오름차순).
+
+        통합 코드라 08:00 프리마켓 ~ 20:00 애프터마켓 봉까지 포함된다.
+        """
+        return self._chart_request(
             _TR_MINUTE_CHART,
-            {"stk_cd": symbol, "tic_scope": str(interval), "upd_stkpc_tp": "1"},
-            retries=self._QUERY_RETRIES,
+            symbol,
+            {"tic_scope": str(interval), "upd_stkpc_tp": "1"},
+            minute=True,
         )
-        return self._parse_bars(data, minute=True)
 
     def index_daily(self, code: str = "001", count: int = 180) -> list[tuple]:
         """업종(지수) 일봉 — KOSPI=001. TR 규격이 다르면 BrokerError 로 실패한다

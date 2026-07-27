@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime
 
 from trader.broker import Broker, extract_fill
 from trader.kiwoom import load_auth
@@ -37,6 +38,52 @@ async def main() -> None:
     broker = Broker(auth)
     name, price = broker.stock_info(symbol)
     print(f"      종목정보: {symbol} {name} · 현재가 {price:,.0f}")
+    if "--raw" in sys.argv:  # 응답 원본 확인 (캔들이 영웅문 통합차트와 다를 때 진단용)
+        from trader.broker import _PATH_CHART, _TR_DAILY_CHART  # noqa: PLC0415
+
+        # 두 번째 인자가 8자리 날짜면 그 날짜 전후를 보여준다 (기본: 최근 3봉)
+        target = next((a for a in args[1:] if len(a) == 8 and a.isdigit()), "")
+        # 거래소 범위 확인: 기본(KRX 추정) / _AL(통합) / _NX(대체거래소)
+        # 영웅문 '통합키움차트' 는 KRX+NXT 합산이라 시가·종가·거래량이 KRX 단독과 다르다.
+        for code, label in (
+            (symbol, "기본"),
+            (f"{symbol}_AL", "통합(_AL)"),
+            (f"{symbol}_NX", "NXT(_NX)"),
+        ):
+            try:
+                raw = broker._request(  # noqa: SLF001 — 진단 전용
+                    _PATH_CHART,
+                    _TR_DAILY_CHART,
+                    {
+                        "stk_cd": code,
+                        "base_dt": datetime.now().strftime("%Y%m%d"),
+                        "upd_stkpc_tp": "1",
+                    },
+                )
+                rows = broker._first_list(raw)  # noqa: SLF001
+            except Exception as e:  # noqa: BLE001
+                print(f"      [{label}] 조회 실패 — {e}")
+                continue
+            if not rows:
+                print(f"      [{label}] 0행 — 이 코드 형식은 지원되지 않음")
+                continue
+            if target:
+                idx = next(
+                    (i for i, r in enumerate(rows) if r.get("dt", "") <= target), 0
+                )
+                window = rows[max(0, idx - 2) : idx + 3]
+                print(f"      [{label}] {len(rows)}행 · {target} 전후 {len(window)}봉")
+            else:
+                window = rows[:3]
+                print(f"      [{label}] {len(rows)}행 · 최근 3봉")
+            for row in window:
+                print(
+                    f"        {row.get('dt', '?')} "
+                    f"시{row.get('open_pric', '?')} 고{row.get('high_pric', '?')} "
+                    f"저{row.get('low_pric', '?')} 종{row.get('cur_prc', '?')} "
+                    f"거래량{row.get('trde_qty', '?')}"
+                )
+
     if "--chart" in sys.argv:  # 차트 TR 실측: 일봉/분봉/지수 응답 규격 확인
         for label, fetch in (
             ("일봉", lambda: broker.daily_chart(symbol)),

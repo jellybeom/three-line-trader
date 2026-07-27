@@ -97,6 +97,102 @@ def _holding_time(fills: list[dict]) -> str:
     return f"{minutes // 60}시간 {minutes % 60}분" if minutes >= 60 else f"{minutes}분"
 
 
+_COLOR_PROFIT = 0x2E7D32  # 초록 — 세후 이익
+_COLOR_LOSS = 0xC62828  # 빨강 — 세후 손실
+_COLOR_FLAT = 0x616161  # 회색 — 매매 없음/본전
+
+
+def build_daily_summary_embed(
+    trade_date: str,
+    symbols: list[dict],
+    fills: list[dict],
+    deposit: float | None = None,
+) -> dict:
+    """일일 요약 Discord embed — 왼쪽 색 띠와 항목 분리로 한눈에 읽히게 만든다.
+
+    같은 내용을 줄글로 보내면 색·구분이 없어 눈에 들어오지 않는다(2026-07-27 피드백).
+    embed 는 손익 부호에 따라 초록/빨강 띠가 붙고, 종목마다 필드로 분리된다.
+    """
+    import datetime as _dt
+
+    weekday = "월화수목금토일"[_dt.date.fromisoformat(trade_date).weekday()]
+    traded = [s for s in symbols if s["total_bought"] > 0]
+    closed = [s for s in traded if s["state"] == "종료"]
+    holding = [s for s in traded if s["state"] != "종료"]
+    realized = sum(s["realized_pnl"] for s in traded)
+    fees = sum(s["fees"] for s in traded)
+    net = realized - fees
+    invested = sum(s["avg_price"] * s["total_bought"] for s in traded)
+
+    if not traded:
+        head = "체결된 매매가 없습니다."
+        color = _COLOR_FLAT
+    else:
+        sign = "📈" if net > 0 else ("📉" if net < 0 else "➖")
+        head = (
+            f"{sign}  **{net:+,.0f}원**  (세전 {realized:+,.0f} · 비용 {fees:,.0f})\n"
+            f"체결 {len(fills)}건 · 진입 {len(traded)}종목 · 청산 {len(closed)}종목"
+        )
+        if invested:
+            head += f" · 투입 대비 **{net / invested:+.2%}**"
+        color = _COLOR_PROFIT if net > 0 else (_COLOR_LOSS if net < 0 else _COLOR_FLAT)
+
+    fields = []
+    for s in traded[:20]:  # embed 필드 상한(25) 여유
+        own = [f for f in fills if f["symbol"] == s["symbol"]]
+        bought = sum(f["qty"] for f in own if f["side"] == "매수")
+        sold = sum(f["qty"] for f in own if f["side"] == "매도")
+        s_net = s["realized_pnl"] - s["fees"]
+        if s["state"] != "종료":
+            icon = "⚠️"
+        elif s_net > 0:
+            icon = "💰"
+        elif s_net < 0:
+            icon = "🛑"
+        else:
+            icon = "⚪"
+        lines = [
+            f"매수 `{bought}`주 · 평단 `{s['avg_price']:,.0f}`"
+            + (f" · 매도 `{sold}`주" if sold else "")
+            + (f" · 잔량 `{s['remaining']}`주" if s["remaining"] else "")
+        ]
+        if s["realized_pnl"]:
+            lines.append(f"실현 **{s_net:+,.0f}원** (세전 {s['realized_pnl']:+,.0f})")
+        if s["avg_price"] and s["high_price"]:
+            high = (s["high_price"] - s["avg_price"]) / s["avg_price"]
+            low = (s["low_price"] - s["avg_price"]) / s["avg_price"]
+            lines.append(
+                f"최고 `{high:+.1%}` / 최저 `{low:+.1%}`"
+                + (f" · 보유 {held}" if (held := _holding_time(own)) else "")
+            )
+        if s["state"] != "종료":
+            lines.append("**다음 매매일로 이월하세요**")
+        fields.append(
+            {
+                "name": f"{icon} {s['name']}({s['symbol']}) · {s['state']}",
+                "value": "\n".join(lines)[:1024],
+                "inline": False,
+            }
+        )
+    if len(traded) > 20:
+        fields.append(
+            {"name": f"외 {len(traded) - 20}종목", "value": "\u200b", "inline": False}
+        )
+
+    footer = f"미진입 {len(symbols) - len(traded)}종목"
+    if holding:
+        footer += f" · 보유 중 {len(holding)}종목"
+    if deposit is not None:
+        footer += f" · 예수금 {deposit:,.0f}원"
+    return {
+        "title": f"📊 {trade_date} ({weekday}) 매매 요약",
+        "description": head,
+        "color": color,
+        "fields": fields,
+        "footer": {"text": footer},
+    }
+
+
 def format_daily_summary(
     trade_date: str,
     symbols: list[dict],
@@ -188,6 +284,12 @@ class DiscordNotifier:
         """텍스트 발송 (blocking). 성공 True, 제한 중 생략 False."""
         return self._post(
             lambda: requests.post(self._url, json={"content": text[:1900]}, timeout=10)
+        )
+
+    def send_embed(self, embed: dict) -> bool:
+        """embed 발송 (blocking) — 색 띠·필드가 있는 구조화 메시지."""
+        return self._post(
+            lambda: requests.post(self._url, json={"embeds": [embed]}, timeout=10)
         )
 
     def send_image(self, path: str, caption: str = "") -> bool:

@@ -27,8 +27,10 @@ from trader.broker import Broker, BrokerError, extract_fill
 from trader.kiwoom import load_auth
 from trader.notifier import (
     DiscordNotifier,
-    format_message,
+    NotifierError,
+    build_daily_summary_embed,
     format_daily_summary,
+    format_message,
     format_trade,
     load_webhook,
     should_notify,
@@ -1000,15 +1002,13 @@ class Core:
 
         fills = [Fill(ts, side, price) for ts, side, price in fills_raw]
 
-        # 3분봉 범위: 최근 3거래일(맥락) vs 진입일 중 이른 쪽부터 + 직전 여분 8봉.
-        # 3:4 세로형에서 3일치(약 400봉)가 가독 한계라 기본을 3일로 두되,
-        # 이월 종목은 진입일부터 전부 보여준다 (서버 한도 약 6.9일).
+        # 3분봉 범위: 당일(약 130봉) + 직전 여분 8봉이 기본. 봉이 많으면 3:4 화면에서
+        # 캔들이 뭉개지므로, 진입 후 며칠 보유한 이월 종목만 진입일부터 전부 보여준다.
         entry_day = (
             fills[0].ts[:10].replace("-", "") if fills else self._date.replace("-", "")
         )
         days = sorted({b.key[:8] for b in minute_all})
-        base_day = days[-3] if len(days) >= 3 else days[0]
-        start_day = min(entry_day, base_day)
+        start_day = min(entry_day, days[-1])  # 기본은 당일, 이월 종목만 진입일부터
         start_idx = next(
             (i for i, b in enumerate(minute_all) if b.key[:8] >= start_day), 0
         )
@@ -1189,6 +1189,7 @@ class Core:
                 deposit = await asyncio.to_thread(self._broker.deposit)
             except BrokerError:
                 deposit = None
+        embed = build_daily_summary_embed(self._date, symbols, fills, deposit)
         text = format_daily_summary(self._date, symbols, fills, deposit)
         holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
         self._log(
@@ -1199,7 +1200,16 @@ class Core:
             notify=False,
         )
         if self._notifier:
-            await self._send_discord(text)
+            try:
+                await asyncio.to_thread(self._notifier.send_embed, embed)
+            except NotifierError as e:  # 형식 문제 시 줄글로라도 보낸다
+                self._log(
+                    "시스템",
+                    "경고",
+                    f"요약 embed 발송 실패({e}) — 텍스트로 재시도",
+                    notify=False,
+                )
+                await self._send_discord(text)
 
     # ── 상태 로드 / 발행 ────────────────────────────────────────
 

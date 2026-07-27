@@ -208,26 +208,19 @@ def _fill_markers(ax, bars: list[Bar], fills: list[Fill], daily: bool) -> None:
                     break
         if idx is None:
             continue
-        if f.side == "매수":
-            ax.plot(
-                idx,
-                bars[idx].low * 0.997,
-                marker="^",
-                color=_UP,
-                markersize=9,
-                markeredgecolor="black",
-                zorder=5,
-            )
-        else:
-            ax.plot(
-                idx,
-                bars[idx].high * 1.003,
-                marker="v",
-                color=_DOWN,
-                markersize=9,
-                markeredgecolor="black",
-                zorder=5,
-            )
+        # 마커는 **실제 체결 가격**에 찍는다. 봉 위/아래로 띄우면 진입·청산 가격이
+        # 비슷해도 화살표가 멀리 떨어져 큰 손익이 난 것처럼 보인다(2026-07-27 피드백).
+        marker, color = ("^", _UP) if f.side == "매수" else ("v", _DOWN)
+        ax.plot(
+            idx,
+            f.price,
+            marker=marker,
+            color=color,
+            markersize=8,
+            markeredgecolor="white",
+            markeredgewidth=0.8,
+            zorder=6,
+        )
 
 
 def _style(ax, show_x: bool = False) -> None:
@@ -344,10 +337,19 @@ def render_daily(
             fontsize=9,
             color="gray",
         )
-    ticks = list(range(0, len(visible), 10))
-    ax_kospi.set_xticks(ticks)
+    # 월이 바뀌는 봉에 눈금과 세로 보조선 — 영웅문처럼 달 경계를 한눈에
+    month_starts = [
+        i
+        for i in range(1, len(visible))
+        if visible[i].key[4:6] != visible[i - 1].key[4:6]
+    ] or [0]
+    for axis in (ax_main, ax_vol, ax_val, ax_kospi):
+        for i in month_starts:
+            axis.axvline(i - 0.5, color="gray", linewidth=0.6, alpha=0.5, zorder=0)
+    ax_kospi.set_xticks(month_starts)
     ax_kospi.set_xticklabels(
-        [f"{visible[i].key[4:6]}-{visible[i].key[6:8]}" for i in ticks], fontsize=7
+        [f"{visible[i].key[:4]}-{visible[i].key[4:6]}" for i in month_starts],
+        fontsize=7,
     )
     _style(ax_kospi, show_x=True)
 

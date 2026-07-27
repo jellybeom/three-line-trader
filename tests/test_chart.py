@@ -243,6 +243,103 @@ def test_거래대금이_이미_원_단위면_그대로_둔다(auth, monkeypatch
     assert Broker(auth).daily_chart("005930")[-1][6] == 2_500_000
 
 
+def test_차트는_통합코드를_먼저_조회한다(auth, monkeypatch):
+    """영웅문 통합차트와 값을 맞추려면 KRX 단독이 아니라 통합(_AL) 시세여야 한다."""
+    from trader.broker import Broker
+
+    codes = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        codes.append(json["stk_cd"])
+        return _chart_response(
+            [
+                {
+                    "dt": "20260515",
+                    "open_pric": "51300",
+                    "high_pric": "52200",
+                    "low_pric": "43550",
+                    "cur_prc": "44600",
+                    "trde_qty": "2319434",
+                }
+            ]
+        )
+
+    monkeypatch.setattr("trader.broker.requests.post", fake_post)
+    bars = Broker(auth).daily_chart("475150")
+    assert codes == ["475150_AL"]  # 통합 코드로 한 번에 성공 → 추가 호출 없음
+    assert bars[0][1] == 51300 and bars[0][4] == 44600  # 실측 HTS 값과 동일
+
+
+def test_통합코드가_비면_원래_코드로_되돌린다(auth, monkeypatch):
+    """NXT 미상장 종목 등에서 접미사가 통하지 않아도 차트가 나와야 한다."""
+    from trader.broker import Broker
+
+    codes = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        code = json["stk_cd"]
+        codes.append(code)
+        if code.endswith("_AL"):
+            return _chart_response([])
+        return _chart_response(
+            [
+                {
+                    "dt": "20260515",
+                    "open_pric": "50900",
+                    "high_pric": "50900",
+                    "low_pric": "43550",
+                    "cur_prc": "44450",
+                    "trde_qty": "1084635",
+                }
+            ]
+        )
+
+    monkeypatch.setattr("trader.broker.requests.post", fake_post)
+    bars = Broker(auth).daily_chart("475150")
+    assert codes == ["475150_AL", "475150"]
+    assert bars[0][4] == 44450
+
+
+def test_시가가_고저_범위를_벗어나면_다른_후보나_종가를_쓴다(auth, monkeypatch):
+    """실측 2026-07-27: 시가만 어긋나 캔들이 갭으로 시작하고 양봉/음봉이 뒤집혔다."""
+    from trader.broker import Broker
+
+    rows = [
+        {
+            "dt": "20260727",
+            "open_pric": "99999",  # 범위 밖 — 오독으로 판단
+            "high_pric": "2600",
+            "low_pric": "2400",
+            "cur_prc": "2550",
+        }
+    ]
+    monkeypatch.setattr(
+        "trader.broker.requests.post", lambda *a, **k: _chart_response(rows)
+    )
+    bar = Broker(auth).daily_chart("005930")[0]
+    assert bar[1] == 2550.0  # 종가로 대체(도지)
+    assert bar[2] == 2600.0 and bar[3] == 2400.0  # 고저는 그대로
+
+
+def test_정상_시가는_그대로_사용된다(auth, monkeypatch):
+    from trader.broker import Broker
+
+    rows = [
+        {
+            "dt": "20260727",
+            "open_pric": "2500",
+            "high_pric": "2600",
+            "low_pric": "2400",
+            "cur_prc": "2450",
+        }
+    ]
+    monkeypatch.setattr(
+        "trader.broker.requests.post", lambda *a, **k: _chart_response(rows)
+    )
+    bar = Broker(auth).daily_chart("005930")[0]
+    assert bar[1] == 2500.0 and bar[4] == 2450.0  # 시가 > 종가 → 음봉
+
+
 def test_종가가_없는_행은_건너뛴다(auth, monkeypatch):
     from trader.broker import Broker
 
