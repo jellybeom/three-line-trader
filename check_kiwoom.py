@@ -38,6 +38,24 @@ async def main() -> None:
     broker = Broker(auth)
     name, price = broker.stock_info(symbol)
     print(f"      종목정보: {symbol} {name} · 현재가 {price:,.0f}")
+    if "--deposit" in sys.argv:  # 예수금 응답 전 필드 확인 (어느 값이 주문가능금액인지)
+        for qry_tp, label in (("2", "일반조회"), ("3", "추정조회")):
+            try:
+                data = broker.deposit_detail(qry_tp)
+            except Exception as e:  # noqa: BLE001
+                print(f"      [{label}] 실패 — {e}")
+                continue
+            items = [
+                (k, v)
+                for k, v in data.items()
+                if isinstance(v, str)
+                and v.strip().lstrip("+-").replace(".", "").isdigit()
+                and float(v) != 0
+            ]
+            print(f"      [{label}] 0 아닌 숫자 필드 {len(items)}개")
+            for k, v in items:
+                print(f"        {k:<28} {float(v):>15,.0f}")
+
     if "--raw" in sys.argv:  # 응답 원본 확인 (캔들이 영웅문 통합차트와 다를 때 진단용)
         from trader.broker import _PATH_CHART, _TR_DAILY_CHART  # noqa: PLC0415
 

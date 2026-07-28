@@ -132,11 +132,17 @@ class Broker:
     # 0으로 오고 실제 금액이 다른 필드에 있는 경우를 실측했다.
     # fc_stk_krw_repl_set_amt: 해외주식 원화주문(통합증거금) 서비스 계좌에서
     # 원화 예수금이 대용 설정되어 이 필드에만 잡히는 사례 실측 (2026-07-21).
+    # 실측(2026-07-28) 기준 의미:
+    #   100stk_ord_alow_amt  증거금 100% 종목 주문가능금액 = 현금 + 당일 매도대금 재사용분
+    #   ord_alow_amt         주문가능현금 (매도대금 재사용분 제외) — 너무 보수적이라 후순위
+    #   entr                 예수금 총액 (증거금 포함) — 과대평가라 최후 수단
+    # 미수를 쓰지 않는 전략이므로 '증거금 100% 종목' 기준이 우리에게 맞는 상한이다.
     _DEPOSIT_KEYS = (
-        "ord_alow_amt",
         "100stk_ord_alow_amt",
-        "entr",
+        "ord_alow_amt",
+        "pymn_alow_amt",
         "d2_entra",
+        "entr",
         "wthd_alow_amt",
         "fc_stk_krw_repl_set_amt",
     )

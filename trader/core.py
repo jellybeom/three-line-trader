@@ -39,6 +39,7 @@ from dataclasses import replace
 
 from trader.state_machine import (
     Decision,
+    Params,
     Side,
     State,
     apply_fill,
@@ -54,6 +55,9 @@ _PENDING_WARN_SEC = 60  # 체결통보 미도착 경고 기준
 _PENDING_RECOVER_SEC = 90  # 이 시간까지 미완결이면 계좌 잔고를 근거로 대기 해제
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
+_DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
+_BLOCK_LOG_COOLDOWN_SEC = 60  # 같은 종목의 보류 사유 반복 로그 억제
+_MIN_ENTRY_QTY = 3  # 1차 매수 수량이 이 미만이면 분할 익절이 어려워 경고
 _LOOP_SEC = 0.1
 
 
@@ -192,7 +196,9 @@ class Core:
         self._entries: dict[str, dict] = {}  # symbol -> {name, params, pos, price}
         # order_no -> {symbol, from_state, decision, order_id, ts, warned}
         self._pending: dict[str, dict] = {}
-        self._buy2_blocked: set[str] = set()
+        self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
+        self._block_logged: dict[str, float] = {}  # 종목별 마지막 보류 로그 시각
+        self._block_notified: set[str] = set()  # 보류 알림은 종목당 1회
         self._order_fail: dict[str, dict] = {}  # 종목별 주문 실패 누적 {count, until}
         self._order_blocked: set[str] = set()  # 연속 실패로 당일 주문 차단된 종목
         self._commission_rate = 0.0
@@ -238,7 +244,9 @@ class Core:
         self._store = Store(db_path_for(self._mode_real, self._db_dir))
         self._notify_level = self._store.get_setting("notify_level", "전체")
         self._max_symbols = int(self._store.get_setting("funds_max", "10"))
-        self._buy2_blocked.clear()
+        self._block_logged.clear()
+        self._block_notified.clear()
+        self._deposit_cache = None
         self._order_fail.clear()
         self._order_blocked.clear()
         self._pending.clear()
@@ -363,13 +371,14 @@ class Core:
                     "high": pos.high_price,
                     "low": pos.low_price,
                 }
-                self._buy2_blocked.discard(s)
+                self._clear_block(s)
                 self._emit_position(s)
                 self._log(
                     s,
                     "등록" if not edit else "편집",
                     f"{n} (상태: {pos.state.value}, 잔량 {pos.remaining}주)",
                 )
+                self._warn_small_qty(s, n, p)
                 await self._sync_watcher_symbols()
             case bus.Delete(symbol=s):
                 if self._running:
@@ -379,7 +388,7 @@ class Core:
                     return
                 self._store.delete_symbol(self._date, s)
                 self._entries.pop(s, None)
-                self._buy2_blocked.discard(s)
+                self._clear_block(s)
                 self._bus.events.put(bus.SymbolRemoved(s))
                 self._log(s, "삭제", "관심종목 제외")
                 await self._sync_watcher_symbols()
@@ -392,7 +401,7 @@ class Core:
                     self._log(s, "에러", str(e))
                 else:
                     self._entries[s]["pos"] = new_pos
-                    self._buy2_blocked.discard(s)
+                    self._clear_block(s)
                     self._emit_position(s)
                     self._log(s, "리셋", "관리자 수동 초기화 (종료 → 대기)")
             case bus.SetRunning(running=r):
@@ -642,13 +651,12 @@ class Core:
                 if x["pos"].state not in (State.WAITING, State.CLOSED)
             )
             if active >= self._max_symbols:
-                nd = Decision(
-                    State.CLOSED,
-                    None,
-                    0,
-                    f"최대 종목 수({self._max_symbols}) 도달 → 진입 금지, 당일 종료",
+                # 슬롯이 비면 재진입할 수 있도록 '대기' 상태를 유지한다.
+                self._log_block(
+                    symbol,
+                    f"최대 종목 수({self._max_symbols}) 도달 — "
+                    "자리가 나면 재시도합니다",
                 )
-                await self._execute(symbol, nd, price)
                 return
 
         if d.side is Side.BUY and not await self._can_buy(symbol, d, price):
@@ -682,35 +690,96 @@ class Core:
             notify=False,
         )
 
-    async def _can_buy(self, symbol: str, d: Decision, price: float) -> bool:
-        """예수금 방어. False 면 주문을 내지 않는다."""
-        e = self._entries[symbol]
-        is_first_entry = e["pos"].state is State.WAITING  # 1차 또는 갭 동시 매수
-        if not is_first_entry and symbol in self._buy2_blocked:
-            return False  # 이미 차단·알림된 종목 (틱마다 REST 호출 방지)
+    async def _get_deposit(self) -> float:
+        """주문가능금액 (짧은 캐시). 보류 종목이 틱마다 REST 를 때리는 것을 막는다.
 
-        deposit = await asyncio.to_thread(self._broker.deposit)
+        매도 체결로 자금이 늘면 캐시를 즉시 버려(_invalidate_deposit) 회수분을
+        바로 인식한다.
+        """
+        now = time.monotonic()
+        if self._deposit_cache and now - self._deposit_cache[0] < _DEPOSIT_TTL_SEC:
+            return self._deposit_cache[1]
+        value = await asyncio.to_thread(self._broker.deposit)
+        self._deposit_cache = (time.monotonic(), value)
+        return value
+
+    def _invalidate_deposit(self) -> None:
+        self._deposit_cache = None
+
+    @staticmethod
+    def _entry_qty(params: Params) -> int:
+        """1선 가격 기준 1차 매수 예상 수량 (경고 판단용)."""
+        return int(params.buy1_amount // params.line1) if params.line1 else 0
+
+    def _warn_small_qty(self, symbol: str, name: str, params: Params) -> None:
+        """1차 수량이 너무 적으면 분할 익절이 사실상 불가능하므로 알려준다.
+
+        진입을 막지는 않는다 — 판단은 사용자 몫이고, 소량 종목은 수동 전량 청산으로
+        정리하면 된다.
+        """
+        qty = self._entry_qty(params)
+        if qty >= _MIN_ENTRY_QTY:
+            return
+        detail = (
+            f"1차 매수 예상 {qty}주 (1선 {params.line1:,.0f} · "
+            f"금액 {params.buy1_amount:,.0f})"
+        )
+        if qty == 0:
+            self._log(
+                symbol,
+                "경고",
+                f"{detail} — 매수 금액이 1선보다 적어 진입할 수 없습니다",
+            )
+        else:
+            self._log(
+                symbol,
+                "경고",
+                f"{detail} — {_MIN_ENTRY_QTY}주 미만이라 단계 익절이 어렵습니다 "
+                "(수동 전량 청산 권장)",
+            )
+
+    def _clear_block(self, symbol: str) -> None:
+        self._block_logged.pop(symbol, None)
+        self._block_notified.discard(symbol)
+
+    def _log_block(self, symbol: str, text: str) -> None:
+        """진입 보류 사유 — 종목당 알림 1회, 이후 로그는 쿨다운을 두고 조용히 남긴다."""
+        now = time.monotonic()
+        if now - self._block_logged.get(symbol, 0.0) < _BLOCK_LOG_COOLDOWN_SEC:
+            return
+        self._block_logged[symbol] = now
+        first = symbol not in self._block_notified
+        self._block_notified.add(symbol)
+        self._log(symbol, "보류", text, notify=False)
+        if first:
+            self._notify(symbol, f"진입 보류 — {text}")
+
+    async def _can_buy(self, symbol: str, d: Decision, price: float) -> bool:
+        """예수금 방어. False 면 이번 틱만 주문을 거른다(종목은 대기 상태로 남는다).
+
+        예전에는 1차 시점에 자금이 모자라면 당일 '종료' 시켰지만, 매도로 자금이
+        회수돼도 되살아나지 못해 기회를 통째로 잃었다(2026-07-28 실측: 5종목).
+        지금은 대기 상태를 유지해, 자금이 생기면 다음 틱에 같은 규칙으로 재판정된다
+        (1선~2선이면 1차, 2선~3선이면 1·2차 동시, 3선 아래면 그때 종료).
+        """
+        deposit = await self._get_deposit()
         need = d.qty * price
         if deposit >= need:
             return True
 
-        if is_first_entry:  # 1차 시점 부족 → 주문 없이 당일 종료
-            nd = Decision(
-                State.CLOSED,
-                None,
-                0,
-                f"예수금 부족({deposit:,.0f} < {need:,.0f}) → 진입 금지, 당일 종료",
-            )
-            await self._execute(symbol, nd, price)
-        else:  # 2차 시점 부족 → 1차 물량 유지, 추가 매수만 차단 (1회 알림)
-            self._buy2_blocked.add(symbol)
-            self._log(
+        e = self._entries[symbol]
+        if e["pos"].state is State.WAITING:
+            self._log_block(
                 symbol,
-                "에러",
-                f"예수금 부족({deposit:,.0f} < {need:,.0f}) → 2차 매수 차단, "
-                "1차 물량 유지 (손절·익절은 계속 동작)",
+                f"예수금 부족({deposit:,.0f} < {need:,.0f}) — "
+                "자금이 생기면 재시도합니다",
             )
-        self._notify(symbol, "예수금 부족 발생 — 확인 필요")
+        else:  # 2차 매수 보류 — 1차 물량은 그대로 두고 손절·익절은 계속 동작
+            self._log_block(
+                symbol,
+                f"예수금 부족({deposit:,.0f} < {need:,.0f}) — "
+                "2차 매수 보류 (1차 물량 유지)",
+            )
         return False
 
     # ── 체결통보 → 상태 확정 ────────────────────────────────────
@@ -737,6 +806,7 @@ class Core:
                 "경고",
                 f"체결 수량 상이: 주문 {d.qty}주 vs 체결 {fill.filled_qty}주",
             )
+        self._invalidate_deposit()  # 체결로 자금이 변했으니 다음 판정은 최신값으로
         fee = self._fee(d.side, fill.fill_price * fill.filled_qty)
         filled = apply_fill(e["pos"], d, fill.fill_price, fill.filled_qty)
         if d.side is Side.BUY and not e.get(
@@ -1007,8 +1077,11 @@ class Core:
         entry_day = (
             fills[0].ts[:10].replace("-", "") if fills else self._date.replace("-", "")
         )
+        # 최소 2거래일을 보여준다 — 당일만 그리면 짧게 보유한 종목은 봉이 10여 개뿐이라
+        # 캔들이 지나치게 커진다(2026-07-28 피드백). 이월 종목은 진입일부터.
         days = sorted({b.key[:8] for b in minute_all})
-        start_day = min(entry_day, days[-1])  # 기본은 당일, 이월 종목만 진입일부터
+        base_day = days[-2] if len(days) >= 2 else days[0]
+        start_day = min(entry_day, base_day)
         start_idx = next(
             (i for i, b in enumerate(minute_all) if b.key[:8] >= start_day), 0
         )
@@ -1216,7 +1289,8 @@ class Core:
     def _load_date(self, trade_date: str) -> None:
         self._date = trade_date
         self._entries = {}
-        self._buy2_blocked = set()
+        self._block_logged.clear()
+        self._block_notified.clear()
         for symbol, (name, params, pos, memo) in self._store.load_all(
             trade_date
         ).items():
@@ -1289,6 +1363,20 @@ class Core:
         if updated:
             self._log(
                 "시스템", "설정", f"대기 종목 {updated}개에 새 매수 금액·익절 설정 반영"
+            )
+        small = [
+            e["name"]
+            for e in self._entries.values()
+            if e["pos"].state is State.WAITING
+            and self._entry_qty(e["params"]) < _MIN_ENTRY_QTY
+        ]
+        if small:
+            self._log(
+                "시스템",
+                "경고",
+                f"1차 수량이 {_MIN_ENTRY_QTY}주 미만인 종목 {len(small)}개: "
+                f"{', '.join(small[:5])}{' 외' if len(small) > 5 else ''} "
+                "— 단계 익절이 어렵습니다",
             )
 
     def _emit_funds(self) -> None:

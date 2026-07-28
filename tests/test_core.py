@@ -130,15 +130,38 @@ def test_전체_사이클_익절까지(core):
 # ── 예수금 방어 ────────────────────────────────────────────────
 
 
-def test_1차_매수_시점_예수금_부족이면_주문없이_종료(core):
+def test_1차_매수_시점_예수금_부족이면_대기로_남는다(core):
+    """당일 종료시키면 자금이 회수돼도 되살아나지 못한다 — 대기로 두고 재시도한다."""
     core._broker.deposit_value = 100  # 부족 상황
     register(core)
     asyncio.run(tick(core, 9_950))
     assert core._broker.orders == []  # 주문이 나가지 않음
+    assert core._entries["005930"]["pos"].state is State.WAITING
+
+
+def test_자금이_생기면_보류된_종목이_재진입한다(core):
+    core._broker.deposit_value = 100
+    register(core)
+    asyncio.run(tick(core, 9_950))
+    assert core._broker.orders == []
+
+    core._broker.deposit_value = 10**9  # 매도 등으로 자금 회수
+    core._invalidate_deposit()
+    asyncio.run(tick(core, 9_940))
+    assert core._broker.orders == [("매수", "005930", 100)]
+    assert core._entries["005930"]["pos"].pending is True
+
+
+def test_보류_중_3선_아래로_가면_그때_종료된다(core):
+    core._broker.deposit_value = 100
+    register(core)
+    asyncio.run(tick(core, 9_950))  # 1선 이탈이지만 자금 부족 → 보류
+    asyncio.run(tick(core, 7_900))  # 3선 아래 → 진입 금지 확정
     assert core._entries["005930"]["pos"].state is State.CLOSED
+    assert core._broker.orders == []
 
 
-def test_2차_매수_시점_부족이면_1차물량_유지하고_차단(core):
+def test_2차_매수_시점_부족이면_1차물량_유지하고_보류(core):
     register(core)
     asyncio.run(tick(core, 10_000))
     asyncio.run(fill(core, "ORD1", 100, 10_000))  # 1차 매수 완료
@@ -146,25 +169,40 @@ def test_2차_매수_시점_부족이면_1차물량_유지하고_차단(core):
     asyncio.run(tick(core, 9_000))  # 2차 매수 조건
     pos = core._entries["005930"]["pos"]
     assert pos.state is State.BUY1 and pos.remaining == 100  # 1차 물량 유지
-    assert "005930" in core._buy2_blocked
+    assert core._broker.orders == [("매수", "005930", 100)]  # 2차 주문은 나가지 않음
     asyncio.run(tick(core, 8_900))  # 재시도에도 추가 주문 없음 (deposit 재호출도 차단)
     assert [o[0] for o in core._broker.orders] == ["매수"]
 
 
-def test_차단_상태에서도_손절은_동작(core):
+def test_보류_상태에서도_손절은_동작(core):
     register(core)
     asyncio.run(tick(core, 10_000))
     asyncio.run(fill(core, "ORD1", 100, 10_000))
     core._broker.deposit_value = 100
-    asyncio.run(tick(core, 9_000))  # 2차 차단
+    asyncio.run(tick(core, 9_000))  # 2차 보류
     asyncio.run(tick(core, 7_900))  # 3선 갭 이탈 → 매도는 예수금 무관하게 동작
     assert core._broker.orders[-1] == ("매도", "005930", 100)
+
+
+def test_2차_보류는_자금이_생기면_풀린다(core):
+    register(core)
+    asyncio.run(tick(core, 10_000))
+    asyncio.run(fill(core, "ORD1", 100, 10_000))
+    core._broker.deposit_value = 100
+    asyncio.run(tick(core, 9_000))  # 2선 이탈이지만 자금 부족 → 보류
+    assert len(core._broker.orders) == 1
+
+    core._broker.deposit_value = 10**9
+    core._invalidate_deposit()
+    asyncio.run(tick(core, 8_990))
+    assert core._broker.orders[-1][0] == "매수"
 
 
 # ── 최대 종목 수 제한 ──────────────────────────────────────────
 
 
-def test_최대_종목_수_도달시_추가_진입은_주문없이_종료(core):
+def test_최대_종목_수_도달시_추가_진입은_대기로_보류된다(core):
+    """자리가 나면 들어갈 수 있어야 하므로 종료시키지 않는다 (2026-07-28 실측 개선)."""
     core._max_symbols = 1
     register(core)  # 005930
     core._store.register_symbol(core._date, "000660", "하이닉스", P)
@@ -179,7 +217,7 @@ def test_최대_종목_수_도달시_추가_진입은_주문없이_종료(core):
     from trader.watcher import Tick as T
 
     asyncio.run(core._on_tick(T("000660", 9_950, "")))  # 2번째 진입 시도
-    assert core._entries["000660"]["pos"].state is State.CLOSED  # 주문 없이 종료
+    assert core._entries["000660"]["pos"].state is State.WAITING  # 보류 (종료 아님)
     assert core._broker.orders == [("매수", "005930", 100)]  # 추가 주문 없음
 
 
@@ -314,3 +352,41 @@ def test_진입_전_가격은_최저가에_반영되지_않는다(core):
     asyncio.run(fill(core, "ORD2", 40, 10_600))
     pos = core._entries["005930"]["pos"]
     assert pos.low_price == 10_000  # 12,000 은 기록되지 않음
+
+
+# ── 최소 진입 수량 경고 ────────────────────────────────────────
+
+
+def _logs(core):
+    from trader.ui import bus as b
+
+    out = []
+    while not core._bus.events.empty():
+        e = core._bus.events.get_nowait()
+        if isinstance(e, b.LogLine):
+            out.append(e.text)
+    return out
+
+
+def test_소량_진입_종목은_등록_시_경고한다(core):
+    """1차 수량이 3주 미만이면 40/50/10 분할 익절이 사실상 불가능하다."""
+    from trader.state_machine import Params as P2
+
+    high = P2(
+        line1=180_000,
+        line2=170_000,
+        line3=160_000,
+        buy1_amount=250_000,
+        buy2_amount=250_000,
+    )  # 1주밖에 못 산다
+    core._running = False  # 등록은 감시 중지 상태에서만 가능
+    asyncio.run(
+        core._handle_command(bus.Register("010120", "LS ELECTRIC", high, Position()))
+    )
+    assert any("단계 익절이 어렵습니다" in t for t in _logs(core))
+
+
+def test_충분한_수량이면_경고하지_않는다(core):
+    core._running = False
+    asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, Position())))
+    assert not any("단계 익절" in t for t in _logs(core))
