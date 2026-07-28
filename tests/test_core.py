@@ -390,3 +390,54 @@ def test_충분한_수량이면_경고하지_않는다(core):
     core._running = False
     asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, Position())))
     assert not any("단계 익절" in t for t in _logs(core))
+
+
+# ── 알림 묶음 발송 ─────────────────────────────────────────────
+
+
+def test_등록_알림은_모였다가_한_번에_나간다(core):
+    """CSV 로 수십 종목을 넣으면 줄 단위 발송은 수십 초가 걸린다 — 한 장으로 묶는다."""
+    sent = []
+
+    class FakeNotifier:
+        def send(self, text):
+            sent.append(("text", text))
+            return True
+
+        def send_embed(self, embed):
+            sent.append(("embed", embed))
+            return True
+
+    core._notifier = FakeNotifier()
+    core._notify_level = "전체"
+    core._running = False
+
+    async def scenario():
+        for i in range(3):
+            await core._handle_command(
+                bus.Register(f"00593{i}", f"종목{i}", P, Position())
+            )
+        assert sent == []  # 아직 버퍼에만 쌓인 상태
+        await core._flush_notices()
+
+    asyncio.run(scenario())
+    assert len(sent) == 1 and sent[0][0] == "embed"
+    assert "등록 3건" in sent[0][1]["title"]
+
+
+def test_체결_알림은_묶지_않고_즉시_나간다(core):
+    sent = []
+
+    class FakeNotifier:
+        def send(self, text):
+            sent.append(text)
+            return True
+
+    core._notifier = FakeNotifier()
+    core._notify_level = "전체"
+    register(core)
+    asyncio.run(tick(core, 10_000))
+    asyncio.run(fill(core, "ORD1", 100, 10_000))
+    asyncio.run(asyncio.sleep(0.05))
+    assert any("매수" in t for t in sent)
+    assert core._notice_batch == []

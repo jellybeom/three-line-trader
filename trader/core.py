@@ -28,6 +28,7 @@ from trader.kiwoom import load_auth
 from trader.notifier import (
     DiscordNotifier,
     NotifierError,
+    build_batch_embed,
     build_daily_summary_embed,
     format_daily_summary,
     format_message,
@@ -58,6 +59,10 @@ _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
 _BLOCK_LOG_COOLDOWN_SEC = 60  # 같은 종목의 보류 사유 반복 로그 억제
 _MIN_ENTRY_QTY = 3  # 1차 매수 수량이 이 미만이면 분할 익절이 어려워 경고
+_BATCH_QUIET_SEC = 2.0  # 이 시간 동안 새 알림이 없으면 모아둔 것을 한 장으로 보낸다
+_BATCH_MAX = 50  # 버퍼가 이만큼 차면 기다리지 않고 즉시 발송
+# 묶음 대상: 한 번에 여러 건이 쏟아지는 정보성 알림. 체결 알림은 즉시성이 중요해 제외한다.
+_BATCH_KINDS = ("등록", "편집", "삭제", "보류", "경고", "설정", "리셋", "이월")
 _LOOP_SEC = 0.1
 
 
@@ -196,6 +201,8 @@ class Core:
         self._entries: dict[str, dict] = {}  # symbol -> {name, params, pos, price}
         # order_no -> {symbol, from_state, decision, order_id, ts, warned}
         self._pending: dict[str, dict] = {}
+        self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
+        self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
         self._block_logged: dict[str, float] = {}  # 종목별 마지막 보류 로그 시각
         self._block_notified: set[str] = set()  # 보류 알림은 종목당 1회
@@ -235,6 +242,11 @@ class Core:
             await self._drain_commands()
             await self._check_pending()
             await self._check_schedule()
+            if (
+                self._notice_batch
+                and time.monotonic() - self._notice_at > _BATCH_QUIET_SEC
+            ):
+                await self._flush_notices()
             await asyncio.sleep(_LOOP_SEC)
 
     def _open_store(self) -> None:
@@ -1400,12 +1412,38 @@ class Core:
     def _log(self, symbol: str, kind: str, text: str, notify: bool = True) -> None:
         self._store.log(self._date, symbol, kind, text)
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
-        if (
+        if not (
             notify
             and self._notifier
             and should_notify(self._notify_level, symbol, kind)
         ):
-            asyncio.create_task(self._send_discord(format_message(symbol, kind, text)))
+            return
+        if kind in _BATCH_KINDS:  # 여러 건이 몰리는 정보성 알림 → 모아서 한 장으로
+            name = self._entries.get(symbol, {}).get("name", "")
+            label = f"{name}({symbol})" if name and symbol != "시스템" else symbol
+            self._notice_batch.append((kind, label, text))
+            self._notice_at = time.monotonic()
+            if len(self._notice_batch) >= _BATCH_MAX:
+                asyncio.create_task(self._flush_notices())
+            return
+        asyncio.create_task(self._send_discord(format_message(symbol, kind, text)))
+
+    async def _flush_notices(self) -> None:
+        """모아둔 정보성 알림을 발송. 1건이면 줄글, 2건 이상이면 embed 한 장."""
+        items, self._notice_batch = self._notice_batch, []
+        if not items or self._notifier is None:
+            return
+        if len(items) == 1:
+            kind, label, text = items[0]
+            await self._send_discord(format_message(label, kind, text))
+            return
+        embed = build_batch_embed(items)
+        try:
+            await asyncio.to_thread(self._notifier.send_embed, embed)
+        except NotifierError as e:
+            self._bus.events.put(
+                bus.LogLine(_now(), "시스템", "경고", f"묶음 알림 발송 실패: {e}")
+            )
 
     def _notify(self, symbol: str, text: str) -> None:
         """중요 이벤트 — '알림' 종류로 기록되며 알림 수준 필터를 거쳐 Discord 로 발송된다."""

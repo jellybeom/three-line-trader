@@ -100,6 +100,45 @@ def _holding_time(fills: list[dict]) -> str:
 _COLOR_PROFIT = 0x2E7D32  # 초록 — 세후 이익
 _COLOR_LOSS = 0xC62828  # 빨강 — 세후 손실
 _COLOR_FLAT = 0x616161  # 회색 — 매매 없음/본전
+_COLOR_INFO = 0x455A64  # 청회색 — 관심종목 변경 등 정보성 묶음
+_COLOR_WARN = 0xEF6C00  # 주황 — 확인이 필요한 경고 묶음
+
+
+def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
+    """짧은 알림 여러 건을 한 장의 embed 로 묶는다.
+
+    items: (종류, 종목표시, 내용) 목록. 등록·편집·삭제·보류처럼 한 번에 여러 건이
+    쏟아지는 알림을 줄 단위로 보내면, 발송 간격(1.5초) 때문에 24건이 36초에 걸쳐
+    도착하고 그 사이 체결 알림이 밀린다. 묶으면 한 번의 발송으로 끝난다.
+    """
+    kinds = [k for k, _, _ in items]
+    warn = [i for i in items if i[0] in ("경고", "에러", "보류")]
+    main = [i for i in items if i not in warn]
+
+    counts: dict[str, int] = {}
+    for kind in kinds:
+        counts[kind] = counts.get(kind, 0) + 1
+    title = "📋 " + " · ".join(f"{k} {n}건" for k, n in counts.items())
+
+    lines = [f"`{label}` {text}" for _, label, text in main[:40]]
+    if len(main) > 40:
+        lines.append(f"…외 {len(main) - 40}건")
+    embed = {
+        "title": title[:256],
+        "description": "\n".join(lines)[:4000] or "\u200b",
+        "color": _COLOR_WARN if warn else _COLOR_INFO,
+    }
+    if warn:
+        embed["fields"] = [
+            {
+                "name": f"⚠️ 확인 필요 {len(warn)}건",
+                "value": "\n".join(f"`{label}` {text}" for _, label, text in warn[:10])[
+                    :1024
+                ],
+                "inline": False,
+            }
+        ]
+    return embed
 
 
 def build_daily_summary_embed(

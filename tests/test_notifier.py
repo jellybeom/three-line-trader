@@ -227,3 +227,38 @@ def test_embed는_embeds_필드로_전송된다(monkeypatch):
         DiscordNotifier("https://hook").send_embed({"title": "t", "color": 1}) is True
     )
     assert captured["embeds"][0]["title"] == "t"
+
+
+# ── 묶음 알림 embed ────────────────────────────────────────────
+
+
+def test_여러_건은_한_장의_embed로_묶인다():
+    from trader.notifier import build_batch_embed
+
+    items = [("등록", f"종목{i}(00000{i})", "대기, 잔량 0주") for i in range(5)]
+    embed = build_batch_embed(items)
+    assert "등록 5건" in embed["title"]
+    assert embed["description"].count("\n") == 4  # 5줄
+    assert "fields" not in embed  # 경고가 없으면 필드도 없다
+
+
+def test_경고는_별도_필드로_분리되고_색이_바뀐다():
+    from trader.notifier import build_batch_embed
+
+    items = [
+        ("등록", "삼성전자(005930)", "대기"),
+        ("경고", "동아쏘시오(000640)", "1차 매수 예상 2주"),
+    ]
+    embed = build_batch_embed(items)
+    assert embed["color"] == 0xEF6C00  # 주황 — 확인 필요
+    assert "확인 필요 1건" in embed["fields"][0]["name"]
+    assert "동아쏘시오" in embed["fields"][0]["value"]
+    assert "동아쏘시오" not in embed["description"]  # 본문에는 중복되지 않는다
+
+
+def test_너무_많으면_잘라내고_남은_건수를_알린다():
+    from trader.notifier import build_batch_embed
+
+    embed = build_batch_embed([("등록", f"종목{i}", "대기") for i in range(60)])
+    assert "외 20건" in embed["description"]
+    assert len(embed["description"]) <= 4000
