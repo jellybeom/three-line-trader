@@ -338,3 +338,12 @@ def test_잘못된_설정은_생성_시점에_실패():
             buy1_amount=9_999,
             buy2_amount=900_000,
         )
+
+
+def test_매수_수량은_수수료만큼_여유를_둔다():
+    """금액을 꽉 채우면 증권사 여력을 1주 차이로 넘어설 수 있다 (2026-07-29 실측)."""
+    from trader.state_machine import _buy_qty
+
+    assert _buy_qty(100_000, 1_000) == 100
+    assert _buy_qty(100_000, 1_000, cost_rate=0.01) == 99  # 비용률만큼 줄어든다
+    assert _buy_qty(100_000, 1_000, cost_rate=0.0) == 100

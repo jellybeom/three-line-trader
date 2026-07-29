@@ -159,9 +159,14 @@ def _tp_sell_qty(pos: Position, params: Params, upto_level: int) -> int:
     return min(max(qty, 0), pos.remaining)
 
 
-def _buy_qty(amount: float, price: float) -> int:
-    """매수 수량 즉석 계산: floor(금액 ÷ 트리거 시점 체결가)."""
-    return int(amount // price)
+def _buy_qty(amount: float, price: float, cost_rate: float = 0.0) -> int:
+    """매수 수량 즉석 계산: floor(금액 ÷ (체결가 × (1 + 매수 비용률))).
+
+    매수에는 체결금액 외에 수수료가 더 들어간다. 이를 빼먹으면 배분 금액을 꽉 채운
+    수량이 나와 증권사 여력을 아슬아슬하게 넘어선다(2026-07-29 실측: 128주 주문 →
+    "127주 매수가능" 으로 3회 연속 거부). 비용률만큼 미리 깎아 여유를 만든다.
+    """
+    return int(amount // (price * (1.0 + cost_rate)))
 
 
 def _sell_all(pos: Position, reason: str) -> Decision:
@@ -217,10 +222,13 @@ def _tp_decision(
 # ── 공개 API ──────────────────────────────────────────────────────
 
 
-def decide(pos: Position, params: Params, price: float) -> Decision | None:
+def decide(
+    pos: Position, params: Params, price: float, cost_rate: float = 0.0
+) -> Decision | None:
     """체결가 틱 하나에 대한 판정. 할 일이 없으면 None.
 
     pending(체결 대기) 중이거나 종료 상태면 아무것도 하지 않는다.
+    cost_rate 는 매수 수수료율 — 수량 계산에만 쓰이고 전이 판정에는 영향이 없다.
     """
     if pos.pending or pos.state is State.CLOSED:
         return None
@@ -235,13 +243,13 @@ def decide(pos: Position, params: Params, price: float) -> Decision | None:
         if (
             price <= params.line2
         ):  # 갭 하락 진입: 1·2차 금액을 합쳐 한 주문으로 동시 매수
-            qty = _buy_qty(params.buy1_amount + params.buy2_amount, price)
+            qty = _buy_qty(params.buy1_amount + params.buy2_amount, price, cost_rate)
             return Decision(State.BUY2, Side.BUY, qty, "2선 이하 갭 → 1·2차 동시 매수")
         if price <= params.line1:
             return Decision(
                 State.BUY1,
                 Side.BUY,
-                _buy_qty(params.buy1_amount, price),
+                _buy_qty(params.buy1_amount, price, cost_rate),
                 "1선 이탈 → 1차 매수",
             )
         return None
@@ -258,7 +266,7 @@ def decide(pos: Position, params: Params, price: float) -> Decision | None:
             return Decision(
                 State.BUY2,
                 Side.BUY,
-                _buy_qty(params.buy2_amount, price),
+                _buy_qty(params.buy2_amount, price, cost_rate),
                 "2선 이탈 → 2차 매수",
             )
         return None

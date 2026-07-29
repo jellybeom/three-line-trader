@@ -262,3 +262,53 @@ def test_너무_많으면_잘라내고_남은_건수를_알린다():
     embed = build_batch_embed([("등록", f"종목{i}", "대기") for i in range(60)])
     assert "외 20건" in embed["description"]
     assert len(embed["description"]) <= 4000
+
+
+# ── 경보 embed / 에러 압축 ─────────────────────────────────────
+
+
+def test_API_오류는_사람이_읽을_부분만_남긴다():
+    from trader.notifier import shorten_error
+
+    raw = (
+        "주문 실패(3회): kt10000 실패 (HTTP 200, code 20): [2000] "
+        "(855056:매수증거금이 부족합니다. 127주 매수가능) — 30초간 재시도 보류"
+    )
+    out = shorten_error(raw)
+    assert "매수증거금이 부족합니다. 127주 매수가능" in out
+    assert "HTTP" not in out and "kt10000" not in out
+    assert out.startswith("주문 실패(3회):") and out.endswith(
+        "재시도 보류"
+    )  # 문맥은 유지
+
+
+def test_일반_괄호_설명은_그대로_둔다():
+    from trader.notifier import shorten_error
+
+    text = "주문가능금액 필드를 찾지 못함 (kt00001 응답 필드 변경 가능성)"
+    assert shorten_error(text) == text
+
+
+def test_경보는_종류별로_색과_아이콘이_다르다():
+    from trader.notifier import build_alert_embed
+
+    assert build_alert_embed("에러", "005930", "x")["color"] == 0xC62828
+    assert build_alert_embed("경고", "005930", "x")["color"] == 0xEF6C00
+    assert build_alert_embed("보류", "005930", "x")["color"] == 0xEF6C00
+    assert "⛔" in build_alert_embed("에러", "005930", "x")["title"]
+
+
+def test_종료_결산은_세후_손익_부호로_색이_정해진다():
+    from trader.notifier import build_trade_embed
+
+    loss = build_trade_embed(
+        "대원전선", "006340", "3선 이탈 → 전량 손절", 43, 10_650, -31_850, 1_180
+    )
+    assert loss["color"] == 0xC62828
+    assert "-33,030원" in loss["description"]  # 세후
+    assert "종료" in loss["title"]
+
+    win = build_trade_embed(
+        "삼성전자", "005930", "+7% → 전량 청산", 10, 80_000, 50_000, 900
+    )
+    assert win["color"] == 0x2E7D32 and "💰" in win["title"]

@@ -441,3 +441,59 @@ def test_체결_알림은_묶지_않고_즉시_나간다(core):
     asyncio.run(asyncio.sleep(0.05))
     assert any("매수" in t for t in sent)
     assert core._notice_batch == []
+
+
+# ── 보류 로그 억제 / 주문 수량 여유 ────────────────────────────
+
+
+def test_보류_로그는_구간이_바뀔_때만_남는다(core):
+    """틱마다 남기면 하루 수백 건이 된다 (2026-07-29 실측 107건)."""
+    from trader.ui import bus as b
+
+    core._max_symbols = 0  # 무조건 보류
+    register(core)
+    for price in (9_950, 9_940, 9_930, 9_920):  # 모두 1선~2선 구간
+        asyncio.run(tick(core, price))
+    logs = []
+    blocked = []
+    while not core._bus.events.empty():
+        e = core._bus.events.get_nowait()
+        if isinstance(e, b.LogLine) and e.kind == "보류":
+            logs.append(e.text)
+        elif isinstance(e, b.Blocked):
+            blocked.append(e)
+    assert len(logs) == 1  # 같은 구간이 이어지면 한 번만
+    assert len(blocked) == 4  # 화면 표시는 매번 갱신
+
+
+def test_구간이_바뀌면_다시_기록한다(core):
+    from trader.ui import bus as b
+
+    core._max_symbols = 0
+    register(core)
+    asyncio.run(tick(core, 9_950))  # 1선~2선
+    asyncio.run(tick(core, 8_500))  # 2선~3선 — 상황이 달라졌으니 다시 남긴다
+    logs = [e.text for e in _drain(core._bus) if getattr(e, "kind", "") == "보류"]
+    assert len(logs) == 2
+
+
+def _drain(b):
+    out = []
+    while not b.events.empty():
+        out.append(b.events.get_nowait())
+    return out
+
+
+def test_예수금이_빠듯하면_주문하지_않고_보류한다(core):
+    """직전 체결이 증권사 여력에 반영되기 전이면 꽉 채운 주문은 거부된다."""
+    register(core)
+    need = 100 * 10_000  # 1차 매수 100주 × 10,000
+    core._broker.deposit_value = need * 1.01  # 여유 2% 에 못 미침
+    asyncio.run(tick(core, 10_000))
+    assert core._broker.orders == []
+    assert core._entries["005930"]["pos"].state is State.WAITING
+
+    core._broker.deposit_value = need * 1.05
+    core._invalidate_deposit()
+    asyncio.run(tick(core, 9_990))
+    assert core._broker.orders != []

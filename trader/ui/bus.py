@@ -57,6 +57,15 @@ class SymbolInfo:
 
 
 @dataclass(frozen=True)
+class Blocked:
+    """진입 보류 상태 — 종목 행에 표시한다 (active=False 면 해제)."""
+
+    symbol: str
+    active: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class ChartReady:
     """복기 차트 PNG 생성 완료 — UI 가 창으로 표시한다."""
 

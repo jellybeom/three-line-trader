@@ -853,6 +853,8 @@ class App(tk.Tk):
                 self._update_pnl()
             case bus.NotifyLevel(level=lv):
                 self._notify_combo.set(lv)
+            case bus.Blocked(symbol=s, active=on, reason=why):
+                self.positions.set_blocked(s, on, why)
             case bus.ChartReady(symbol=s, name=n, daily_path=dp, minute_path=mp):
                 self._show_chart(s, n, dp, mp)
             case bus.DiscordStatus(connected=ok, detail=detail):

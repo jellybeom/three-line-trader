@@ -104,6 +104,76 @@ _COLOR_INFO = 0x455A64  # 청회색 — 관심종목 변경 등 정보성 묶음
 _COLOR_WARN = 0xEF6C00  # 주황 — 확인이 필요한 경고 묶음
 
 
+def shorten_error(text: str) -> str:
+    """API 오류 문구에서 사람이 읽을 부분만 남긴다.
+
+    예) "kt10000 실패 (HTTP 200, code 20): [2000] (855056:매수증거금이 부족합니다.
+        127주 매수가능)" → "매수증거금이 부족합니다. 127주 매수가능"
+    형식이 예상과 다르면 원문을 그대로 둔다(진단 정보를 잃지 않기 위해).
+    """
+    import re
+
+    # "kt10000 실패 (HTTP 200, code 20): [2000] (855056:사람이 읽을 내용)" 통째를
+    # 사람이 읽을 내용으로 치환한다. 앞뒤 문맥(예: "주문 실패(3회):", "— 30초간 보류")은 남긴다.
+    tech = re.search(r"\S*\d+\s*실패\s*\(HTTP[^)]*\)[^(]*\((?:\d+:)?([^()]*)\)", text)
+    if tech:
+        return (
+            text[: tech.start()] + tech.group(1).strip() + text[tech.end() :]
+        ).strip()
+    # 괄호 안이 "코드:메시지" 형태일 때만 꺼낸다 — 일반 괄호 설명은 본문이므로 건드리지 않는다
+    tail = re.search(r"\((\d+):([^()]*)\)\s*$", text.strip())
+    if tail:
+        return tail.group(2).strip()
+    return text
+
+
+def build_trade_embed(
+    name: str,
+    symbol: str,
+    reason: str,
+    qty: int,
+    price: float,
+    realized: float,
+    fees: float,
+) -> dict:
+    """종목이 '종료' 될 때의 결산 embed — 색 띠로 이익/손실이 한눈에 들어온다.
+
+    매수·단계 익절처럼 자주 오는 알림은 한 줄 텍스트로 두고, 하루에 몇 번뿐인
+    '종료' 만 embed 로 보내 대비를 만든다.
+    """
+    net = realized - fees
+    result = reason.split("→")[-1].strip()
+    if net > 0:
+        icon, color = "💰", _COLOR_PROFIT
+    elif net < 0:
+        icon, color = "🛑", _COLOR_LOSS
+    else:
+        icon, color = "⚪", _COLOR_FLAT
+    lines = [f"{result} — **{qty}주** @ {price:,.0f}"] if qty > 0 else [result]
+    lines.append(
+        f"실현손익 **{net:+,.0f}원** (세전 {realized:+,.0f} · 비용 {fees:,.0f})"
+    )
+    return {
+        "title": f"{icon} {name}({symbol}) 종료",
+        "description": "\n".join(lines),
+        "color": color,
+    }
+
+
+def build_alert_embed(kind: str, label: str, text: str) -> dict:
+    """에러·경고·보류 단건 — 색 띠가 있어야 흐름 속에서 눈에 띈다."""
+    icon, color = {
+        "에러": ("⛔", _COLOR_LOSS),
+        "경고": ("⚠️", _COLOR_WARN),
+        "보류": ("⏸️", _COLOR_WARN),
+    }.get(kind, ("ℹ️", _COLOR_INFO))
+    return {
+        "title": f"{icon} {kind} · {label}"[:256],
+        "description": shorten_error(text)[:4000],
+        "color": color,
+    }
+
+
 def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
     """짧은 알림 여러 건을 한 장의 embed 로 묶는다.
 
@@ -120,7 +190,7 @@ def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
         counts[kind] = counts.get(kind, 0) + 1
     title = "📋 " + " · ".join(f"{k} {n}건" for k, n in counts.items())
 
-    lines = [f"`{label}` {text}" for _, label, text in main[:40]]
+    lines = [f"`{label}` {shorten_error(text)}" for _, label, text in main[:40]]
     if len(main) > 40:
         lines.append(f"…외 {len(main) - 40}건")
     embed = {
@@ -132,9 +202,9 @@ def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
         embed["fields"] = [
             {
                 "name": f"⚠️ 확인 필요 {len(warn)}건",
-                "value": "\n".join(f"`{label}` {text}" for _, label, text in warn[:10])[
-                    :1024
-                ],
+                "value": "\n".join(
+                    f"`{label}` {shorten_error(text)}" for _, label, text in warn[:10]
+                )[:1024],
                 "inline": False,
             }
         ]

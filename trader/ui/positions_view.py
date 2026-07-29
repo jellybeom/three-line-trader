@@ -84,6 +84,7 @@ class PositionsView(ttk.Frame):
         self._on_manual_sell = on_manual_sell
         self._avg: dict[str, float] = {}  # 수익률 계산용 평단 캐시
         self._closed: set[str] = set()  # 종료 종목: 수익률을 종료 시점 값으로 고정
+        self._blocked: dict[str, str] = {}  # 진입 보류 중인 종목 → 사유
         self._sort_reverse: dict[str, bool] = {}
 
         self.tree = ttk.Treeview(self, columns=_COLUMNS, show="headings")
@@ -148,6 +149,8 @@ class PositionsView(ttk.Frame):
         qty = f"{pos.remaining}/{pos.total_bought}" if pos.total_bought else "-"
         avg = f"{pos.avg_price:,.0f}" if pos.avg_price else "-"
         state_text = pos.state.value + (" (체결대기)" if pos.pending else "")
+        if symbol in self._blocked and not pos.pending:
+            state_text += " (보류)"
         if pos.state is State.CLOSED:
             self._closed.add(symbol)
             tag = "closed"

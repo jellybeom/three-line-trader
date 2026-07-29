@@ -28,8 +28,10 @@ from trader.kiwoom import load_auth
 from trader.notifier import (
     DiscordNotifier,
     NotifierError,
+    build_alert_embed,
     build_batch_embed,
     build_daily_summary_embed,
+    build_trade_embed,
     format_daily_summary,
     format_message,
     format_trade,
@@ -57,12 +59,15 @@ _PENDING_RECOVER_SEC = 90  # 이 시간까지 미완결이면 계좌 잔고를 �
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
-_BLOCK_LOG_COOLDOWN_SEC = 60  # 같은 종목의 보류 사유 반복 로그 억제
+# 조회한 주문가능금액의 이 비율까지만 쓴다. 직전 체결이 증권사 여력에 반영되기까지
+# 시차가 있어, 꽉 채워 주문하면 "매수증거금이 부족합니다" 로 거부된다(2026-07-29 실측).
+_DEPOSIT_SAFETY = 0.98
+_BLOCK_LOG_COOLDOWN_SEC = 600  # 같은 사유·구간이 이어질 때의 재기록 주기 (최후 방어)
 _MIN_ENTRY_QTY = 3  # 1차 매수 수량이 이 미만이면 분할 익절이 어려워 경고
 _BATCH_QUIET_SEC = 2.0  # 이 시간 동안 새 알림이 없으면 모아둔 것을 한 장으로 보낸다
 _BATCH_MAX = 50  # 버퍼가 이만큼 차면 기다리지 않고 즉시 발송
 # 묶음 대상: 한 번에 여러 건이 쏟아지는 정보성 알림. 체결 알림은 즉시성이 중요해 제외한다.
-_BATCH_KINDS = ("등록", "편집", "삭제", "보류", "경고", "설정", "리셋", "이월")
+_BATCH_KINDS = ("등록", "편집", "삭제", "보류", "경고", "에러", "설정", "리셋", "이월")
 _LOOP_SEC = 0.1
 
 
@@ -204,7 +209,9 @@ class Core:
         self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
         self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
-        self._block_logged: dict[str, float] = {}  # 종목별 마지막 보류 로그 시각
+        self._block_logged: dict[str, tuple[str, float]] = (
+            {}
+        )  # 종목 → (마지막 사유·구간, 시각)
         self._block_notified: set[str] = set()  # 보류 알림은 종목당 1회
         self._order_fail: dict[str, dict] = {}  # 종목별 주문 실패 누적 {count, until}
         self._order_blocked: set[str] = set()  # 연속 실패로 당일 주문 차단된 종목
@@ -575,12 +582,27 @@ class Core:
             return
         e = self._entries[symbol]
         pos = e["pos"]
-        pnl = (
-            pos.realized_pnl if pos.state is State.CLOSED and pos.total_bought else None
-        )
+        if (
+            pos.state is State.CLOSED and pos.total_bought
+        ):  # 하루 몇 번뿐인 결산 → embed
+            embed = build_trade_embed(
+                e["name"], symbol, reason, qty, price, pos.realized_pnl, pos.fees
+            )
+            asyncio.create_task(self._send_embed(embed))
+            return
         asyncio.create_task(
-            self._send_discord(format_trade(e["name"], symbol, reason, qty, price, pnl))
+            self._send_discord(
+                format_trade(e["name"], symbol, reason, qty, price, None)
+            )
         )
+
+    async def _send_embed(self, embed: dict) -> None:
+        try:
+            await asyncio.to_thread(self._notifier.send_embed, embed)
+        except NotifierError as e:  # 발송 실패가 매매를 막지 않도록 로그만 남긴다
+            self._bus.events.put(
+                bus.LogLine(_now(), "시스템", "경고", f"알림 발송 실패: {e}")
+            )
 
     async def _send_discord(self, text: str) -> None:
         try:
@@ -628,7 +650,7 @@ class Core:
         self._bus.events.put(bus.Tick(tick.symbol, tick.price))
         if not self._running:
             return  # 감시 중지 상태: 시세 표시만
-        d = decide(e["pos"], e["params"], tick.price)
+        d = decide(e["pos"], e["params"], tick.price, self._commission_rate)
         if d is None:
             return
         await self._execute(tick.symbol, d, tick.price)
@@ -668,6 +690,7 @@ class Core:
                     symbol,
                     f"최대 종목 수({self._max_symbols}) 도달 — "
                     "자리가 나면 재시도합니다",
+                    price,
                 )
                 return
 
@@ -683,6 +706,7 @@ class Core:
             self._on_order_failed(symbol, err)
             return
         self._order_fail.pop(symbol, None)  # 성공하면 실패 누적 초기화
+        self._clear_block(symbol)  # 진입에 성공했으니 보류 표시 해제
         order_id = self._store.record_order(symbol, d.side.value, d.qty)
         e["pos"] = mark_pending(pos)
         self._store.save_position(self._date, symbol, e["pos"])
@@ -751,20 +775,38 @@ class Core:
             )
 
     def _clear_block(self, symbol: str) -> None:
-        self._block_logged.pop(symbol, None)
+        if self._block_logged.pop(symbol, None) is not None:
+            self._bus.events.put(bus.Blocked(symbol, False))
         self._block_notified.discard(symbol)
 
-    def _log_block(self, symbol: str, text: str) -> None:
-        """진입 보류 사유 — 종목당 알림 1회, 이후 로그는 쿨다운을 두고 조용히 남긴다."""
+    def _price_zone(self, symbol: str, price: float) -> str:
+        """현재가가 어느 구간인지 — 보류 로그를 구간이 바뀔 때만 남기기 위한 기준."""
+        p = self._entries[symbol]["params"]
+        if price > p.line1:
+            return "1선 위"
+        if price > p.line2:
+            return "1선~2선"
+        if price > p.line3:
+            return "2선~3선"
+        return "3선 아래"
+
+    def _log_block(self, symbol: str, text: str, price: float) -> None:
+        """진입 보류 — 종목 행에 '보류' 를 띄우고, 로그는 사유·구간이 바뀔 때만 남긴다.
+
+        틱마다 조건이 성립하므로 그대로 두면 로그가 수백 건이 된다(2026-07-29 실측:
+        4종목 107건). 상태 표시는 화면이 계속 보여주고, 로그는 변화만 기록한다.
+        """
+        self._bus.events.put(bus.Blocked(symbol, True, text))
+        key = f"{text.split('—')[0].strip()}|{self._price_zone(symbol, price)}"
+        last_key, last_at = self._block_logged.get(symbol, ("", 0.0))
         now = time.monotonic()
-        if now - self._block_logged.get(symbol, 0.0) < _BLOCK_LOG_COOLDOWN_SEC:
+        if key == last_key and now - last_at < _BLOCK_LOG_COOLDOWN_SEC:
             return
-        self._block_logged[symbol] = now
+        self._block_logged[symbol] = (key, now)
         first = symbol not in self._block_notified
         self._block_notified.add(symbol)
-        self._log(symbol, "보류", text, notify=False)
-        if first:
-            self._notify(symbol, f"진입 보류 — {text}")
+        # 알림은 종목당 1회만 (이후 로그는 화면에만) — 묶음 경로라 종목명이 함께 나온다
+        self._log(symbol, "보류", text, notify=first)
 
     async def _can_buy(self, symbol: str, d: Decision, price: float) -> bool:
         """예수금 방어. False 면 이번 틱만 주문을 거른다(종목은 대기 상태로 남는다).
@@ -775,8 +817,10 @@ class Core:
         (1선~2선이면 1차, 2선~3선이면 1·2차 동시, 3선 아래면 그때 종료).
         """
         deposit = await self._get_deposit()
-        need = d.qty * price
-        if deposit >= need:
+        need = (
+            d.qty * price * (1.0 + self._commission_rate)
+        )  # 수수료까지 있어야 주문이 통과된다
+        if deposit * _DEPOSIT_SAFETY >= need:
             return True
 
         e = self._entries[symbol]
@@ -785,12 +829,14 @@ class Core:
                 symbol,
                 f"예수금 부족({deposit:,.0f} < {need:,.0f}) — "
                 "자금이 생기면 재시도합니다",
+                price,
             )
         else:  # 2차 매수 보류 — 1차 물량은 그대로 두고 손절·익절은 계속 동작
             self._log_block(
                 symbol,
                 f"예수금 부족({deposit:,.0f} < {need:,.0f}) — "
                 "2차 매수 보류 (1차 물량 유지)",
+                price,
             )
         return False
 
@@ -1435,15 +1481,12 @@ class Core:
             return
         if len(items) == 1:
             kind, label, text = items[0]
-            await self._send_discord(format_message(label, kind, text))
+            if kind in ("에러", "경고", "보류"):  # 흐름 속에서 눈에 띄어야 하는 것
+                await self._send_embed(build_alert_embed(kind, label, text))
+            else:
+                await self._send_discord(format_message(label, kind, text))
             return
-        embed = build_batch_embed(items)
-        try:
-            await asyncio.to_thread(self._notifier.send_embed, embed)
-        except NotifierError as e:
-            self._bus.events.put(
-                bus.LogLine(_now(), "시스템", "경고", f"묶음 알림 발송 실패: {e}")
-            )
+        await self._send_embed(build_batch_embed(items))
 
     def _notify(self, symbol: str, text: str) -> None:
         """중요 이벤트 — '알림' 종류로 기록되며 알림 수준 필터를 거쳐 Discord 로 발송된다."""
