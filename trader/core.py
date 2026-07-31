@@ -235,7 +235,10 @@ class Core:
         self._commission_rate = 0.0
         self._tax_rate = 0.0
         self._schedule = {"enabled": False}
-        self._sched_done: dict[str, str] = {}  # 항목별 마지막 실행 날짜
+        # 항목별 마지막 실행 날짜. 메모리에만 두면 재시작 때 '오늘 아직 안 했다' 고 판단해
+        # 이미 보낸 요약을 다시 보낸다(2026-07-31 실측: 15:35 발송 후 15:41 재시작 시 재발송).
+        # 실제 판단은 DB(settings)를 기준으로 하고, 이 dict 는 조회를 줄이는 캐시다.
+        self._sched_done: dict[str, str] = {}
         self._chart_busy: set[str] = set()  # 종목별 차트 생성 중복 방지
 
     # ── 메인 루프 ───────────────────────────────────────────────
@@ -282,6 +285,7 @@ class Core:
         self._max_symbols = int(self._store.get_setting("funds_max", "10"))
         self._block_logged.clear()
         self._block_notified.clear()
+        self._sched_done.clear()
         self._deposit_cache = None
         self._order_fail.clear()
         self._order_blocked.clear()
@@ -1241,6 +1245,16 @@ class Core:
 
     # ── 자동 스케줄 ─────────────────────────────────────────────
 
+    def _sched_last(self, key: str) -> str:
+        """해당 스케줄 항목을 마지막으로 실행한 날짜 (DB 영속)."""
+        if key not in self._sched_done:
+            self._sched_done[key] = self._store.get_setting(f"sched_{key}", "")
+        return self._sched_done[key]
+
+    def _sched_mark(self, key: str, today: str) -> None:
+        self._sched_done[key] = today
+        self._store.set_setting(f"sched_{key}", today)
+
     async def _check_schedule(self) -> None:
         if not self._schedule.get("enabled"):
             return
@@ -1250,32 +1264,32 @@ class Core:
         today, t = now.date().isoformat(), now.time()
 
         if (
-            self._sched_done.get("start") != today
+            self._sched_last("start") != today
             and self._schedule["start"] <= t < self._schedule["stop"]
         ):
-            self._sched_done["start"] = today
+            self._sched_mark("start", today)
             await self._auto_start(today)
 
         if (
-            self._sched_done.get("stop") != today
+            self._sched_last("stop") != today
             and t >= self._schedule["stop"]
             and self._running
         ):
-            self._sched_done["stop"] = today
+            self._sched_mark("stop", today)
             self._running = False
             self._bus.events.put(bus.WatchStatus(False))
             self._log("시스템", "감시", "자동 스케줄 — 감시 중지")
 
-        if self._sched_done.get("summary") != today and t >= self._schedule["summary"]:
-            self._sched_done["summary"] = today
+        if self._sched_last("summary") != today and t >= self._schedule["summary"]:
+            self._sched_mark("summary", today)
             await self.send_daily_summary()
 
         if (
-            self._sched_done.get("summary2") != today
+            self._sched_last("summary2") != today
             and t >= self._schedule["summary2"]
             and self._date == today
         ):
-            self._sched_done["summary2"] = today
+            self._sched_mark("summary2", today)
             await self._review_after_hours()
 
     async def _auto_start(self, today: str) -> None:

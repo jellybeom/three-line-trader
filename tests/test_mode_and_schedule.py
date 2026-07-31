@@ -173,3 +173,47 @@ def test_요약에_최고_최저_비율이_들어간다(report):
     symbols, fills = report
     text = format_daily_summary("2026-07-24", symbols, fills)
     assert "최고 +4.2%" in text and "최저 -2.7%" in text
+
+
+# ── 스케줄 실행 이력 영속 (2026-07-31 실측) ───────────────────
+
+
+def test_요약은_재시작해도_다시_보내지_않는다(tmp_path):
+    """15:35 에 보낸 뒤 프로그램을 다시 켜면 또 보내던 문제."""
+    import datetime as dt
+
+    from trader.store import Store
+
+    sent = []
+
+    def make_core():
+        c = Core(bus.Bus(), db_dir=str(tmp_path))
+        c._date = dt.date.today().isoformat()
+        c._store = Store(str(tmp_path / "t.db"))
+        c._schedule = {
+            "enabled": True,
+            "start": dt.time(0, 1),
+            "stop": dt.time(23, 58),
+            "summary": dt.time(0, 2),
+            "summary2": dt.time(23, 59),
+        }
+        c.send_daily_summary = lambda: _record(sent)
+        return c
+
+    async def _record(box):
+        box.append(1)
+
+    async def scenario():
+        c1 = make_core()
+        c1._running = True  # 자동 시작 경로를 타지 않게
+        await c1._check_schedule()
+        c1._store.close()
+        assert len(sent) == 1
+
+        c2 = make_core()  # 재시작
+        c2._running = True
+        await c2._check_schedule()
+        c2._store.close()
+
+    asyncio.run(scenario())
+    assert len(sent) == 1, "재시작 후 요약이 다시 발송됨"
