@@ -381,20 +381,44 @@ class Broker:
             _PATH_ACCOUNT, _TR_DEPOSIT, {"qry_tp": qry_tp}, retries=self._QUERY_RETRIES
         )
 
+    _SELLABLE_KEYS = ("trde_able_qty", "sell_able_qty", "ord_able_qty", "rmnd_qty")
+
     def holdings(self) -> dict[str, int]:
         """계좌 실제 보유 수량 {종목코드: 잔량} — 시작 시 reconcile 용."""
+        return {sym: qty for sym, (qty, _) in self.holdings_detail().items()}
+
+    def holdings_detail(self) -> dict[str, tuple[int, int]]:
+        """{종목코드: (보유수량, 매도가능수량)}.
+
+        보유수량과 매도가능수량은 다르다 — 매도 주문이 접수·체결된 직후에는 보유수량이
+        아직 10주로 보이는데 매도가능수량은 0 이다. 이 둘을 구분하지 않으면, 체결통보가
+        유실됐을 때 '아직 10주 있다' 고 오판해 같은 물량을 또 팔려 한다
+        (2026-07-30 실측: "매도가능수량이 부족합니다. 0주 매도가능" 3회 반복).
+        """
         data = self._request(
             _PATH_ACCOUNT,
             _TR_HOLDINGS,
             {"qry_tp": "1", "dmst_stex_tp": _EXCHANGE},
             retries=self._QUERY_RETRIES,
         )
-        result: dict[str, int] = {}
+        result: dict[str, tuple[int, int]] = {}
         for row in data.get("acnt_evlt_remn_indv_tot", []):
             symbol = row.get("stk_cd", "").lstrip("A")
             qty = int(row.get("rmnd_qty") or 0)
-            if symbol and qty > 0:
-                result[symbol] = qty
+            if not symbol or qty <= 0:
+                continue
+            sellable = qty
+            for (
+                key
+            ) in self._SELLABLE_KEYS:  # 계좌 유형마다 필드명이 달라 후보를 순서대로
+                raw = row.get(key)
+                if raw not in (None, ""):
+                    try:
+                        sellable = int(float(raw))
+                    except (ValueError, TypeError):
+                        continue
+                    break
+            result[symbol] = (qty, min(sellable, qty))
         return result
 
     # ── 종목 정보 ───────────────────────────────────────────────

@@ -160,15 +160,40 @@ def build_trade_embed(
     }
 
 
+_COLOR_LINK = 0x00838F  # 청록 — 연결·감시 상태
+
+# 종류별 아이콘·색. 줄글로 흘려보내면 무엇이 중요한지 구분되지 않으므로,
+# 성격이 다른 알림에 서로 다른 색 띠와 아이콘을 준다.
+_KIND_STYLE = {
+    "에러": ("⛔", _COLOR_LOSS),
+    "경고": ("⚠️", _COLOR_WARN),
+    "보류": ("⏸️", _COLOR_WARN),
+    "등록": ("➕", _COLOR_INFO),
+    "편집": ("✏️", _COLOR_INFO),
+    "삭제": ("🗑️", _COLOR_INFO),
+    "이월": ("📦", _COLOR_INFO),
+    "리셋": ("♻️", _COLOR_INFO),
+    "설정": ("⚙️", _COLOR_INFO),
+    "연결": ("🔗", _COLOR_LINK),
+    "감시": ("👁️", _COLOR_LINK),
+    "시작": ("🚀", _COLOR_LINK),
+    "요약": ("📊", _COLOR_INFO),
+    "차트": ("📈", _COLOR_INFO),
+}
+
+
+def kind_icon(kind: str) -> str:
+    return _KIND_STYLE.get(kind, ("ℹ️", _COLOR_INFO))[0]
+
+
 def build_alert_embed(kind: str, label: str, text: str) -> dict:
-    """에러·경고·보류 단건 — 색 띠가 있어야 흐름 속에서 눈에 띈다."""
-    icon, color = {
-        "에러": ("⛔", _COLOR_LOSS),
-        "경고": ("⚠️", _COLOR_WARN),
-        "보류": ("⏸️", _COLOR_WARN),
-    }.get(kind, ("ℹ️", _COLOR_INFO))
+    """단건 알림 embed — 종류별 색 띠가 있어야 흐름 속에서 눈에 띈다."""
+    icon, color = _KIND_STYLE.get(kind, ("ℹ️", _COLOR_INFO))
+    title = f"{icon} {kind}"
+    if label and label != "시스템":
+        title += f" · {label}"
     return {
-        "title": f"{icon} {kind} · {label}"[:256],
+        "title": title[:256],
         "description": shorten_error(text)[:4000],
         "color": color,
     }
@@ -188,7 +213,9 @@ def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
     counts: dict[str, int] = {}
     for kind in kinds:
         counts[kind] = counts.get(kind, 0) + 1
-    title = "📋 " + " · ".join(f"{k} {n}건" for k, n in counts.items())
+    title = " · ".join(
+        f"{_KIND_STYLE.get(k, ('ℹ️',))[0]} {k} {n}건" for k, n in counts.items()
+    )
 
     lines = [f"`{label}` {shorten_error(text)}" for _, label, text in main[:40]]
     if len(main) > 40:

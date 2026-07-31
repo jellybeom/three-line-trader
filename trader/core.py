@@ -54,8 +54,10 @@ from trader.store import Store
 from trader.ui import bus
 from trader.watcher import Tick, Watcher
 
-_PENDING_WARN_SEC = 60  # 체결통보 미도착 경고 기준
-_PENDING_RECOVER_SEC = 90  # 이 시간까지 미완결이면 계좌 잔고를 근거로 대기 해제
+_PENDING_WARN_SEC = 90  # 체결통보 미도착 경고 기준 (아직 정상 범위일 수 있음)
+# 개장 직후에는 시장가 주문도 수 분 뒤에 체결될 수 있다(2026-07-30 실측: 09:00:04 접수 →
+# 09:02:16 체결). 이 시간을 짧게 잡으면 살아 있는 주문을 죽은 것으로 오판해 중복 주문이 된다.
+_PENDING_RECOVER_SEC = 420  # 7분
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
@@ -67,7 +69,21 @@ _MIN_ENTRY_QTY = 3  # 1차 매수 수량이 이 미만이면 분할 익절이 �
 _BATCH_QUIET_SEC = 2.0  # 이 시간 동안 새 알림이 없으면 모아둔 것을 한 장으로 보낸다
 _BATCH_MAX = 50  # 버퍼가 이만큼 차면 기다리지 않고 즉시 발송
 # 묶음 대상: 한 번에 여러 건이 쏟아지는 정보성 알림. 체결 알림은 즉시성이 중요해 제외한다.
-_BATCH_KINDS = ("등록", "편집", "삭제", "보류", "경고", "에러", "설정", "리셋", "이월")
+_BATCH_KINDS = (
+    "등록",
+    "편집",
+    "삭제",
+    "보류",
+    "경고",
+    "에러",
+    "설정",
+    "리셋",
+    "이월",
+    "연결",
+    "감시",
+    "시작",
+    "요약",
+)
 _LOOP_SEC = 0.1
 
 
@@ -206,6 +222,7 @@ class Core:
         self._entries: dict[str, dict] = {}  # symbol -> {name, params, pos, price}
         # order_no -> {symbol, from_state, decision, order_id, ts, warned}
         self._pending: dict[str, dict] = {}
+        self._recovered: dict[str, dict] = {}  # 강제 복구한 주문 — 늦은 체결통보 대비
         self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
         self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
@@ -561,7 +578,13 @@ class Core:
         try:
             notifier = DiscordNotifier(load_webhook(self._config_path))
             await asyncio.to_thread(
-                notifier.send, "🔔 three-line-trader 연결되었습니다"
+                notifier.send_embed,
+                {
+                    "title": "🔗 three-line-trader 연결되었습니다",
+                    "description": f"매매일 {self._date} · "
+                    f"{'실전' if self._mode_real else '모의'}투자",
+                    "color": 0x00838F,
+                },
             )
         except Exception as e:  # noqa: BLE001
             self._bus.events.put(bus.DiscordStatus(False, "연결 실패"))
@@ -851,6 +874,17 @@ class Core:
             return
         info = self._pending.get(fill.order_no)
         if info is None:
+            late = self._recovered.pop(fill.order_no, None)
+            if late is not None and fill.filled_qty and fill.unfilled_qty == 0:
+                # 대기 해제 후에야 도착한 체결통보 — 상태는 이미 계좌 기준으로 맞췄으므로
+                # 자동 반영하지 않고, 실현손익 보정이 필요함을 알린다.
+                self._log(
+                    late["symbol"],
+                    "경고",
+                    f"주문 {fill.order_no} 체결통보가 뒤늦게 도착 "
+                    f"({fill.filled_qty}주 @ {fill.fill_price:,.0f}) — 대기 해제 후라 "
+                    "자동 반영하지 않았습니다. 실현손익을 편집으로 보정하세요",
+                )
             return  # 이 프로그램이 낸 주문이 아님 (수동 주문 등)
         if fill.filled_qty == 0 or fill.unfilled_qty > 0:
             return  # 접수/부분 체결 통보 — 완전 체결까지 대기
@@ -919,6 +953,16 @@ class Core:
         fail = self._order_fail.setdefault(symbol, {"count": 0, "until": 0.0})
         fail["count"] += 1
         fail["until"] = time.monotonic() + _ORDER_FAIL_COOLDOWN_SEC
+        # 재시도해도 절대 성공하지 않는 오류 — 상태가 계좌와 어긋난 것이므로 사람이 봐야 한다
+        if "매도가능수량" in str(err):
+            self._order_blocked.add(symbol)
+            self._log(
+                symbol,
+                "에러",
+                f"주문 실패: {err} — 프로그램이 아는 잔량과 계좌가 다릅니다. "
+                "당일 이 종목 주문을 중단합니다 (편집으로 잔량을 맞춰주세요)",
+            )
+            return
         self._log(
             symbol,
             "에러",
@@ -943,7 +987,9 @@ class Core:
                 self._log(
                     info["symbol"],
                     "경고",
-                    f"주문 {order_no} 체결통보 {_PENDING_WARN_SEC}초 미도착 — 확인 중",
+                    f"주문 {order_no} 체결통보 {_PENDING_WARN_SEC}초 미도착 — "
+                    f"{_PENDING_RECOVER_SEC - _PENDING_WARN_SEC:.0f}초 더 기다린 뒤 "
+                    "계좌 기준으로 정리합니다 (개장 직후엔 지연될 수 있음)",
                 )
             if age > _PENDING_RECOVER_SEC and not info.get("recovering"):
                 info["recovering"] = True
@@ -963,15 +1009,19 @@ class Core:
             self._pending.pop(order_no, None)
             return
         try:
-            holdings = await asyncio.to_thread(self._broker.holdings)
+            detail = await asyncio.to_thread(self._broker.holdings_detail)
         except BrokerError as err:
             info["recovering"] = False  # 다음 주기에 다시 시도
             self._log(symbol, "경고", f"체결 대기 복구용 잔고 조회 실패: {err}")
             return
 
         self._pending.pop(order_no, None)
-        actual = holdings.get(symbol, 0)
+        self._recovered[order_no] = info  # 늦게 체결통보가 오면 알려주기 위해 보관
         pos, d = e["pos"], info["decision"]
+        held, sellable = detail.get(symbol, (0, 0))
+        # 매도 주문이었다면 '매도가능수량' 이 실질 잔량이다. 보유수량은 매도 접수·체결 직후에도
+        # 그대로 보여, 그 값을 믿으면 같은 물량을 다시 팔려 해 주문이 계속 거부된다.
+        actual = sellable if d.side is Side.SELL else held
         try:
             if actual == 0:
                 new_pos = replace(pos, state=State.CLOSED, remaining=0, pending=False)
@@ -1000,12 +1050,15 @@ class Core:
         self._store.save_position(self._date, symbol, new_pos)
         self._store.update_order(info["order_id"], "미확인")
         self._emit_position(symbol)
+        basis = "매도가능수량" if d.side is Side.SELL else "보유수량"
         self._log(
             symbol,
             "경고",
             f"주문 {order_no} 체결통보 미도착 {_PENDING_RECOVER_SEC}초 경과 → "
-            f"계좌 잔고({actual}주) 기준으로 대기 해제. 평단·실현손익이 실제와 다를 수 있으니 "
-            "계좌 체결 내역과 대조 후 편집으로 보정하세요",
+            f"계좌 {basis}({actual}주) 기준으로 대기 해제"
+            + (f" · 보유 {held}주" if d.side is Side.SELL and held != actual else "")
+            + ". 평단·실현손익이 실제와 다를 수 있으니 계좌 체결 내역과 대조 후 "
+            "편집으로 보정하세요",
         )
 
     # ── WebSocket 상태 ──────────────────────────────────────────
@@ -1479,12 +1532,9 @@ class Core:
         items, self._notice_batch = self._notice_batch, []
         if not items or self._notifier is None:
             return
-        if len(items) == 1:
+        if len(items) == 1:  # 단건도 색 띠가 붙는 embed 로 — 줄글은 흐름에 묻힌다
             kind, label, text = items[0]
-            if kind in ("에러", "경고", "보류"):  # 흐름 속에서 눈에 띄어야 하는 것
-                await self._send_embed(build_alert_embed(kind, label, text))
-            else:
-                await self._send_discord(format_message(label, kind, text))
+            await self._send_embed(build_alert_embed(kind, label, text))
             return
         await self._send_embed(build_batch_embed(items))
 

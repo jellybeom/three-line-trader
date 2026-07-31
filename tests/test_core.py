@@ -41,6 +41,13 @@ class StubBroker:
     def holdings(self):
         return getattr(self, "holdings_result", {})
 
+    def holdings_detail(self):
+        """{종목: (보유수량, 매도가능수량)} — 기본은 둘이 같다고 본다."""
+        detail = getattr(self, "holdings_detail_result", None)
+        if detail is not None:
+            return detail
+        return {s: (q, q) for s, q in self.holdings().items()}
+
 
 @pytest.fixture
 def core(tmp_path):
@@ -497,3 +504,81 @@ def test_예수금이_빠듯하면_주문하지_않고_보류한다(core):
     core._invalidate_deposit()
     asyncio.run(tick(core, 9_990))
     assert core._broker.orders != []
+
+
+# ── 매도 체결통보 유실 복구 (2026-07-30 실측) ──────────────────
+
+
+def test_매도_복구는_매도가능수량을_기준으로_한다(core, monkeypatch):
+    """보유수량은 매도 직후에도 남아 보인다 — 그걸 믿으면 같은 물량을 또 팔려 한다."""
+    import trader.core as core_mod
+
+    register(
+        core,
+        Position(state=State.BUY1_TP1, avg_price=10_000, total_bought=10, remaining=10),
+    )
+    asyncio.run(tick(core, 9_900))  # 본절(평단) 이탈 → 잔량 전량 청산
+    assert core._entries["005930"]["pos"].pending is True
+
+    # 계좌: 보유 10주로 보이지만 매도가능은 0주 (이미 팔렸거나 주문이 걸려 있음)
+    core._broker.holdings_detail_result = {"005930": (10, 0)}
+    monkeypatch.setattr(core_mod, "_PENDING_RECOVER_SEC", 0)
+    asyncio.run(core._check_pending())
+
+    pos = core._entries["005930"]["pos"]
+    assert pos.state is State.CLOSED and pos.remaining == 0
+
+    before = len(core._broker.orders)
+    asyncio.run(tick(core, 9_000))  # 더 떨어져도 재매도 시도가 없어야 한다
+    assert len(core._broker.orders) == before
+
+
+def test_매도가능수량_부족_오류는_즉시_주문을_중단한다(core):
+    """재시도해도 성공하지 않는 오류 — 30초 쿨다운으로 3번 반복할 이유가 없다."""
+    from trader.broker import BrokerError
+
+    class Rejecting(StubBroker):
+        def sell(self, symbol, qty):
+            raise BrokerError(
+                "kt10001 실패: (800033:매도가능수량이 부족합니다. 0주 매도가능)"
+            )
+
+    core._broker = Rejecting()
+    register(
+        core,
+        Position(state=State.BUY1_TP1, avg_price=10_000, total_bought=10, remaining=10),
+    )
+    asyncio.run(tick(core, 9_900))
+    assert "005930" in core._order_blocked  # 1회로 즉시 차단
+
+
+def test_삭제_로그는_한_줄만_남는다(core):
+    """감사 행과 화면 로그가 각각 남아 복원 시 두 줄로 보이던 문제."""
+    register(core)
+    core._running = False
+    asyncio.run(core._handle_command(bus.Delete("005930")))
+    rows = core._store.recent_events(core._date)
+    assert len([r for r in rows if r[2] == "삭제"]) == 1
+
+
+def test_늦게_도착한_체결통보는_보정을_요청한다(core, monkeypatch):
+    """살아 있는 주문을 죽은 것으로 오판해 정리한 뒤 체결통보가 오는 경우."""
+    import trader.core as core_mod
+    from trader.ui import bus as b
+
+    register(
+        core,
+        Position(state=State.BUY1_TP1, avg_price=10_000, total_bought=10, remaining=10),
+    )
+    asyncio.run(tick(core, 9_900))  # 본절 이탈 → 전량 청산 주문
+    order_no = f"ORD{core._broker._seq}"
+
+    core._broker.holdings_detail_result = {"005930": (10, 0)}
+    monkeypatch.setattr(core_mod, "_PENDING_RECOVER_SEC", 0)
+    asyncio.run(core._check_pending())  # 강제 정리
+    assert order_no in core._recovered
+
+    asyncio.run(fill(core, order_no, 10, 9_880))  # 뒤늦게 체결통보 도착
+    texts = [e.text for e in _drain(core._bus) if isinstance(e, b.LogLine)]
+    assert any("뒤늦게 도착" in t and "보정" in t for t in texts)
+    assert order_no not in core._recovered

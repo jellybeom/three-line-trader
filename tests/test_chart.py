@@ -526,6 +526,9 @@ def test_종료_체결시_Discord_로_차트가_자동_전송된다(tmp_path):
         def holdings(self):
             return {}
 
+        def holdings_detail(self):
+            return {}
+
     b = bus.Bus()
     core = Core(b, db_dir=str(tmp_path))
     core._date = "2026-07-24"

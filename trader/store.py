@@ -191,7 +191,11 @@ class Store:
                 "DELETE FROM symbols WHERE trade_date=? AND symbol=?",
                 (trade_date, symbol),
             )
-            self._insert_event(trade_date, symbol, kind="삭제", reason="관심종목 제외")
+            # to_state 를 채워 '감사 행' 으로 표시한다 — recent_events 가 제외하므로
+            # 화면 로그 줄과 중복되지 않는다 (실측: 삭제 1회에 로그 2줄)
+            self._insert_event(
+                trade_date, symbol, kind="삭제", reason="관심종목 제외", to_state="삭제"
+            )
 
     # ── 복원 ────────────────────────────────────────────────────
 

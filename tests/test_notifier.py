@@ -312,3 +312,23 @@ def test_종료_결산은_세후_손익_부호로_색이_정해진다():
         "삼성전자", "005930", "+7% → 전량 청산", 10, 80_000, 50_000, 900
     )
     assert win["color"] == 0x2E7D32 and "💰" in win["title"]
+
+
+def test_종류마다_아이콘과_색이_지정된다():
+    from trader.notifier import build_alert_embed
+
+    cases = {"삭제": "🗑️", "연결": "🔗", "감시": "👁️", "설정": "⚙️", "이월": "📦"}
+    for kind, icon in cases.items():
+        embed = build_alert_embed(kind, "005930", "내용")
+        assert icon in embed["title"] and kind in embed["title"]
+    assert build_alert_embed("연결", "시스템", "x")["color"] == 0x00838F
+    assert "시스템" not in build_alert_embed("연결", "시스템", "x")["title"]
+
+
+def test_묶음_제목에도_아이콘이_붙는다():
+    from trader.notifier import build_batch_embed
+
+    embed = build_batch_embed(
+        [("등록", "A", "x"), ("등록", "B", "x"), ("삭제", "C", "x")]
+    )
+    assert "➕ 등록 2건" in embed["title"] and "🗑️ 삭제 1건" in embed["title"]
