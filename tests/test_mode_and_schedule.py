@@ -178,24 +178,34 @@ def test_요약에_최고_최저_비율이_들어간다(report):
 # ── 스케줄 실행 이력 영속 (2026-07-31 실측) ───────────────────
 
 
-def test_요약은_재시작해도_다시_보내지_않는다(tmp_path):
+def test_요약은_재시작해도_다시_보내지_않는다(tmp_path, monkeypatch):
     """15:35 에 보낸 뒤 프로그램을 다시 켜면 또 보내던 문제."""
     import datetime as dt
 
+    import trader.core as core_mod
     from trader.store import Store
 
+    # 실제 요일·시각에 좌우되지 않도록 평일 장 마감 후로 고정한다
+    fixed = dt.datetime(2026, 7, 31, 15, 40)  # 금요일
+
+    class FixedDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(core_mod, "datetime", FixedDatetime)
     sent = []
 
     def make_core():
         c = Core(bus.Bus(), db_dir=str(tmp_path))
-        c._date = dt.date.today().isoformat()
+        c._date = fixed.date().isoformat()
         c._store = Store(str(tmp_path / "t.db"))
         c._schedule = {
             "enabled": True,
-            "start": dt.time(0, 1),
-            "stop": dt.time(23, 58),
-            "summary": dt.time(0, 2),
-            "summary2": dt.time(23, 59),
+            "start": dt.time(8, 55),
+            "stop": dt.time(15, 30),
+            "summary": dt.time(15, 35),
+            "summary2": dt.time(20, 5),
         }
         c.send_daily_summary = lambda: _record(sent)
         return c
@@ -217,3 +227,64 @@ def test_요약은_재시작해도_다시_보내지_않는다(tmp_path):
 
     asyncio.run(scenario())
     assert len(sent) == 1, "재시작 후 요약이 다시 발송됨"
+
+
+# ── 시작 시 자동 연결 (2026-08-01) ─────────────────────────────
+
+
+def test_자동_연결_설정_읽기(tmp_path):
+    from trader.core import _load_auto_connect
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[startup]\nauto_connect = true\n", encoding="utf-8")
+    assert _load_auto_connect(str(cfg)) is True
+    assert _load_auto_connect(str(tmp_path / "없음.toml")) is False
+
+    cfg.write_text("[startup]\n", encoding="utf-8")
+    assert _load_auto_connect(str(cfg)) is False  # 기본값은 끔
+
+
+def test_자동_연결은_실패해도_주기적으로_다시_시도한다(tmp_path, monkeypatch):
+    """증권사 서버 점검처럼 일시적 사유로 실패할 수 있다."""
+    import trader.core as core_mod
+    from trader.store import Store
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._date = "2026-08-03"
+    core._store = Store(str(tmp_path / "t.db"))
+    core._auto_connect = True
+    core._notifier = object()  # Discord 는 이미 연결된 상태로 둔다
+
+    attempts = []
+
+    async def fake_connect(quiet=False):
+        attempts.append(quiet)
+
+    core._connect = fake_connect
+    monkeypatch.setattr(core_mod, "_AUTO_CONNECT_RETRY_SEC", 0)
+
+    async def scenario():
+        for _ in range(3):
+            await core._tick_auto_connect()
+
+    asyncio.run(scenario())
+    assert len(attempts) == 3  # 실패해도 계속 재시도
+    assert attempts[0] is False and attempts[-1] is True  # 이후 시도는 조용히
+    core._store.close()
+
+
+def test_연결되면_자동_연결_시도를_멈춘다(tmp_path):
+    from trader.store import Store
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._date = "2026-08-03"
+    core._store = Store(str(tmp_path / "t.db"))
+    core._auto_connect = True
+    core._broker = object()
+    core._notifier = object()
+
+    called = []
+    core._connect = lambda quiet=False: called.append(1)
+    asyncio.run(core._tick_auto_connect())
+    assert called == []
+    core._store.close()

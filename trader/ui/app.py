@@ -274,11 +274,11 @@ class App(tk.Tk):
         box.pack(expand=True)
         line = ttk.Frame(box)
         line.pack(fill="x", pady=(0, 3))
-        ttk.Button(line, text="연결", width=6, command=self._connect_discord).pack(
-            side="left"
+        # 봇은 프로그램 시작과 함께 자동 연결되므로 버튼이 없다 (상태만 표시)
+        self._discord_status = ttk.Label(
+            line, text="● 연결 중...", foreground="#f9a825"
         )
-        self._discord_status = ttk.Label(line, text="● 미연결", foreground=muted)
-        self._discord_status.pack(side="left", padx=(8, 0))
+        self._discord_status.pack(side="left")
         line = ttk.Frame(box)
         line.pack(fill="x")
         ttk.Label(line, text="알림", foreground=muted).pack(side="left")
@@ -775,10 +775,6 @@ class App(tk.Tk):
     def _refresh_account(self) -> None:
         self._bus.commands.put(bus.RefreshAccount())
 
-    def _connect_discord(self) -> None:
-        self._bus.commands.put(bus.ConnectDiscord())
-        self._discord_status.configure(text="● 연결 중...", foreground="#f9a825")
-
     # ── 이벤트 큐 → 화면 갱신 ───────────────────────────────────
 
     def _poll(self) -> None:
@@ -895,7 +891,7 @@ class App(tk.Tk):
 
     def _set_settings_locked(self, locked: bool) -> None:
         """감시 중에는 매매 조건에 영향을 주는 설정 위젯을 시각적으로도 잠근다.
-        (예수금 새로고침·알림 수준·Discord 연결은 매매와 무관하므로 항상 허용)"""
+        (예수금 새로고침·알림 수준은 매매와 무관하므로 항상 허용)"""
         state = "disabled" if locked else "normal"
         widgets = (
             self._lock_widgets

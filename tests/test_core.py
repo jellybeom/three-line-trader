@@ -406,16 +406,16 @@ def test_등록_알림은_모였다가_한_번에_나간다(core):
     """CSV 로 수십 종목을 넣으면 줄 단위 발송은 수십 초가 걸린다 — 한 장으로 묶는다."""
     sent = []
 
-    class FakeNotifier:
-        def send(self, text):
+    class FakeBot:
+        async def send_text(self, text):
             sent.append(("text", text))
             return True
 
-        def send_embed(self, embed):
+        async def send_embed(self, embed):
             sent.append(("embed", embed))
             return True
 
-    core._notifier = FakeNotifier()
+    core._bot = FakeBot()
     core._notify_level = "전체"
     core._running = False
 
@@ -435,12 +435,16 @@ def test_등록_알림은_모였다가_한_번에_나간다(core):
 def test_체결_알림은_묶지_않고_즉시_나간다(core):
     sent = []
 
-    class FakeNotifier:
-        def send(self, text):
+    class FakeBot:
+        async def send_text(self, text):
             sent.append(text)
             return True
 
-    core._notifier = FakeNotifier()
+        async def send_embed(self, embed):
+            sent.append(embed.get("title", ""))
+            return True
+
+    core._bot = FakeBot()
     core._notify_level = "전체"
     register(core)
     asyncio.run(tick(core, 10_000))

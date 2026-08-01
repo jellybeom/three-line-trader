@@ -27,14 +27,6 @@ from trader.state_machine import (
     decide,
     mark_pending,
 )
-from trader.notifier import (
-    DiscordNotifier,
-    format_daily_summary,
-    format_message,
-    format_trade,
-    load_webhook,
-    should_notify,
-)
 from trader.store import Store
 from trader.ui import bus
 
@@ -54,7 +46,7 @@ class SimCore:
         self._store = store
         self._running = False
         self._date = date.today().isoformat()  # 활성 매매일
-        self._notifier: DiscordNotifier | None = None
+        # 시뮬레이터는 Discord 로 보내지 않는다 — 연습 결과가 실제 알림과 섞이면 혼란스럽다
         self._notify_level = store.get_setting("notify_level", "전체")
         self._max_symbols = int(store.get_setting("funds_max", "10"))
         # symbol -> {"name", "params", "pos", "price"}
@@ -169,37 +161,13 @@ class SimCore:
                 case bus.SendChartDiscord():
                     pass
                 case bus.RequestDailySummary():
-                    symbols, fills = self._store.daily_report(self._date)
-                    text = format_daily_summary(self._date, symbols, fills, 10_000_000)
+                    _, fills = self._store.daily_report(self._date)
                     self._log(
                         "시스템",
                         "요약",
                         f"일일 요약 — 체결 {len(fills)}건",
                         notify=False,
                     )
-                    if self._notifier:
-                        threading.Thread(
-                            target=self._send_discord, args=(text,), daemon=True
-                        ).start()
-                case bus.ConnectDiscord():
-                    try:
-                        notifier = DiscordNotifier(load_webhook())
-                        notifier.send(
-                            "🔔 three-line-trader 연결되었습니다 (시뮬레이터)"
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        self._bus.events.put(bus.DiscordStatus(False, "연결 실패"))
-                        self._log(
-                            "시스템", "에러", f"Discord 연결 실패: {e}", notify=False
-                        )
-                    else:
-                        self._notifier = notifier
-                        self._bus.events.put(bus.DiscordStatus(True, ""))
-                        self._log(
-                            "시스템",
-                            "연결",
-                            f"Discord 연결됨 (알림 수준: {self._notify_level})",
-                        )
                 case bus.SetNotifyLevel(level=lv):
                     self._notify_level = lv
                     self._store.set_setting("notify_level", lv)
@@ -400,28 +368,6 @@ class SimCore:
         if pos.state is State.CLOSED:
             text += f" (실현손익 {pos.realized_pnl:+,.0f})"
         self._log(symbol, "전이", text, notify=False)
-        # 매매 요약 알림: 체결(주문 전이) 또는 종료 전이만 — 수량 0 익절 전이는 제외
-        if d.side is not None or pos.state is State.CLOSED:
-            if self._notifier and should_notify(self._notify_level, symbol, "체결"):
-                pnl = (
-                    pos.realized_pnl
-                    if pos.state is State.CLOSED and pos.total_bought
-                    else None
-                )
-                threading.Thread(
-                    target=self._send_discord,
-                    daemon=True,
-                    args=(
-                        format_trade(
-                            e["name"],
-                            symbol,
-                            d.reason,
-                            d.qty if d.side is not None else 0,
-                            price,
-                            pnl,
-                        ),
-                    ),
-                ).start()
 
     # ── 이벤트 발행 (코어 → UI) ─────────────────────────────────
 
@@ -452,24 +398,9 @@ class SimCore:
         )
 
     def _log(self, symbol: str, kind: str, text: str, notify: bool = True) -> None:
+        """연습 모드는 화면 로그·DB 에만 남긴다 (Discord 로 보내지 않는다)."""
         self._store.log(self._date, symbol, kind, text)
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
-        if (
-            notify
-            and self._notifier
-            and should_notify(self._notify_level, symbol, kind)
-        ):
-            threading.Thread(
-                target=self._send_discord,
-                args=(format_message(symbol, kind, text),),
-                daemon=True,
-            ).start()
-
-    def _send_discord(self, text: str) -> None:
-        try:
-            self._notifier.send(text)
-        except Exception as e:  # noqa: BLE001 — 발송 실패가 재귀 알림이 되지 않게
-            self._log("시스템", "경고", f"Discord 발송 실패: {e}", notify=False)
 
 
 def main() -> None:

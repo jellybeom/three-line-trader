@@ -16,9 +16,23 @@ appkey = ""       # 실전 전환 시 실전용 키 기입
 secretkey = ""
 account = ""
 
-# ── Discord 알림 ───────────────────────────────────────────────
+# ── Discord 봇 (알림 + 명령 + 대시보드) ────────────────────────
+# 알림 발송·슬래시 명령·장중 대시보드가 모두 이 봇 하나로 나간다.
+# 설정을 비워두면 Discord 없이 프로그램만 동작한다(화면 로그·DB 기록은 그대로).
+#
+# 봇 준비 절차:
+#   1. https://discord.com/developers/applications → New Application
+#   2. Bot 탭 → Reset Token 으로 토큰 발급 (Public Bot 은 꺼둘 것)
+#   3. OAuth2 → URL Generator → scopes: bot, applications.commands
+#      권한: View Channels, Send Messages, Embed Links, Attach Files,
+#            Read Message History, Manage Messages(대시보드 고정용)
+#   4. Discord 설정 → 고급 → 개발자 모드 켜기 → 채널·본인 우클릭으로 ID 복사
+#
+# allowed_users 를 비워두면 봇이 아예 켜지지 않는다(아무나 조작하는 것을 막기 위해).
 [discord]
-webhook_url = ""  # Discord 채널 설정 → 연동 → 웹후크에서 발급
+bot_token = ""     # 개발자 포털에서 발급한 봇 토큰 — 유출 시 Reset Token 으로 무효화
+channel_id = ""    # 봇이 사용할 채널 ID (숫자)
+allowed_users = [] # 명령을 쓸 수 있는 사용자 ID 목록 (예: ["123456789012345678"])
 
 # ── 거래비용 (세후 실현손익 계산에 사용) ───────────────────────
 # commission_rate: 증권사 수수료율. 계좌·이벤트마다 다르므로 영웅문의
@@ -36,6 +50,14 @@ tax_rate = 0.0015
 #   다른 폰트를 쓰려면 Windows 에 설치 후 이름을 적는다 (예: "Pretendard", "NanumGothic")
 [chart]
 font = ""
+
+# ── 시작 시 자동 연결 ──────────────────────────────────────────
+# true 면 프로그램을 켤 때 키움·Discord 를 스스로 연결한다(버튼을 누를 필요가 없다).
+# 연결은 조회·알림 경로만 여는 것이라 **그 자체로는 주문이 나가지 않는다** —
+# 실제 매매는 '감시 시작' 이후에만 일어난다.
+# 실패하면 5분마다 다시 시도하므로 증권사 서버 점검 중에 켜도 복구되면 자동으로 붙는다.
+[startup]
+auto_connect = false
 
 # ── 자동 스케줄 (무인 운용) ────────────────────────────────────
 # enabled = true 로 두면 평일에 자동으로 연결 → 감시 시작 → 마감 시 중지 → 요약 발송.

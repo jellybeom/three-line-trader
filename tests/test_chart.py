@@ -350,62 +350,6 @@ def test_종가가_없는_행은_건너뛴다(auth, monkeypatch):
     assert len(Broker(auth).daily_chart("005930")) == 1
 
 
-# ── notifier 이미지 발송 ───────────────────────────────────────
-
-
-def test_이미지_발송은_멀티파트로_나가고_뮤트를_공유한다(tmp_path, monkeypatch):
-    from trader.notifier import DiscordNotifier
-
-    png = tmp_path / "c.png"
-    png.write_bytes(b"\x89PNG\r\n\x1a\nfake")
-    captured = {}
-
-    def fake_post(url, data=None, files=None, json=None, timeout=None):
-        captured.update(data=data, files=files)
-
-        class R:
-            status_code = 200
-            text = ""
-
-        return R()
-
-    monkeypatch.setattr("trader.notifier.requests.post", fake_post)
-    n = DiscordNotifier("https://hook")
-    assert n.send_image(str(png), "복기 차트") is True
-    assert (
-        "payload_json" in captured["data"]
-        and "복기 차트" in captured["data"]["payload_json"]
-    )
-    assert "files[0]" in captured["files"]
-
-    n._mute_until = __import__("time").monotonic() + 60  # 뮤트 중에는 조용히 생략
-    assert n.send_image(str(png)) is False
-
-
-def test_여러_이미지는_한_요청으로_함께_올라간다(tmp_path, monkeypatch):
-    from trader.notifier import DiscordNotifier
-
-    p1, p2 = tmp_path / "a.png", tmp_path / "b.png"
-    p1.write_bytes(b"\x89PNG\r\n\x1a\n1")
-    p2.write_bytes(b"\x89PNG\r\n\x1a\n2")
-    calls = []
-
-    def fake_post(url, data=None, files=None, json=None, timeout=None):
-        calls.append(sorted(files))
-
-        class R:
-            status_code = 200
-            text = ""
-
-        return R()
-
-    monkeypatch.setattr("trader.notifier.requests.post", fake_post)
-    assert (
-        DiscordNotifier("https://hook").send_images([str(p1), str(p2)], "차트") is True
-    )
-    assert calls == [["files[0]", "files[1]"]]  # 요청 1회에 2장
-
-
 # ── 코어 파이프라인 ────────────────────────────────────────────
 
 
@@ -507,12 +451,18 @@ def test_종료_체결시_Discord_로_차트가_자동_전송된다(tmp_path):
 
     sent = []
 
-    class FakeNotifier:
-        def send(self, text):
+    class FakeBot:
+        """봇 발송 인터페이스 (async) — 실제 채널 없이 호출만 기록한다."""
+
+        async def send_text(self, text):
             sent.append(("text", [text]))
             return True
 
-        def send_images(self, paths, caption=""):
+        async def send_embed(self, embed):
+            sent.append(("embed", [embed]))
+            return True
+
+        async def send_images(self, paths, caption=""):
             sent.append(("images", list(paths)))  # 한 메시지에 여러 장
             return True
 
@@ -534,7 +484,7 @@ def test_종료_체결시_Discord_로_차트가_자동_전송된다(tmp_path):
     core._date = "2026-07-24"
     core._store = Store(str(tmp_path / "t.db"))
     core._broker = Broker()
-    core._notifier = FakeNotifier()
+    core._bot = FakeBot()
     core._notify_level = "매매만 (시스템 제외)"
     core._running = True
     params = Params(line1=101, line2=100, line3=99, buy1_amount=110, buy2_amount=110)

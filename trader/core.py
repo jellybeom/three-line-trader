@@ -26,16 +26,12 @@ from pathlib import Path
 from trader.broker import Broker, BrokerError, extract_fill
 from trader.kiwoom import load_auth
 from trader.notifier import (
-    DiscordNotifier,
-    NotifierError,
     build_alert_embed,
     build_batch_embed,
     build_daily_summary_embed,
     build_trade_embed,
-    format_daily_summary,
     format_message,
     format_trade,
-    load_webhook,
     should_notify,
 )
 from dataclasses import replace
@@ -64,6 +60,10 @@ _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 
 # 조회한 주문가능금액의 이 비율까지만 쓴다. 직전 체결이 증권사 여력에 반영되기까지
 # 시차가 있어, 꽉 채워 주문하면 "매수증거금이 부족합니다" 로 거부된다(2026-07-29 실측).
 _DEPOSIT_SAFETY = 0.98
+_BOT_REFRESH_SEC = (
+    10.0  # Discord 대시보드 편집 주기 (새 메시지가 아니라 편집이라 가볍다)
+)
+_AUTO_CONNECT_RETRY_SEC = 300.0  # 자동 연결 재시도 간격 (서버 점검 등 일시 장애 대비)
 _BLOCK_LOG_COOLDOWN_SEC = 600  # 같은 사유·구간이 이어질 때의 재기록 주기 (최후 방어)
 _MIN_ENTRY_QTY = 3  # 1차 매수 수량이 이 미만이면 분할 익절이 어려워 경고
 _BATCH_QUIET_SEC = 2.0  # 이 시간 동안 새 알림이 없으면 모아둔 것을 한 장으로 보낸다
@@ -117,6 +117,25 @@ def write_mode(real: bool, db_dir: str | Path = "data") -> None:
 def db_path_for(real: bool, db_dir: str | Path = "data") -> str:
     """모드별 DB 파일 경로. 모의와 실전 기록이 절대 섞이지 않게 파일 자체를 분리한다."""
     return str(Path(db_dir) / ("trader-real.db" if real else "trader-mock.db"))
+
+
+def _load_auto_connect(config_path: str) -> bool:
+    """[startup] auto_connect — 프로그램 실행 시 키움·Discord 를 스스로 연결할지.
+
+    연결은 조회·알림 경로만 여는 것이라 그 자체로는 주문이 나가지 않는다.
+    실제 매매는 '감시 시작' 이후에만 일어나므로, 자동 연결은 안전하다.
+    """
+    import tomllib
+    from pathlib import Path
+
+    path = Path(config_path)
+    if not path.exists():
+        return False
+    return bool(
+        tomllib.loads(path.read_text(encoding="utf-8"))
+        .get("startup", {})
+        .get("auto_connect", False)
+    )
 
 
 def _load_schedule(config_path: str) -> dict:
@@ -210,7 +229,7 @@ class Core:
         self._config_path = config_path
         self._store: Store | None = None
         self._broker: Broker | None = None
-        self._notifier: DiscordNotifier | None = None
+        # 알림 발송은 Discord 봇 하나로만 나간다 (_bot). 웹훅은 사용하지 않는다.
         self._account_label = ""
         self._notify_level = "전체"
         self._max_symbols = 10
@@ -223,6 +242,13 @@ class Core:
         # order_no -> {symbol, from_state, decision, order_id, ts, warned}
         self._pending: dict[str, dict] = {}
         self._recovered: dict[str, dict] = {}  # 강제 복구한 주문 — 늦은 체결통보 대비
+        self._bot = None  # Discord 봇 (선택) — 없어도 프로그램은 정상 동작한다
+        self._bot_task = None
+        self._bot_refresh_at = 0.0
+        self._auto_connect = False
+        self._auto_connect_at = 0.0  # 마지막 자동 연결 시도 시각
+        self._auto_connect_warned = False  # 실패 알림은 처음 한 번만
+        self._deposit_display: float | None = None  # 화면·대시보드 표시용 최근 예수금
         self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
         self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
@@ -247,6 +273,7 @@ class Core:
         self._mode_real = read_mode(self._db_dir)
         self._commission_rate, self._tax_rate = _load_fee_rates(self._config_path)
         self._schedule = _load_schedule(self._config_path)
+        self._auto_connect = _load_auto_connect(self._config_path)
         self._open_store()
         if self._schedule["enabled"]:
             self._log(
@@ -264,6 +291,14 @@ class Core:
             f"매매일 {self._date} ({len(self._entries)}종목 복원) · "
             f"수수료 {self._commission_rate:.4%} / 거래세 {self._tax_rate:.4%}",
         )
+        await self._start_bot()  # 설정이 없으면 조용히 건너뛴다
+        if self._auto_connect:
+            self._log(
+                "시스템",
+                "설정",
+                "자동 연결 사용 — 키움·Discord 연결을 시도합니다",
+                notify=False,
+            )
 
         while True:
             await self._drain_commands()
@@ -274,6 +309,8 @@ class Core:
                 and time.monotonic() - self._notice_at > _BATCH_QUIET_SEC
             ):
                 await self._flush_notices()
+            await self._tick_bot()
+            await self._tick_auto_connect()
             await asyncio.sleep(_LOOP_SEC)
 
     def _open_store(self) -> None:
@@ -354,8 +391,6 @@ class Core:
                     return
                 name, _ = await asyncio.to_thread(self._broker.stock_info, s)
                 self._bus.events.put(bus.SymbolInfo(s, name))
-            case bus.ConnectDiscord():
-                await self._connect_discord()
             case bus.RequestDailySummary():
                 await self.send_daily_summary()
             case bus.ChartRequest(symbol=s):
@@ -367,7 +402,7 @@ class Core:
                 self._log(s, "차트", "복기 차트 생성 중... (수 초 소요)", notify=False)
                 asyncio.create_task(self._chart_task(s, to_ui=True))
             case bus.SendChartDiscord(symbol=s, paths=paths):
-                if self._notifier is None:
+                if self._bot is None:
                     self._log(s, "에러", "Discord 연결 후 전송할 수 있습니다")
                     return
                 asyncio.create_task(self._send_chart_images(s, paths))
@@ -534,7 +569,8 @@ class Core:
         )
         await self._execute(symbol, d, e["price"] or pos.avg_price)
 
-    async def _connect(self) -> None:
+    async def _connect(self, quiet: bool = False) -> None:
+        """키움 접속. quiet 면 실패를 화면 로그로만 남긴다(자동 재시도용)."""
         try:
             auth = load_auth(self._config_path, real=self._mode_real)
             await asyncio.to_thread(
@@ -542,7 +578,7 @@ class Core:
             )  # 잘못된 키/네트워크 오류는 여기서 드러남 (10초 타임아웃)
         except Exception as e:  # noqa: BLE001
             self._bus.events.put(bus.KiwoomStatus(False, "연결 실패"))
-            self._log("시스템", "에러", f"키움 연결 실패: {e}")
+            self._log("시스템", "에러", f"키움 연결 실패: {e}", notify=not quiet)
             return
         self._broker = Broker(auth)
         self._account_label = _load_account_label(self._config_path, self._mode_real)
@@ -578,26 +614,6 @@ class Core:
         self._watcher = self._watcher_task = self._broker = None
         self._bus.events.put(bus.KiwoomStatus(False, reason))
 
-    async def _connect_discord(self) -> None:
-        try:
-            notifier = DiscordNotifier(load_webhook(self._config_path))
-            await asyncio.to_thread(
-                notifier.send_embed,
-                {
-                    "title": "🔗 three-line-trader 연결되었습니다",
-                    "description": f"매매일 {self._date} · "
-                    f"{'실전' if self._mode_real else '모의'}투자",
-                    "color": 0x00838F,
-                },
-            )
-        except Exception as e:  # noqa: BLE001
-            self._bus.events.put(bus.DiscordStatus(False, "연결 실패"))
-            self._log("시스템", "에러", f"Discord 연결 실패: {e}", notify=False)
-            return
-        self._notifier = notifier
-        self._bus.events.put(bus.DiscordStatus(True, ""))
-        self._log("시스템", "연결", f"Discord 연결됨 (알림 수준: {self._notify_level})")
-
     def _fee(self, side: Side, amount: float) -> float:
         """체결 1건의 거래비용. 매도에는 거래세가 더해진다 (원 미만 절사)."""
         rate = self._commission_rate + (self._tax_rate if side is Side.SELL else 0.0)
@@ -605,7 +621,7 @@ class Core:
 
     def _notify_trade(self, symbol: str, reason: str, qty: int, price: float) -> None:
         """체결 확정·종료 전이 시 사용자 친화 요약을 Discord 로 발송한다."""
-        if not (self._notifier and should_notify(self._notify_level, symbol, "체결")):
+        if not (self._bot and should_notify(self._notify_level, symbol, "체결")):
             return
         e = self._entries[symbol]
         pos = e["pos"]
@@ -624,16 +640,18 @@ class Core:
         )
 
     async def _send_embed(self, embed: dict) -> None:
+        if self._bot is None:
+            return
         try:
-            await asyncio.to_thread(self._notifier.send_embed, embed)
-        except NotifierError as e:  # 발송 실패가 매매를 막지 않도록 로그만 남긴다
+            await self._bot.send_embed(embed)
+        except Exception as e:  # noqa: BLE001 — 발송 실패가 매매를 막지 않게
             self._bus.events.put(
                 bus.LogLine(_now(), "시스템", "경고", f"알림 발송 실패: {e}")
             )
 
     async def _send_discord(self, text: str) -> None:
         try:
-            await asyncio.to_thread(self._notifier.send, text)
+            await self._bot.send_text(text)
         except (
             Exception
         ) as e:  # noqa: BLE001 — 발송 실패가 재귀 알림이 되지 않게 notify=False
@@ -764,6 +782,7 @@ class Core:
             return self._deposit_cache[1]
         value = await asyncio.to_thread(self._broker.deposit)
         self._deposit_cache = (time.monotonic(), value)
+        self._deposit_display = value
         return value
 
     def _invalidate_deposit(self) -> None:
@@ -804,6 +823,8 @@ class Core:
     def _clear_block(self, symbol: str) -> None:
         if self._block_logged.pop(symbol, None) is not None:
             self._bus.events.put(bus.Blocked(symbol, False))
+            if self._bot is not None:
+                self._bot.set_blocked(symbol, False)
         self._block_notified.discard(symbol)
 
     def _price_zone(self, symbol: str, price: float) -> str:
@@ -824,6 +845,8 @@ class Core:
         4종목 107건). 상태 표시는 화면이 계속 보여주고, 로그는 변화만 기록한다.
         """
         self._bus.events.put(bus.Blocked(symbol, True, text))
+        if self._bot is not None:
+            self._bot.set_blocked(symbol, True, text.split("—")[0].strip())
         key = f"{text.split('—')[0].strip()}|{self._price_zone(symbol, price)}"
         last_key, last_at = self._block_logged.get(symbol, ("", 0.0))
         now = time.monotonic()
@@ -938,7 +961,7 @@ class Core:
         if (
             e["pos"].state is State.CLOSED
             and e["pos"].total_bought
-            and self._notifier is not None
+            and self._bot is not None
         ):
             asyncio.create_task(self._chart_task(symbol, to_discord=True))
 
@@ -1115,6 +1138,131 @@ class Core:
                 notify=False,
             )
 
+    # ── Discord 봇 연동 ────────────────────────────────────────
+    # 봇은 아래 속성으로 상태를 읽고, 변경은 request_* 로 명령 큐에 넣는다.
+    # UI 와 완전히 같은 경로라 경쟁 상태가 생기지 않는다.
+
+    @property
+    def entries(self) -> dict:
+        return self._entries
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    @property
+    def trade_date(self) -> str:
+        return self._date
+
+    @property
+    def mode_real(self) -> bool:
+        return self._mode_real
+
+    @property
+    def deposit_display(self) -> float | None:
+        return self._deposit_display
+
+    @property
+    def kiwoom_connected(self) -> bool:
+        return self._broker is not None
+
+    def find_symbol(self, text: str) -> str | None:
+        """종목코드 또는 종목명 일부로 관심종목을 찾는다 (봇 명령용)."""
+        text = text.strip()
+        if text in self._entries:
+            return text
+        matches = [s for s, e in self._entries.items() if text and text in e["name"]]
+        return matches[0] if len(matches) == 1 else None
+
+    def request_running(self, on: bool) -> None:
+        self._bus.commands.put(bus.SetRunning(on))
+
+    def request_notify_level(self, level: str) -> None:
+        self._bus.commands.put(bus.SetNotifyLevel(level))
+
+    def request_daily_summary(self) -> None:
+        self._bus.commands.put(bus.RequestDailySummary())
+
+    def request_chart(self, symbol: str) -> None:
+        self._bus.commands.put(bus.ChartRequest(symbol))
+
+    async def fetch_deposit(self) -> float:
+        if self._broker is None:
+            raise BrokerError("키움 연결이 필요합니다")
+        value = await self._get_deposit()
+        self._deposit_display = value
+        return value
+
+    def on_bot_ready(self) -> None:
+        """봇 연결 완료 — 이 시점부터 알림·명령·대시보드가 모두 동작한다."""
+        self._bus.events.put(bus.DiscordStatus(True, ""))
+        self._log("시스템", "연결", "Discord 연결됨 (알림·명령·대시보드)")
+
+    async def _start_bot(self) -> None:
+        """설정이 있으면 봇을 띄운다. 실패해도 매매에는 영향이 없다."""
+        from trader.discord_bot import BotConfigError, TraderBot, load_bot_config
+
+        try:
+            config = load_bot_config(self._config_path)
+        except BotConfigError as e:
+            self._bus.events.put(bus.DiscordStatus(False, "미설정"))
+            self._log(
+                "시스템",
+                "설정",
+                f"Discord 알림을 사용하지 않습니다 ({e})",
+                notify=False,
+            )
+            return
+        bot = TraderBot(self, config)
+
+        async def runner() -> None:
+            try:
+                await bot.run()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self._bus.events.put(bus.DiscordStatus(False, "연결 실패"))
+                self._log("시스템", "에러", f"Discord 연결 오류: {e}", notify=False)
+
+        self._bot = bot
+        self._bot_task = asyncio.create_task(runner())
+
+    async def _tick_auto_connect(self) -> None:
+        """자동 연결 — 실패해도 주기적으로 다시 시도한다.
+
+        증권사 서버 점검처럼 일시적인 사유로 실패할 수 있으므로 한 번 실패하고 포기하지
+        않는다. 다만 알림은 처음 한 번만 보내 실패가 반복될 때 채널이 시끄럽지 않게 한다.
+        """
+        if not self._auto_connect:
+            return
+        if self._broker is not None:
+            return
+        now = time.monotonic()
+        if now - self._auto_connect_at < _AUTO_CONNECT_RETRY_SEC:
+            return
+        first = self._auto_connect_at == 0.0
+        self._auto_connect_at = now
+        if self._broker is None:
+            await self._connect(quiet=not first and self._auto_connect_warned)
+            if self._broker is None:
+                self._auto_connect_warned = True
+
+    async def _tick_bot(self) -> None:
+        """대시보드 갱신 — 감시 중에는 주기적으로, 중지되면 걷어낸다."""
+        if self._bot is None:
+            return
+        now = time.monotonic()
+        if now - self._bot_refresh_at < _BOT_REFRESH_SEC:
+            return
+        self._bot_refresh_at = now
+        try:
+            if self._running:
+                await self._bot.refresh_dashboard()
+            else:
+                await self._bot.clear_dashboard()
+        except Exception as e:  # noqa: BLE001 — 대시보드 실패가 매매를 막지 않게
+            self._log("시스템", "경고", f"대시보드 갱신 실패: {e}", notify=False)
+
     # ── 복기 차트 ───────────────────────────────────────────────
 
     async def _chart_task(
@@ -1153,7 +1301,7 @@ class Core:
                     symbol, self._entries[symbol]["name"], daily_path, minute_path
                 )
             )
-        if to_discord and self._notifier is not None:
+        if to_discord and self._bot is not None:
             await self._send_chart_images(symbol, (daily_path, minute_path))
 
     def _build_charts(
@@ -1237,9 +1385,7 @@ class Core:
     async def _send_chart_images(self, symbol: str, paths: tuple[str, ...]) -> None:
         name = self._entries[symbol]["name"] if symbol in self._entries else symbol
         try:  # 일봉·3분봉을 한 메시지로 (요청 1회, 사진 2장 나란히)
-            await asyncio.to_thread(
-                self._notifier.send_images, list(paths), f"📈 {name}({symbol}) 차트"
-            )
+            await self._bot.send_images(list(paths), f"📈 {name}({symbol}) 차트")
         except Exception as e:  # noqa: BLE001
             self._log(symbol, "경고", f"차트 전송 실패: {e}", notify=False)
 
@@ -1305,8 +1451,6 @@ class Core:
             return
         if self._broker is None:
             await self._connect()
-        if self._notifier is None:
-            await self._connect_discord()
         if self._broker is None:
             self._log("시스템", "에러", "자동 시작 실패 — 키움 연결에 실패했습니다")
             return
@@ -1323,7 +1467,7 @@ class Core:
         판별한다 (데이터가 직접 알려주는 방식). 감시(WebSocket)와 무관한 REST 조회라
         장 마감 후에도 동작한다.
         """
-        if self._broker is None or self._notifier is None:
+        if self._broker is None or self._bot is None:
             self._log(
                 "시스템",
                 "설정",
@@ -1363,10 +1507,8 @@ class Core:
                 continue
             name = self._entries[symbol]["name"]
             try:
-                await asyncio.to_thread(
-                    self._notifier.send_image,
-                    minute_path,
-                    f"🌙 {name}({symbol}) 시간외(NXT) 포함 3분봉",
+                await self._bot.send_images(
+                    [minute_path], f"🌙 {name}({symbol}) 시간외(NXT) 포함 3분봉"
                 )
                 reviewed += 1
             except Exception as e:  # noqa: BLE001
@@ -1388,7 +1530,6 @@ class Core:
             except BrokerError:
                 deposit = None
         embed = build_daily_summary_embed(self._date, symbols, fills, deposit)
-        text = format_daily_summary(self._date, symbols, fills, deposit)
         holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
         self._log(
             "시스템",
@@ -1397,17 +1538,9 @@ class Core:
             + (f", 이월 필요 {len(holding)}종목" if holding else ""),
             notify=False,
         )
-        if self._notifier:
-            try:
-                await asyncio.to_thread(self._notifier.send_embed, embed)
-            except NotifierError as e:  # 형식 문제 시 줄글로라도 보낸다
-                self._log(
-                    "시스템",
-                    "경고",
-                    f"요약 embed 발송 실패({e}) — 텍스트로 재시도",
-                    notify=False,
-                )
-                await self._send_discord(text)
+        if self._bot is not None:  # 요약이 나갔으니 장중 대시보드는 걷어낸다
+            await self._bot.clear_dashboard()
+        await self._send_embed(embed)
 
     # ── 상태 로드 / 발행 ────────────────────────────────────────
 
@@ -1526,9 +1659,7 @@ class Core:
         self._store.log(self._date, symbol, kind, text)
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
         if not (
-            notify
-            and self._notifier
-            and should_notify(self._notify_level, symbol, kind)
+            notify and self._bot and should_notify(self._notify_level, symbol, kind)
         ):
             return
         if kind in _BATCH_KINDS:  # 여러 건이 몰리는 정보성 알림 → 모아서 한 장으로
@@ -1544,7 +1675,7 @@ class Core:
     async def _flush_notices(self) -> None:
         """모아둔 정보성 알림을 발송. 1건이면 줄글, 2건 이상이면 embed 한 장."""
         items, self._notice_batch = self._notice_batch, []
-        if not items or self._notifier is None:
+        if not items or self._bot is None:
             return
         if len(items) == 1:  # 단건도 색 띠가 붙는 embed 로 — 줄글은 흐름에 묻힌다
             kind, label, text = items[0]

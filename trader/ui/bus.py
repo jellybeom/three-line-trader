@@ -234,11 +234,6 @@ class RequestDailySummary:
 
 
 @dataclass(frozen=True)
-class ConnectDiscord:
-    """config.toml 의 webhook 으로 Discord 연결 (테스트 발송 포함)."""
-
-
-@dataclass(frozen=True)
 class SetNotifyLevel:
     """Discord 알림 수준 변경 (전체 / 매매만 / 에러만 / 끔)."""
 

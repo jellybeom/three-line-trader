@@ -1,42 +1,15 @@
-"""Discord 알림 (notifier) — webhook 발송 + 알림 수준 필터.
+"""Discord 메시지 구성 — 포맷·색·필터 (발송은 discord_bot 이 담당).
 
-- 발송은 blocking(requests)이므로 코어에서는 asyncio.to_thread,
-  시뮬레이터에서는 백그라운드 스레드로 호출한다 (매매 루프를 막지 않음).
-- 알림 수준(UI Discord 그룹의 콤보, settings 영속):
-    전체              → 모든 로그
-    매매만 (시스템 제외) → 종목 관련 로그만 (symbol != "시스템")
-    에러만            → 에러 / 경고만
-    끔                → 발송 안 함
-- Discord webhook 은 분당 약 30건 제한이 있다. '전체' 수준에서 로그가 많은 날은
-  일부가 지연·거부될 수 있으니 평소엔 '매매만' 을 권장.
+알림 문구와 embed 를 만드는 순수 함수 모음이라 네트워크 없이 단위 테스트할 수 있다.
+발송 경로는 **Discord 봇 하나로 일원화**되어 있다. 웹훅을 함께 두면 "지금 무엇이
+연결된 상태인지" 가 헷갈려 운영 사고로 이어지므로 쓰지 않는다.
 """
 
 from __future__ import annotations
 
-import threading
-import time
-import tomllib
-from pathlib import Path
-
-import requests
-
 
 class NotifierError(RuntimeError):
-    """webhook 미설정 또는 발송 실패."""
-
-
-def load_webhook(config_path: str | Path = "config.toml") -> str:
-    path = Path(config_path)
-    if not path.exists():
-        raise NotifierError(f"{config_path} 가 없습니다.")
-    url = (
-        tomllib.loads(path.read_text(encoding="utf-8"))
-        .get("discord", {})
-        .get("webhook_url", "")
-    )
-    if not url:
-        raise NotifierError("config.toml 의 [discord] webhook_url 이 비어 있습니다.")
-    return url
+    """알림 구성·발송 실패."""
 
 
 def should_notify(level: str, symbol: str, kind: str) -> bool:
@@ -404,90 +377,3 @@ def format_daily_summary(
 def format_message(symbol: str, kind: str, text: str) -> str:
     prefix = f"**[{kind}]**"
     return f"{prefix} {text}" if symbol == "시스템" else f"{prefix} {symbol} · {text}"
-
-
-class DiscordNotifier:
-    _MIN_INTERVAL = 1.5  # webhook 분당 제한(약 30건) 방어용 최소 발송 간격
-    _MUTE_SEC = 60.0  # 429 수신 시 발송 중단 시간
-
-    def __init__(self, webhook_url: str):
-        self._url = webhook_url
-        self._lock = threading.Lock()  # 발송 스레드 간 간격 보장
-        self._last_send = 0.0
-        self._mute_until = 0.0
-
-    def send(self, text: str) -> bool:
-        """텍스트 발송 (blocking). 성공 True, 제한 중 생략 False."""
-        return self._post(
-            lambda: requests.post(self._url, json={"content": text[:1900]}, timeout=10)
-        )
-
-    def send_embed(self, embed: dict) -> bool:
-        """embed 발송 (blocking) — 색 띠·필드가 있는 구조화 메시지."""
-        return self._post(
-            lambda: requests.post(self._url, json={"embeds": [embed]}, timeout=10)
-        )
-
-    def send_image(self, path: str, caption: str = "") -> bool:
-        """이미지 1장 발송 — send_images 의 단축형."""
-        return self.send_images([path], caption)
-
-    def send_images(self, paths: list[str], caption: str = "") -> bool:
-        """이미지 여러 장을 **한 메시지로** 발송 (blocking) — 복기 차트 전송용.
-
-        Discord webhook 의 multipart 업로드로 files[0], files[1], ... 을 함께 올리면
-        사진들이 하나의 메시지에 나란히 붙는다. 텍스트 발송과 같은 잠금을 공유해
-        최소 간격·429 뮤트가 그대로 적용된다. 업로드가 있어 타임아웃은 넉넉히 둔다.
-        """
-        import json
-        from contextlib import ExitStack
-        from pathlib import Path
-
-        def request():
-            with ExitStack() as stack:
-                files = {
-                    f"files[{i}]": (
-                        Path(p).name,
-                        stack.enter_context(open(p, "rb")),
-                        "image/png",
-                    )
-                    for i, p in enumerate(paths)
-                }
-                return requests.post(
-                    self._url,
-                    data={
-                        "payload_json": json.dumps(
-                            {"content": caption[:1900]}, ensure_ascii=False
-                        )
-                    },
-                    files=files,
-                    timeout=30 + 15 * len(paths),
-                )
-
-        return self._post(request)
-
-    def _post(self, request) -> bool:
-        """발송 공통부: 최소 간격 보장 → 요청 → 429 뮤트 / 오류 판정.
-
-        연속 발송은 최소 간격을 두고 순서대로 나가며, 429(전송 제한)를 받으면
-        일정 시간 발송을 통째로 생략해 제한 반복을 막는다.
-        """
-        with self._lock:
-            now = time.monotonic()
-            if now < self._mute_until:
-                return False  # 제한 중 — 조용히 생략 (호출부 로그 불필요)
-            wait = self._last_send + self._MIN_INTERVAL - now
-            if wait > 0:
-                time.sleep(wait)
-            self._last_send = time.monotonic()
-            resp = request()
-            if resp.status_code == 429:
-                self._mute_until = time.monotonic() + self._MUTE_SEC
-                raise NotifierError(
-                    f"Discord 전송 제한(429) — {self._MUTE_SEC:.0f}초간 알림을 생략합니다"
-                )
-            if resp.status_code not in (200, 204):
-                raise NotifierError(
-                    f"Discord 발송 실패 (HTTP {resp.status_code}): {resp.text[:200]}"
-                )
-            return True

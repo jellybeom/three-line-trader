@@ -1,11 +1,12 @@
 [project]
 name = "three-line-trader"
 version = "0.1.0"
-description = "Add your description here"
+description = "국내주식 3선 자동매매"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "mplfinance>=0.12.10b0",
+    "discord-py>=2.7.1",
+    "matplotlib>=3.11.1",
     "requests>=2.34.2",
     "tkcalendar>=1.6.1",
     "websockets>=16.1",
