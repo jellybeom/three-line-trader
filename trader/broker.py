@@ -387,6 +387,37 @@ class Broker:
         """계좌 실제 보유 수량 {종목코드: 잔량} — 시작 시 reconcile 용."""
         return {sym: qty for sym, (qty, _) in self.holdings_detail().items()}
 
+    def account_summary(self) -> dict[str, float]:
+        """계좌 전체 요약 — 매입·평가·평가손익·수익률·추정자산.
+
+        실측(2026-08-01)으로 영웅문 [국내잔고] 화면과 값이 정확히 일치함을 확인했다.
+        추정자산에는 대용금이 포함되지 않는다(대용금은 보유 주식을 담보로 환산한 값이라
+        더하면 이중 계상이 된다).
+        """
+        data = self._request(
+            _PATH_ACCOUNT,
+            _TR_HOLDINGS,
+            {"qry_tp": "1", "dmst_stex_tp": _EXCHANGE},
+            retries=self._QUERY_RETRIES,
+        )
+        keys = {
+            "purchase": "tot_pur_amt",
+            "value": "tot_evlt_amt",
+            "pnl": "tot_evlt_pl",
+            "rate": "tot_prft_rt",
+            "asset": "prsm_dpst_aset_amt",
+        }
+        result: dict[str, float] = {}
+        for name, key in keys.items():
+            raw = data.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                result[name] = float(str(raw).replace(",", ""))
+            except (ValueError, TypeError):
+                continue
+        return result
+
     def holdings_detail(self) -> dict[str, tuple[int, int]]:
         """{종목코드: (보유수량, 매도가능수량)}.
 

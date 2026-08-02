@@ -63,6 +63,7 @@ _DEPOSIT_SAFETY = 0.98
 _BOT_REFRESH_SEC = (
     10.0  # Discord 대시보드 편집 주기 (새 메시지가 아니라 편집이라 가볍다)
 )
+_ACCOUNT_TTL_SEC = 30.0  # 계좌 요약 조회 주기 (평가손익은 초 단위로 볼 필요가 없다)
 _AUTO_CONNECT_RETRY_SEC = 300.0  # 자동 연결 재시도 간격 (서버 점검 등 일시 장애 대비)
 _BLOCK_LOG_COOLDOWN_SEC = 600  # 같은 사유·구간이 이어질 때의 재기록 주기 (최후 방어)
 _MIN_ENTRY_QTY = 3  # 1차 매수 수량이 이 미만이면 분할 익절이 어려워 경고
@@ -248,7 +249,11 @@ class Core:
         self._auto_connect = False
         self._auto_connect_at = 0.0  # 마지막 자동 연결 시도 시각
         self._auto_connect_warned = False  # 실패 알림은 처음 한 번만
-        self._deposit_display: float | None = None  # 화면·대시보드 표시용 최근 예수금
+        self._deposit_display: float | None = (
+            None  # 화면·대시보드 표시용 최근 주문가능금액
+        )
+        self._account: dict[str, float] = {}  # 계좌 요약 (매입·평가·손익·추정자산)
+        self._account_at = 0.0
         self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
         self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
@@ -1166,6 +1171,25 @@ class Core:
     def kiwoom_connected(self) -> bool:
         return self._broker is not None
 
+    @property
+    def account(self) -> dict[str, float]:
+        """계좌 요약 — 총매입/총평가/평가손익/수익률/추정자산 (조회 실패 시 빈 dict)."""
+        return self._account
+
+    async def refresh_account(self) -> dict[str, float]:
+        """계좌 요약 갱신 (짧은 캐시). 대시보드·요약에서 공용으로 쓴다."""
+        if self._broker is None:
+            return self._account
+        now = time.monotonic()
+        if self._account and now - self._account_at < _ACCOUNT_TTL_SEC:
+            return self._account
+        try:
+            self._account = await asyncio.to_thread(self._broker.account_summary)
+            self._account_at = now
+        except BrokerError:
+            pass  # 조회 실패 시 직전 값을 유지한다 (표시 전용이라 치명적이지 않다)
+        return self._account
+
     def find_symbol(self, text: str) -> str | None:
         """종목코드 또는 종목명 일부로 관심종목을 찾는다 (봇 명령용)."""
         text = text.strip()
@@ -1257,6 +1281,7 @@ class Core:
         self._bot_refresh_at = now
         try:
             if self._running:
+                await self.refresh_account()
                 await self._bot.refresh_dashboard()
             else:
                 await self._bot.clear_dashboard()
@@ -1529,7 +1554,8 @@ class Core:
                 deposit = await asyncio.to_thread(self._broker.deposit)
             except BrokerError:
                 deposit = None
-        embed = build_daily_summary_embed(self._date, symbols, fills, deposit)
+        account = await self.refresh_account()
+        embed = build_daily_summary_embed(self._date, symbols, fills, deposit, account)
         holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
         self._log(
             "시스템",

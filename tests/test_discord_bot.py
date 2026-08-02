@@ -133,13 +133,14 @@ class FakeCore:
         self.mode_real = True
         self.deposit_display = 842_100
         self.kiwoom_connected = kiwoom
+        self.account = {}
 
 
 def test_대시보드는_감시_상태와_손익을_담는다():
     embed = build_dashboard_embed(FakeCore(_entries()))
     assert "감시 중" in embed["title"] and "실전" in embed["title"]
     assert embed["color"] == 0x2E7D32
-    assert "예수금 842,100원" in embed["footer"]["text"]
+    assert "주문가능 842,100원" in embed["footer"]["text"]
     assert "갱신" in embed["footer"]["text"]
 
 
@@ -160,6 +161,15 @@ def test_키움이_끊기면_대시보드가_경고한다():
     embed = build_dashboard_embed(FakeCore(_entries(), kiwoom=False))
     assert "키움 연결 안 됨" in embed["description"]
     assert embed["color"] == 0xEF6C00  # 주황 경고
+
+
+def test_계좌_요약이_있으면_평가와_자산을_함께_보여준다():
+    """이월 종목이 있으면 실현손익만으로는 그날 성과가 보이지 않는다."""
+    core = FakeCore(_entries())
+    core.account = {"value": 315_425, "pnl": 6_801, "rate": 2.21, "asset": 1_344_071}
+    footer = build_dashboard_embed(core)["footer"]["text"]
+    assert "평가 315,425원(+6,801 · +2.21%)" in footer
+    assert "자산 1,344,071원" in footer
 
 
 def test_보유가_없으면_안내_문구():
@@ -311,7 +321,7 @@ def _tree_with_commands(core, allowed=100, channel=999):
 
 def test_슬래시_명령이_모두_등록된다():
     commands = _tree_with_commands(_CommandCore())
-    assert set(commands) == {"상태", "예수금", "요약", "차트", "감시", "알림"}
+    assert set(commands) == {"상태", "주문가능", "요약", "차트", "감시", "알림"}
     # 주문을 내는 조작은 일부러 넣지 않는다 (계정 탈취 시 피해 제한)
     assert "청산" not in commands and "삭제" not in commands
 

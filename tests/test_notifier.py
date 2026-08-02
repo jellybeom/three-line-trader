@@ -207,3 +207,31 @@ def test_묶음_제목에도_아이콘이_붙는다():
         [("등록", "A", "x"), ("등록", "B", "x"), ("삭제", "C", "x")]
     )
     assert "➕ 등록 2건" in embed["title"] and "🗑️ 삭제 1건" in embed["title"]
+
+
+def test_요약에_계좌_평가와_추정자산이_들어간다():
+    """이월 종목이 있는 날은 실현손익만으로 성과를 판단할 수 없다."""
+    from trader.notifier import build_daily_summary_embed
+
+    symbols, fills = _report()
+    embed = build_daily_summary_embed(
+        "2026-07-27",
+        symbols,
+        fills,
+        deposit=1_029_296,
+        account={"value": 315_425, "pnl": 6_801, "rate": 2.21, "asset": 1_344_071},
+    )
+    account_field = [f for f in embed["fields"] if "계좌" in f["name"]]
+    assert account_field, "계좌 필드가 없음"
+    assert "315,425원" in account_field[0]["value"]
+    assert "+2.21%" in account_field[0]["value"]
+    assert "1,344,071원" in account_field[0]["value"]
+    assert "주문가능 1,029,296원" in embed["footer"]["text"]
+
+
+def test_계좌_정보가_없으면_계좌_필드도_없다():
+    from trader.notifier import build_daily_summary_embed
+
+    symbols, fills = _report()
+    embed = build_daily_summary_embed("2026-07-27", symbols, fills)
+    assert not [f for f in embed["fields"] if "계좌" in f["name"]]

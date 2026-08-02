@@ -38,6 +38,32 @@ async def main() -> None:
     broker = Broker(auth)
     name, price = broker.stock_info(symbol)
     print(f"      종목정보: {symbol} {name} · 현재가 {price:,.0f}")
+    if "--account" in sys.argv:  # 잔고 응답 전 필드 확인 (평가금액·수익률 표시용)
+        from trader.broker import (
+            _EXCHANGE,
+            _PATH_ACCOUNT,
+            _TR_HOLDINGS,
+        )  # noqa: PLC0415
+
+        data = broker._request(  # noqa: SLF001 — 진단 전용
+            _PATH_ACCOUNT, _TR_HOLDINGS, {"qry_tp": "1", "dmst_stex_tp": _EXCHANGE}
+        )
+        rows = data.get("acnt_evlt_remn_indv_tot", [])
+        top = {
+            k: v
+            for k, v in data.items()
+            if not isinstance(v, list) and v not in (None, "")
+        }
+        print(f"      [계좌 요약] {len(top)}개 필드")
+        for k, v in top.items():
+            print(f"        {k:<28} {v}")
+        print(f"      [보유 종목] {len(rows)}건")
+        for row in rows[:2]:
+            for k, v in row.items():
+                if v not in (None, ""):
+                    print(f"        {k:<28} {v}")
+            print("        " + "-" * 40)
+
     if "--deposit" in sys.argv:  # 예수금 응답 전 필드 확인 (어느 값이 주문가능금액인지)
         for qry_tp, label in (("2", "일반조회"), ("3", "추정조회")):
             try:

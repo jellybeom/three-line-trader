@@ -216,6 +216,7 @@ def build_daily_summary_embed(
     symbols: list[dict],
     fills: list[dict],
     deposit: float | None = None,
+    account: dict | None = None,
 ) -> dict:
     """일일 요약 Discord embed — 왼쪽 색 띠와 항목 분리로 한눈에 읽히게 만든다.
 
@@ -288,11 +289,27 @@ def build_daily_summary_embed(
             {"name": f"외 {len(traded) - 20}종목", "value": "\u200b", "inline": False}
         )
 
+    if (
+        account
+    ):  # 계좌 기준 평가 현황 — 이월 종목이 있으면 실현손익만으로는 성과가 안 보인다
+        parts = []
+        if account.get("value"):
+            parts.append(
+                f"평가 {account['value']:,.0f}원 "
+                f"({account.get('pnl', 0):+,.0f} · {account.get('rate', 0):+.2f}%)"
+            )
+        if account.get("asset"):
+            parts.append(f"추정자산 {account['asset']:,.0f}원")
+        if parts:
+            fields.append(
+                {"name": "💼 계좌", "value": "\n".join(parts), "inline": False}
+            )
+
     footer = f"미진입 {len(symbols) - len(traded)}종목"
     if holding:
         footer += f" · 보유 중 {len(holding)}종목"
     if deposit is not None:
-        footer += f" · 예수금 {deposit:,.0f}원"
+        footer += f" · 주문가능 {deposit:,.0f}원"
     return {
         "title": f"📊 {trade_date} ({weekday}) 매매 요약",
         "description": head,

@@ -128,11 +128,20 @@ def build_dashboard_embed(
     if not core.kiwoom_connected:
         lines.insert(0, "⛔ **키움 연결 안 됨** — 시세·주문이 동작하지 않습니다")
 
+    # 계좌 기준 값이 있으면 그것을 쓴다 — 프로그램 밖에서 산 종목까지 포함되기 때문이다
+    account = getattr(core, "account", {}) or {}
     footer = f"실현 {realized:+,.0f}원"
-    if holding:
-        footer += f" · 평가 {unrealized:+,.0f}원"
+    if account.get("value"):
+        footer += (
+            f" · 평가 {account['value']:,.0f}원"
+            f"({account.get('pnl', 0):+,.0f} · {account.get('rate', 0):+.2f}%)"
+        )
+    elif holding:
+        footer += f" · 평가손익 {unrealized:+,.0f}원"
     if core.deposit_display is not None:
-        footer += f" · 예수금 {core.deposit_display:,.0f}원"
+        footer += f" · 주문가능 {core.deposit_display:,.0f}원"
+    if account.get("asset"):
+        footer += f" · 자산 {account['asset']:,.0f}원"
 
     return {
         "title": f"📊 {core.trade_date} · "
@@ -298,7 +307,9 @@ class TraderBot:
                 embed=self._to_embed(build_dashboard_embed(core, self._blocked))
             )
 
-        @tree.command(name="예수금", description="주문가능금액을 조회합니다")
+        @tree.command(
+            name="주문가능", description="지금 더 매수할 수 있는 금액을 조회합니다"
+        )
         async def deposit(interaction) -> None:
             if not await guard(interaction):
                 return
@@ -308,7 +319,10 @@ class TraderBot:
             except Exception as e:  # noqa: BLE001
                 await interaction.followup.send(f"조회 실패: {e}")
                 return
-            await interaction.followup.send(f"💰 주문가능금액 **{value:,.0f}원**")
+            await interaction.followup.send(
+                f"💰 주문가능금액 **{value:,.0f}원**\n"
+                "-# 현금 + 당일 매도대금 재사용분 (영웅문 [예수금] 탭과 다른 값입니다)"
+            )
 
         @tree.command(name="요약", description="오늘 매매 요약을 지금 발송합니다")
         async def summary(interaction) -> None:

@@ -2,7 +2,7 @@
 
   [툴바]      감시 시작/중지 · 손익 요약 · 상태
   [설정]      한 줄 5그룹 (상시 표시):
-              투자 모드 | 매매일(요일) | 키움 연결(예수금) | Discord(알림 수준)
+              투자 모드 | 매매일(요일) | 키움 연결(주문가능금액) | Discord(알림 수준)
               | 자금 배분 및 익절 전략(적용 버튼 포함)
   [모니터]    종목 테이블 (세로 대부분) — 행 내 ✎/✕, ＋추가 행, 열 정렬
   [로그]      우클릭 메뉴 (지우기 / CSV 내보내기)
@@ -265,7 +265,7 @@ class App(tk.Tk):
         ttk.Button(line, text="⟳", width=3, command=self._refresh_account).pack(
             side="right"
         )
-        self._account = ttk.Label(line, text="예수금 -")
+        self._account = ttk.Label(line, text="주문가능 -")
         self._account.pack(side="right", padx=(0, 6))
 
         g_discord = ttk.LabelFrame(row, text="Discord", padding=(10, 2, 10, 6))
@@ -868,8 +868,10 @@ class App(tk.Tk):
                     foreground="#2e7d32" if ok else "#9e9e9e",
                 )
             case bus.Account(deposit=d, account=acct):
+                # 이 값은 '주문가능금액'(= 현금 + 당일 매도대금 재사용분)이다.
+                # 영웅문 [예수금] 탭 숫자와 다르므로 이름을 정확히 적는다.
                 prefix = f"{acct} · " if acct else ""
-                self._account.configure(text=f"{prefix}예수금 {d:,.0f}")
+                self._account.configure(text=f"{prefix}주문가능 {d:,.0f}")
             case bus.Mode(real=real):
                 self._mode_real = real
                 self._mode_var.set("실전" if real else "모의")
@@ -891,7 +893,7 @@ class App(tk.Tk):
 
     def _set_settings_locked(self, locked: bool) -> None:
         """감시 중에는 매매 조건에 영향을 주는 설정 위젯을 시각적으로도 잠근다.
-        (예수금 새로고침·알림 수준은 매매와 무관하므로 항상 허용)"""
+        (주문가능금액 새로고침·알림 수준은 매매와 무관하므로 항상 허용)"""
         state = "disabled" if locked else "normal"
         widgets = (
             self._lock_widgets

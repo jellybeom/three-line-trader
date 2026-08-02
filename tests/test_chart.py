@@ -178,6 +178,37 @@ def test_분봉_파싱은_시각만_오면_날짜와_결합(auth, monkeypatch):
     assert bars[0][0] == "20260724093000"
 
 
+def test_계좌_요약_파싱(auth, monkeypatch):
+    """실측(2026-08-01) 응답 — 영웅문 [국내잔고] 화면과 값이 일치했다."""
+    from trader.broker import Broker
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "return_code": 0,
+                    "tot_pur_amt": "000000000307914",
+                    "tot_evlt_amt": "000000000315425",
+                    "tot_evlt_pl": "000000000006801",
+                    "tot_prft_rt": "2.21",
+                    "prsm_dpst_aset_amt": "000000001344071",
+                }
+
+        return R()
+
+    monkeypatch.setattr("trader.broker.requests.post", fake_post)
+    summary = Broker(auth).account_summary()
+    assert summary == {
+        "purchase": 307_914,
+        "value": 315_425,
+        "pnl": 6_801,
+        "rate": 2.21,
+        "asset": 1_344_071,
+    }
+
+
 def test_지수는_100배_스케일을_보정한다(auth, monkeypatch):
     """실측 2026-07-24: KOSPI 응답 669062 → 실제 지수 6,690.62."""
     from trader.broker import Broker
