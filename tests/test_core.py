@@ -586,3 +586,20 @@ def test_늦게_도착한_체결통보는_보정을_요청한다(core, monkeypat
     texts = [e.text for e in _drain(core._bus) if isinstance(e, b.LogLine)]
     assert any("뒤늦게 도착" in t and "보정" in t for t in texts)
     assert order_no not in core._recovered
+
+
+def test_체결시_판정가가_함께_기록된다(core):
+    """매매 동작에는 영향을 주지 않고 기록만 추가된다."""
+    register(core)
+    asyncio.run(tick(core, 9_950))  # 1선 이탈 → 판정가 9,950
+    asyncio.run(fill(core, "ORD1", 100, 9_980))  # 실제 체결은 9,980
+
+    _, fills = core._store.daily_report(core._date)
+    assert fills[0]["trigger_price"] == 9_950
+    assert fills[0]["price"] == 9_980
+
+    row = core._store.slippage_report()[0]
+    assert row["cost_rate"] < 0  # 판정보다 비싸게 매수 → 손해로 집계
+    assert (
+        core._entries["005930"]["pos"].avg_price == 9_980
+    )  # 평단은 실제 체결가 그대로

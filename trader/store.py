@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS events (       -- append-only 이력
     to_state   TEXT,
     side       TEXT,                       -- 매수 / 매도 / NULL(주문 없는 전이)
     qty        INTEGER,
-    price      REAL,
+    price      REAL,                       -- 실제 체결가
+    trigger_price REAL,                    -- 판정을 유발한 체결가 (슬리피지 분석용)
     reason     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_events_symbol_ts ON events(symbol, ts);
@@ -91,7 +92,13 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 7  # 스키마 변경 시 1 증가. 구버전 DB 파일은 명확한 에러로 안내한다.
+_SCHEMA_VERSION = 8  # 스키마 변경 시 1 증가.
+
+# 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
+# 여기 없는 버전 차이는 데이터 구조가 바뀐 것이므로 종전대로 명확한 에러로 안내한다.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    8: ("ALTER TABLE events ADD COLUMN trigger_price REAL",),  # 슬리피지 기록용
+}
 
 
 class Store:
@@ -112,15 +119,38 @@ class Store:
         )
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if has_tables and version != _SCHEMA_VERSION:
-            self._conn.close()
-            raise RuntimeError(
-                f"DB 스키마 버전 불일치: 파일 v{version}, 프로그램 v{_SCHEMA_VERSION}. "
-                f"개발 단계에서는 '{path}' 파일을 삭제하고 다시 실행하세요."
-            )
+            if not self._migrate(version):
+                self._conn.close()
+                raise RuntimeError(
+                    f"DB 스키마 버전 불일치: 파일 v{version}, 프로그램 v{_SCHEMA_VERSION}. "
+                    f"개발 단계에서는 '{path}' 파일을 삭제하고 다시 실행하세요."
+                )
 
         self._conn.executescript(_SCHEMA)
         self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         self._conn.commit()
+
+    def _migrate(self, version: int) -> bool:
+        """구버전 DB 를 최신으로 올린다. 매매 이력을 지우지 않는 것이 목적이다.
+
+        중간 버전이 하나라도 이관 목록에 없으면 False 를 돌려 호출부가 안내하게 한다
+        (데이터 구조가 바뀐 변경을 억지로 이어붙이면 더 위험하다).
+        """
+        if not 0 < version < _SCHEMA_VERSION:
+            return False
+        steps = []
+        for target in range(version + 1, _SCHEMA_VERSION + 1):
+            if target not in _MIGRATIONS:
+                return False
+            steps.extend(_MIGRATIONS[target])
+        for sql in steps:
+            try:
+                self._conn.execute(sql)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):  # 이미 적용된 경우는 정상
+                    return False
+        self._conn.commit()
+        return True
 
     def close(self) -> None:
         self._conn.close()
@@ -260,8 +290,13 @@ class Store:
         position: Position,
         decision: Decision,
         price: float | None,
+        trigger_price: float | None = None,
     ) -> None:
-        """전이 확정 직후 호출. 포지션 갱신 + 이벤트 기록을 한 트랜잭션으로."""
+        """전이 확정 직후 호출. 포지션 갱신 + 이벤트 기록을 한 트랜잭션으로.
+
+        trigger_price 는 판정을 유발한 체결가다. 실제 체결가(price)와의 차이가
+        시장가 주문의 슬리피지이며, 나중에 집계해 주문 방식을 재검토할 근거가 된다.
+        """
         with self._conn:
             self._write_position(trade_date, symbol, position)
             self._insert_event(
@@ -274,6 +309,7 @@ class Store:
                 qty=decision.qty or None,
                 price=price,
                 reason=decision.reason,
+                trigger_price=trigger_price,
             )
 
     def save_position(self, trade_date: str, symbol: str, position: Position) -> None:
@@ -321,13 +357,47 @@ class Store:
         fills = [
             dict(r)
             for r in self._conn.execute(
-                """SELECT ts, symbol, side, qty, price, reason FROM events
+                """SELECT ts, symbol, side, qty, price, trigger_price, reason FROM events
                WHERE trade_date=? AND kind='전이' AND side IS NOT NULL
                ORDER BY id""",
                 (trade_date,),
             ).fetchall()
         ]
         return symbol_rows, fills
+
+    def slippage_report(self, since: str = "", until: str = "") -> list[dict]:
+        """시장가 체결 오차 집계용 원자료 — 판정가·체결가가 모두 있는 체결만.
+
+        (매매일, 종목, 구분, 수량, 판정가, 체결가, 오차율) 목록. 기간을 비우면 전체.
+        나중에 "평균 오차 -0.4%, 최악 -1.9%, 손실 총액 X원" 같은 집계에 쓴다.
+        """
+        where = ["kind='전이'", "side IS NOT NULL", "price > 0", "trigger_price > 0"]
+        params: list[str] = []
+        if since:
+            where.append("trade_date >= ?")
+            params.append(since)
+        if until:
+            where.append("trade_date <= ?")
+            params.append(until)
+        rows = self._conn.execute(
+            f"""SELECT trade_date, ts, symbol, side, qty, trigger_price, price, reason
+                FROM events WHERE {' AND '.join(where)} ORDER BY id""",
+            params,
+        ).fetchall()
+        out = []
+        for r in rows:
+            gap = (r["price"] - r["trigger_price"]) / r["trigger_price"]
+            # 매수는 비싸게 사면 손해, 매도는 싸게 팔면 손해 — 부호를 손익 기준으로 통일
+            cost = -gap if r["side"] == "매수" else gap
+            out.append(
+                {
+                    **dict(r),
+                    "gap": gap,
+                    "cost_rate": cost,
+                    "cost_amount": cost * (r["price"] * (r["qty"] or 0)),
+                }
+            )
+        return out
 
     def recent_events(
         self, trade_date: str, limit: int = 500
@@ -461,11 +531,13 @@ class Store:
         qty: int | None = None,
         price: float | None = None,
         reason: str = "",
+        trigger_price: float | None = None,
     ) -> None:
         self._conn.execute(
             """INSERT INTO events
-               (ts, trade_date, symbol, kind, from_state, to_state, side, qty, price, reason)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               (ts, trade_date, symbol, kind, from_state, to_state, side, qty, price,
+                trigger_price, reason)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 _now(),
                 trade_date,
@@ -476,6 +548,7 @@ class Store:
                 side,
                 qty,
                 price,
+                trigger_price,
                 reason,
             ),
         )

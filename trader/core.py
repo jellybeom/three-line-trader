@@ -765,6 +765,7 @@ class Core:
             "from_state": from_state,
             "decision": d,
             "order_id": order_id,
+            "trigger_price": price,  # 슬리피지 분석용 기록
             "ts": time.monotonic(),
             "warned": False,
         }
@@ -944,7 +945,13 @@ class Core:
             low_price=e.get("low") or 0.0,
         )
         self._store.save_transition(
-            self._date, symbol, info["from_state"], e["pos"], d, fill.fill_price
+            self._date,
+            symbol,
+            info["from_state"],
+            e["pos"],
+            d,
+            fill.fill_price,
+            info.get("trigger_price"),
         )
         self._store.update_order(
             info["order_id"],
@@ -955,6 +962,11 @@ class Core:
         )
         self._emit_position(symbol)
         text = f"{d.reason} → 체결 {fill.filled_qty}주 @ {fill.fill_price:,.0f}"
+        trigger = info.get("trigger_price")
+        if trigger and fill.fill_price:  # 시장가 주문의 체결 오차
+            gap = (fill.fill_price - trigger) / trigger
+            if abs(gap) >= 0.001:  # 0.1% 미만은 잡음이라 표시하지 않는다
+                text += f" (판정 {trigger:,.0f} 대비 {gap:+.2%})"
         if e["pos"].state is State.CLOSED:
             net = e["pos"].realized_pnl - e["pos"].fees
             text += (

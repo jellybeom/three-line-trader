@@ -298,3 +298,133 @@ def test_복원_로그에_등록_감사행이_중복되지_않는다(store):
     )  # 화면 줄
     rows = store.recent_events("2026-07-24")
     assert len([r for r in rows if r[3].startswith("스모트로닉")]) == 1
+
+
+# ── 슬리피지 기록 / 스키마 이관 (2026-08-03) ──────────────────
+
+
+def test_체결_오차가_기록되고_집계된다(store):
+    """시장가 주문의 판정가와 실제 체결가 차이 — 나중에 주문 방식 재검토의 근거."""
+    from trader.state_machine import Decision, Side
+
+    p = Params(
+        line1=20_806,
+        line2=19_000,
+        line3=18_000,
+        buy1_amount=250_000,
+        buy2_amount=250_000,
+    )
+    store.register_symbol("2026-08-03", "093240", "오로라", p)
+    pos = Position(state=State.BUY1_TP1, avg_price=20_200, total_bought=10, remaining=6)
+
+    # 실측(2026-08-03): +3% 트리거 20,806 → 체결 20,850 / +5% 21,210 → 21,150
+    store.save_transition(
+        "2026-08-03",
+        "093240",
+        State.BUY1,
+        pos,
+        Decision(State.BUY1_TP1, Side.SELL, 4, "+3% 익절"),
+        20_850,
+        20_806,
+    )
+    store.save_transition(
+        "2026-08-03",
+        "093240",
+        State.BUY1_TP1,
+        pos,
+        Decision(State.BUY1_TP2, Side.SELL, 5, "+5% 익절"),
+        21_150,
+        21_210,
+    )
+
+    report = store.slippage_report()
+    assert len(report) == 2
+    assert report[0]["gap"] == pytest.approx(0.00211, abs=1e-4)
+    assert report[0]["cost_rate"] > 0  # 매도를 비싸게 체결 → 이득
+    assert report[1]["cost_rate"] < 0  # 매도를 싸게 체결 → 손해
+
+
+def test_매수는_비싸게_체결될수록_손해로_집계된다(store):
+    from trader.state_machine import Decision, Side
+
+    p = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=100_000
+    )
+    store.register_symbol("2026-08-03", "005930", "삼성전자", p)
+    store.save_transition(
+        "2026-08-03",
+        "005930",
+        State.WAITING,
+        Position(),
+        Decision(State.BUY1, Side.BUY, 10, "1차 매수"),
+        10_100,
+        10_000,
+    )
+    row = store.slippage_report()[0]
+    assert row["gap"] > 0 and row["cost_rate"] < 0  # 판정보다 비싸게 삼 = 손해
+    assert row["cost_amount"] == pytest.approx(-1_010, abs=1)
+
+
+def test_판정가가_없는_과거_기록은_집계에서_빠진다(store):
+    """구버전 DB 에서 이관된 행은 판정가가 없다 — 집계를 왜곡하지 않아야 한다."""
+    from trader.state_machine import Decision, Side
+
+    p = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=100_000
+    )
+    store.register_symbol("2026-08-03", "005930", "삼성전자", p)
+    store.save_transition(
+        "2026-08-03",
+        "005930",
+        State.WAITING,
+        Position(),
+        Decision(State.BUY1, Side.BUY, 10, "1차 매수"),
+        10_100,
+    )
+    assert store.slippage_report() == []
+
+
+def test_구버전_DB는_데이터를_지우지_않고_이관된다(tmp_path):
+    """이력을 잃지 않는 것이 목적 — 컬럼 추가는 자동 이관한다."""
+    import sqlite3
+
+    import trader.store as store_mod
+
+    path = tmp_path / "old.db"
+    schema_v7 = store_mod._SCHEMA.replace(
+        "    trigger_price REAL,                    "
+        "-- 판정을 유발한 체결가 (슬리피지 분석용)\n",
+        "",
+    )
+    con = sqlite3.connect(path)
+    con.executescript(schema_v7)
+    con.execute("PRAGMA user_version=7")
+    con.execute(
+        """INSERT INTO events (ts, trade_date, symbol, kind, reason)
+                   VALUES ('2026-08-03 09:00:00','2026-08-03','005930','체결','매수 10주')"""
+    )
+    con.commit()
+    con.close()
+
+    migrated = Store(path)
+    cols = [r[1] for r in migrated._conn.execute("PRAGMA table_info(events)")]
+    assert "trigger_price" in cols
+    assert (
+        migrated._conn.execute("PRAGMA user_version").fetchone()[0]
+        == store_mod._SCHEMA_VERSION
+    )
+    assert len(migrated.recent_events("2026-08-03")) == 1  # 기존 이력 보존
+    migrated.close()
+
+
+def test_이관_경로가_없는_버전은_종전대로_안내한다(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "ancient.db"
+    Store(path).close()
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA user_version=3")  # 구조가 크게 다른 옛 버전
+    con.commit()
+    con.close()
+    with pytest.raises(RuntimeError, match="스키마 버전 불일치"):
+        Store(path)
