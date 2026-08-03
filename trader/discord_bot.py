@@ -170,6 +170,7 @@ class TraderBot:
         self._channel = None
         self._dashboard_id = None
         self._blocked = {}
+        self._pin_warned = False
 
     # 코어가 보류 상태를 알려주면 대시보드에 반영한다
     def set_blocked(self, symbol: str, active: bool, reason: str = "") -> None:
@@ -243,8 +244,12 @@ class TraderBot:
             self._dashboard_id = message.id
             try:
                 await message.pin()
-            except Exception:  # noqa: BLE001 — 고정 권한이 없어도 대시보드는 동작
-                pass
+            except Exception as e:  # noqa: BLE001 — 고정에 실패해도 대시보드는 동작한다
+                if not self._pin_warned:  # 원인을 한 번은 알려준다 (대개 권한 부족)
+                    self._pin_warned = True
+                    self._core.on_bot_warning(
+                        f"대시보드 고정 실패 — 채널에 '메시지 관리' 권한이 필요합니다 ({e})"
+                    )
             return
         try:
             message = await self._channel.fetch_message(self._dashboard_id)
@@ -303,7 +308,9 @@ class TraderBot:
         async def status(interaction) -> None:
             if not await guard(interaction):
                 return
-            await interaction.response.send_message(
+            await interaction.response.defer()
+            await core.refresh_display()  # 감시 중지 후에도 최신 금액을 보여준다
+            await interaction.followup.send(
                 embed=self._to_embed(build_dashboard_embed(core, self._blocked))
             )
 

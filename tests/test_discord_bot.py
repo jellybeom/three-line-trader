@@ -443,3 +443,59 @@ def test_코어는_봇이_없어도_알림_없이_동작한다(core):
     core._log("005930", "체결", "테스트")
     asyncio.run(core.send_daily_summary())
     assert core._notice_batch == []
+
+
+# ── 대시보드 고정 / 표시값 일관성 ─────────────────────────────
+
+
+def test_고정_실패는_원인을_알려준다():
+    """'메시지 관리' 권한이 없으면 조용히 실패해 사용자가 원인을 알 수 없었다."""
+    from trader.discord_bot import TraderBot
+
+    warnings = []
+
+    class Core(_CommandCore):
+        running = True
+
+        def on_bot_warning(self, text):
+            warnings.append(text)
+
+    class Channel(_FakeChannel):
+        async def send(self, content=None, embed=None, files=None):
+            self.sent.append({"embed": embed})
+
+            class M:
+                id = 1
+
+                async def pin(self):
+                    raise PermissionError("Missing Permissions")
+
+            return M()
+
+    bot = TraderBot(Core(), BotConfig("T", 999, frozenset({100})))
+    bot._channel = Channel()
+    asyncio.run(bot.refresh_dashboard())
+    assert warnings and "메시지 관리" in warnings[0]
+
+    asyncio.run(bot.refresh_dashboard())  # 반복 경고는 하지 않는다
+    assert len(warnings) == 1
+
+
+def test_상태_조회는_최신_금액으로_갱신한다(core):
+    """요약과 /상태 의 주문가능 금액이 달라 보이던 문제 (2026-08-03)."""
+    calls = []
+
+    class Broker:
+        def deposit(self):
+            calls.append("deposit")
+            return 1_793_453
+
+        def account_summary(self):
+            calls.append("account")
+            return {"value": 0, "asset": 2_025_184}
+
+    core._broker = Broker()
+    asyncio.run(core.refresh_display())
+    assert calls == ["deposit", "account"]
+    assert core.deposit_display == 1_793_453
+    assert core.account["asset"] == 2_025_184

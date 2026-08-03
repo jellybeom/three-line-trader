@@ -1176,6 +1176,16 @@ class Core:
         """계좌 요약 — 총매입/총평가/평가손익/수익률/추정자산 (조회 실패 시 빈 dict)."""
         return self._account
 
+    async def refresh_display(self) -> None:
+        """조회 명령(/상태)용 최신화 — 주문가능금액과 계좌 요약을 함께 갱신한다."""
+        if self._broker is None:
+            return
+        try:
+            await self._get_deposit()
+        except BrokerError:
+            pass
+        await self.refresh_account()
+
     async def refresh_account(self) -> dict[str, float]:
         """계좌 요약 갱신 (짧은 캐시). 대시보드·요약에서 공용으로 쓴다."""
         if self._broker is None:
@@ -1216,6 +1226,10 @@ class Core:
         value = await self._get_deposit()
         self._deposit_display = value
         return value
+
+    def on_bot_warning(self, text: str) -> None:
+        """봇에서 발생한 비치명적 문제 — 화면 로그로만 남긴다."""
+        self._log("시스템", "경고", text, notify=False)
 
     def on_bot_ready(self) -> None:
         """봇 연결 완료 — 이 시점부터 알림·명령·대시보드가 모두 동작한다."""
@@ -1551,7 +1565,10 @@ class Core:
         deposit = None
         if self._broker is not None:
             try:
-                deposit = await asyncio.to_thread(self._broker.deposit)
+                # _get_deposit 을 쓰면 표시값(_deposit_display)이 함께 갱신되어
+                # 요약과 /상태·대시보드가 같은 숫자를 보여준다.
+                self._invalidate_deposit()  # 요약은 마감 시점 최신값이어야 한다
+                deposit = await self._get_deposit()
             except BrokerError:
                 deposit = None
         account = await self.refresh_account()
