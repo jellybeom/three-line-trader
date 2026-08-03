@@ -247,7 +247,10 @@ class Core:
         self._bot_task = None
         self._bot_refresh_at = 0.0
         self._auto_connect = False
-        self._auto_connect_at = 0.0  # 마지막 자동 연결 시도 시각
+        # None = 아직 한 번도 시도 안 함. 0.0 을 쓰면 time.monotonic() 이 부팅 후 경과
+        # 시간이라, PC 를 켠 직후 실행했을 때 '방금 시도했다' 고 오판해 첫 연결을 건너뛴다
+        # (2026-08-04 실측 버그).
+        self._auto_connect_at: float | None = None
         self._auto_connect_warned = False  # 실패 알림은 처음 한 번만
         self._deposit_display: float | None = (
             None  # 화면·대시보드 표시용 최근 주문가능금액
@@ -1288,9 +1291,9 @@ class Core:
         if self._broker is not None:
             return
         now = time.monotonic()
-        if now - self._auto_connect_at < _AUTO_CONNECT_RETRY_SEC:
+        first = self._auto_connect_at is None
+        if not first and now - self._auto_connect_at < _AUTO_CONNECT_RETRY_SEC:
             return
-        first = self._auto_connect_at == 0.0
         self._auto_connect_at = now
         if self._broker is None:
             await self._connect(quiet=not first and self._auto_connect_warned)

@@ -244,6 +244,33 @@ def test_자동_연결_설정_읽기(tmp_path):
     assert _load_auto_connect(str(cfg)) is False  # 기본값은 끔
 
 
+def test_프로그램_시작_직후_바로_연결을_시도한다(tmp_path):
+    """PC 를 켠 직후 실행해도 첫 시도를 건너뛰지 않아야 한다.
+
+    time.monotonic() 은 부팅 후 경과 시간이라, 마지막 시도 시각의 초기값을 0.0 으로
+    두면 '방금 시도했다' 고 오판해 첫 연결이 통째로 생략된다(2026-08-04 실측 버그).
+    """
+    from trader.store import Store
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._date = "2026-08-04"
+    core._store = Store(str(tmp_path / "t.db"))
+    core._auto_connect = True
+
+    tries = []
+
+    async def fake_connect(quiet=False):
+        tries.append(quiet)
+
+    core._connect = fake_connect
+    asyncio.run(core._tick_auto_connect())
+    assert tries == [False], "시작 직후 연결을 시도하지 않음"
+
+    asyncio.run(core._tick_auto_connect())  # 재시도 간격 이내에는 중복 시도하지 않는다
+    assert len(tries) == 1
+    core._store.close()
+
+
 def test_자동_연결은_실패해도_주기적으로_다시_시도한다(tmp_path, monkeypatch):
     """증권사 서버 점검처럼 일시적 사유로 실패할 수 있다."""
     import trader.core as core_mod
