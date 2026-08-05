@@ -603,3 +603,24 @@ def test_체결시_판정가가_함께_기록된다(core):
     assert (
         core._entries["005930"]["pos"].avg_price == 9_980
     )  # 평단은 실제 체결가 그대로
+
+
+def test_진입_전에도_당일_최저가가_기록된다(core):
+    """1선에 못 미친 종목의 근접도를 알아야 설정 조정 근거가 생긴다."""
+    register(core)
+    for price in (10_500, 10_200, 10_800):  # 1선(10,000)에 못 미치는 흐름
+        asyncio.run(tick(core, price))
+    assert core._entries["005930"]["day_low"] == 10_200
+    assert core._entries["005930"]["pos"].state is State.WAITING  # 진입은 없다
+
+    core._flush_day_lows(force=True)
+    rows, _ = core._store.daily_report(core._date)
+    assert rows[0]["day_low"] == 10_200
+    assert rows[0]["line1"] == 10_000
+
+
+def test_최저가_기록은_판정에_영향을_주지_않는다(core):
+    register(core)
+    asyncio.run(tick(core, 10_500))
+    asyncio.run(tick(core, 9_950))  # 1선 이탈 → 정상 진입
+    assert core._broker.orders == [("매수", "005930", 100)]

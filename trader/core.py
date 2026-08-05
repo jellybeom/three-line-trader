@@ -63,6 +63,7 @@ _DEPOSIT_SAFETY = 0.98
 _BOT_REFRESH_SEC = (
     10.0  # Discord 대시보드 편집 주기 (새 메시지가 아니라 편집이라 가볍다)
 )
+_DAY_LOW_FLUSH_SEC = 60.0  # 당일 최저가 저장 주기 (전이가 없는 종목도 남기기 위해)
 _ACCOUNT_TTL_SEC = 30.0  # 계좌 요약 조회 주기 (평가손익은 초 단위로 볼 필요가 없다)
 _AUTO_CONNECT_RETRY_SEC = 300.0  # 자동 연결 재시도 간격 (서버 점검 등 일시 장애 대비)
 _BLOCK_LOG_COOLDOWN_SEC = 600  # 같은 사유·구간이 이어질 때의 재기록 주기 (최후 방어)
@@ -257,6 +258,7 @@ class Core:
         )
         self._account: dict[str, float] = {}  # 계좌 요약 (매입·평가·손익·추정자산)
         self._account_at = 0.0
+        self._day_low_at = 0.0
         self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
         self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
@@ -319,6 +321,7 @@ class Core:
                 await self._flush_notices()
             await self._tick_bot()
             await self._tick_auto_connect()
+            self._flush_day_lows()
             await asyncio.sleep(_LOOP_SEC)
 
     def _open_store(self) -> None:
@@ -453,6 +456,7 @@ class Core:
                     "memo": memo,
                     "high": pos.high_price,
                     "low": pos.low_price,
+                    "day_low": pos.day_low,
                 }
                 self._clear_block(s)
                 self._emit_position(s)
@@ -697,6 +701,9 @@ class Core:
             return
         e["price"] = tick.price
         pos = e["pos"]
+        # 당일 최저가는 진입 전에도 기록한다 — "1선에 얼마나 근접했나" 를 알아야
+        # 진입이 없는 날이 '설정이 보수적' 인지 '시장이 안 맞는' 것인지 구분된다.
+        e["day_low"] = min(e.get("day_low") or tick.price, tick.price)
         if pos.total_bought and pos.state is not State.CLOSED:  # 보유 구간만 추적
             e["high"] = max(e.get("high") or 0.0, tick.price)
             e["low"] = min(e.get("low") or tick.price, tick.price)
@@ -717,6 +724,7 @@ class Core:
                 apply_transition(pos, d),
                 high_price=e.get("high") or 0.0,
                 low_price=e.get("low") or 0.0,
+                day_low=e.get("day_low") or 0.0,
             )
             self._store.save_transition(
                 self._date, symbol, from_state, e["pos"], d, price
@@ -946,6 +954,7 @@ class Core:
             fees=filled.fees + fee,
             high_price=e.get("high") or 0.0,
             low_price=e.get("low") or 0.0,
+            day_low=e.get("day_low") or 0.0,
         )
         self._store.save_transition(
             self._date,
@@ -1280,6 +1289,26 @@ class Core:
         self._bot = bot
         self._bot_task = asyncio.create_task(runner())
 
+    def _flush_day_lows(self, force: bool = False) -> None:
+        """당일 최저가를 주기적으로 저장한다.
+
+        진입하지 않은 종목은 상태 전이가 없어 저장될 기회가 없다. 재시작해도 근접도
+        기록이 남도록 주기적으로 반영한다 (값이 바뀐 종목만 쓰므로 부담이 없다).
+        force 는 감시 중지 후(요약 직전)에도 확정 저장하기 위한 것이다.
+        """
+        if not (force or self._running):
+            return
+        now = time.monotonic()
+        if not force and now - self._day_low_at < _DAY_LOW_FLUSH_SEC:
+            return
+        self._day_low_at = now
+        for symbol, e in self._entries.items():
+            low = e.get("day_low") or 0.0
+            pos = e["pos"]
+            if low and pos.day_low != low:
+                e["pos"] = replace(pos, day_low=low)
+                self._store.save_position(self._date, symbol, e["pos"])
+
     async def _tick_auto_connect(self) -> None:
         """자동 연결 — 실패해도 주기적으로 다시 시도한다.
 
@@ -1586,6 +1615,7 @@ class Core:
                 deposit = await self._get_deposit()
             except BrokerError:
                 deposit = None
+        self._flush_day_lows(force=True)  # 요약 직전에 최신 근접도를 확정 저장
         account = await self.refresh_account()
         embed = build_daily_summary_embed(self._date, symbols, fills, deposit, account)
         holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
@@ -1618,6 +1648,7 @@ class Core:
                 "memo": memo,
                 "high": pos.high_price,
                 "low": pos.low_price,
+                "day_low": pos.day_low,
             }
 
     def _warn_restored_pending(self) -> None:

@@ -104,6 +104,7 @@ class Position:
     fees: float = 0.0  # 누적 거래비용 (수수료 + 매도 거래세)
     high_price: float = 0.0  # 보유 중 최고가 (MFE 계산용, 0 = 미기록)
     low_price: float = 0.0  # 보유 중 최저가 (MAE 계산용, 0 = 미기록)
+    day_low: float = 0.0  # 감시 중 당일 최저가 (진입 전 포함 — 1선 근접도 분석용)
 
     def __post_init__(self) -> None:
         if self.state in _HOLDING_STATES:

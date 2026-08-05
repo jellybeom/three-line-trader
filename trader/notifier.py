@@ -289,6 +289,33 @@ def build_daily_summary_embed(
             {"name": f"외 {len(traded) - 20}종목", "value": "\u200b", "inline": False}
         )
 
+    # 미진입 종목의 1선 근접도 — 진입이 없는 날이 '설정이 보수적' 인지
+    # '시장이 안 맞는' 것인지 구분하는 근거가 된다.
+    near = []
+    for s in symbols:
+        if s["total_bought"] or not s.get("day_low") or not s.get("line1"):
+            continue
+        near.append(((s["day_low"] - s["line1"]) / s["line1"], s))
+    if near:
+        near.sort(key=lambda x: x[0])
+        lines_near = [
+            f"`{gap:+6.1%}` {s['name']}({s['symbol']}) · 최저 {s['day_low']:,.0f} "
+            f"/ 1선 {s['line1']:,.0f}"
+            for gap, s in near[:5]
+        ]
+        within = lambda pct: sum(1 for gap, _ in near if gap <= pct)  # noqa: E731
+        lines_near.append(
+            f"\n3% 이내 **{within(0.03)}종목** · 5% 이내 **{within(0.05)}종목** · "
+            f"10% 이내 **{within(0.10)}종목** (총 {len(near)}종목)"
+        )
+        fields.append(
+            {
+                "name": "🎯 1선 근접도 (미진입)",
+                "value": "\n".join(lines_near)[:1024],
+                "inline": False,
+            }
+        )
+
     if (
         account
     ):  # 계좌 기준 평가 현황 — 이월 종목이 있으면 실현손익만으로는 성과가 안 보인다

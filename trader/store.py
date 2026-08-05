@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS positions (
     fees         REAL NOT NULL DEFAULT 0,   -- 누적 거래비용 (수수료 + 매도 거래세)
     high_price   REAL NOT NULL DEFAULT 0,   -- 보유 중 최고가 (MFE)
     low_price    REAL NOT NULL DEFAULT 0,   -- 보유 중 최저가 (MAE)
+    day_low      REAL NOT NULL DEFAULT 0,   -- 감시 중 당일 최저가 (진입 전 포함, 근접도 분석)
     pending      INTEGER NOT NULL DEFAULT 0,
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (trade_date, symbol),
@@ -92,12 +93,13 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 8  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 9  # 스키마 변경 시 1 증가.
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
 # 여기 없는 버전 차이는 데이터 구조가 바뀐 것이므로 종전대로 명확한 에러로 안내한다.
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     8: ("ALTER TABLE events ADD COLUMN trigger_price REAL",),  # 슬리피지 기록용
+    9: ("ALTER TABLE positions ADD COLUMN day_low REAL",),  # 1선 근접도 분석용
 }
 
 
@@ -237,7 +239,8 @@ class Store:
         result: dict[str, tuple[str, Params, Position, str]] = {}
         rows = self._conn.execute(
             """SELECT s.*, p.state, p.avg_price, p.total_bought, p.remaining,
-                      p.realized_pnl, p.fees, p.high_price, p.low_price, p.pending
+                      p.realized_pnl, p.fees, p.high_price, p.low_price, p.day_low,
+                      p.pending
                FROM symbols s JOIN positions p USING(trade_date, symbol)
                WHERE s.trade_date=?""",
             (trade_date,),
@@ -263,6 +266,7 @@ class Store:
                     fees=r["fees"],
                     high_price=r["high_price"],
                     low_price=r["low_price"],
+                    day_low=r["day_low"] or 0.0,
                 )
             except ValueError as e:
                 raise ValueError(
@@ -347,8 +351,9 @@ class Store:
         symbol_rows = [
             dict(r)
             for r in self._conn.execute(
-                """SELECT s.symbol, s.name, s.memo, p.state, p.avg_price, p.total_bought,
-                      p.remaining, p.realized_pnl, p.fees, p.high_price, p.low_price
+                """SELECT s.symbol, s.name, s.memo, s.line1, p.state, p.avg_price,
+                      p.total_bought, p.remaining, p.realized_pnl, p.fees,
+                      p.high_price, p.low_price, p.day_low
                FROM symbols s JOIN positions p USING(trade_date, symbol)
                WHERE s.trade_date=? ORDER BY s.symbol""",
                 (trade_date,),
@@ -496,13 +501,14 @@ class Store:
         self._conn.execute(
             """INSERT INTO positions
                (trade_date, symbol, state, avg_price, total_bought, remaining,
-                realized_pnl, fees, high_price, low_price, pending, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                realized_pnl, fees, high_price, low_price, day_low, pending, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(trade_date, symbol) DO UPDATE SET
                 state=excluded.state, avg_price=excluded.avg_price,
                 total_bought=excluded.total_bought, remaining=excluded.remaining,
                 realized_pnl=excluded.realized_pnl, fees=excluded.fees,
                 high_price=excluded.high_price, low_price=excluded.low_price,
+                day_low=excluded.day_low,
                 pending=excluded.pending, updated_at=excluded.updated_at""",
             (
                 trade_date,
@@ -515,6 +521,7 @@ class Store:
                 pos.fees,
                 pos.high_price,
                 pos.low_price,
+                pos.day_low,
                 int(pos.pending),
                 _now(),
             ),

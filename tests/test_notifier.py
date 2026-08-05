@@ -235,3 +235,67 @@ def test_계좌_정보가_없으면_계좌_필드도_없다():
     symbols, fills = _report()
     embed = build_daily_summary_embed("2026-07-27", symbols, fills)
     assert not [f for f in embed["fields"] if "계좌" in f["name"]]
+
+
+# ── 1선 근접도 (2026-08-05) ────────────────────────────────────
+
+
+def _waiting(symbol, name, line1, day_low):
+    return {
+        "symbol": symbol,
+        "name": name,
+        "memo": "",
+        "line1": line1,
+        "state": "대기",
+        "avg_price": 0,
+        "total_bought": 0,
+        "remaining": 0,
+        "realized_pnl": 0,
+        "fees": 0,
+        "high_price": 0,
+        "low_price": 0,
+        "day_low": day_low,
+    }
+
+
+def test_근접도는_1선에_가까운_순으로_보여준다():
+    """진입이 없는 날, 설정이 보수적인지 시장이 안 맞는지 구분하는 근거."""
+    from trader.notifier import build_daily_summary_embed
+
+    symbols = [
+        _waiting("000660", "SK하이닉스", 50_000, 60_000),  # +20%
+        _waiting("005430", "한국공항", 79_100, 79_700),  # +0.8%
+        _waiting("098460", "고영", 20_000, 21_900),
+    ]  # +9.5%
+    embed = build_daily_summary_embed("2026-08-05", symbols, [])
+    field = [f for f in embed["fields"] if "근접도" in f["name"]][0]
+    lines = field["value"].splitlines()
+    assert "한국공항" in lines[0]  # 가장 가까운 종목이 맨 위
+    assert "SK하이닉스" in lines[2]
+    assert "3% 이내 **1종목**" in field["value"]
+    assert "10% 이내 **2종목**" in field["value"]
+
+
+def test_진입한_종목은_근접도에서_빠진다():
+    from trader.notifier import build_daily_summary_embed
+
+    entered = _waiting("005930", "삼성전자", 10_000, 9_800)
+    entered["total_bought"] = 10  # 실제로 진입한 종목
+    symbols = [entered, _waiting("005430", "한국공항", 79_100, 79_700)]
+    field = [
+        f
+        for f in build_daily_summary_embed("2026-08-05", symbols, [])["fields"]
+        if "근접도" in f["name"]
+    ][0]
+    assert "삼성전자" not in field["value"]
+    assert "총 1종목" in field["value"]
+
+
+def test_틱이_없어_최저가가_없으면_근접도를_넣지_않는다():
+    """감시를 켜지 않은 날이나 휴장일에 빈 섹션이 붙지 않게."""
+    from trader.notifier import build_daily_summary_embed
+
+    embed = build_daily_summary_embed(
+        "2026-08-05", [_waiting("005430", "한국공항", 79_100, 0)], []
+    )
+    assert not [f for f in embed["fields"] if "근접도" in f["name"]]
