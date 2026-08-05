@@ -71,3 +71,52 @@ def test_종목명이_없으면_코드로_대체(tmp_path):
 def test_코드가_없는_행은_무시(tmp_path):
     path = _write(tmp_path, "관심종목 목록\n\n005930,삼성전자\n합계,3종목\n")
     assert parse_watchlist_csv(path) == [("005930", "삼성전자", "", None)]
+
+
+# ── 영문자가 섞인 종목코드 (2026-08-05 실측 누락) ─────────────
+
+
+def test_영문자가_섞인_종목코드도_읽는다(tmp_path):
+    """신주인수권·스팩 등은 코드에 영문자가 들어간다 (예: 아로마티카 0015N0).
+
+    숫자 6자리만 허용하면 CSV 61종목 중 60종목만 들어오고 하나가 조용히 누락된다.
+    """
+    path = tmp_path / "w.csv"
+    path.write_text(
+        "종목코드,종목명\n0015N0,아로마티카\n037710,광주신세계\n", encoding="utf-8-sig"
+    )
+    rows = parse_watchlist_csv(str(path))
+    assert [r[0] for r in rows] == ["0015N0", "037710"]
+    assert rows[0][1] == "아로마티카"
+
+
+def test_소문자_코드는_대문자로_통일된다(tmp_path):
+    path = tmp_path / "w.csv"
+    path.write_text("종목코드,종목명\n0015n0,아로마티카\n", encoding="utf-8-sig")
+    assert parse_watchlist_csv(str(path))[0][0] == "0015N0"
+
+
+def test_따옴표_A접두_영문코드_조합도_처리한다(tmp_path):
+    path = tmp_path / "w.csv"
+    path.write_text(
+        "종목코드,종목명\n'0015N0,아로마티카\nA005930,삼성전자\n", encoding="utf-8-sig"
+    )
+    assert [r[0] for r in parse_watchlist_csv(str(path))] == ["0015N0", "005930"]
+
+
+def test_코드가_아닌_셀은_여전히_걸러낸다(tmp_path):
+    """느슨해진 패턴이 엉뚱한 값을 종목으로 잡지 않아야 한다."""
+    path = tmp_path / "w.csv"
+    path.write_text(
+        "종목코드,종목명\n12345,다섯자리\n1234567,일곱자리\n"
+        "ABCDEF,영문만\n005930.KS,접미사\n037710,광주신세계\n",
+        encoding="utf-8-sig",
+    )
+    assert [r[0] for r in parse_watchlist_csv(str(path))] == ["037710"]
+
+
+def test_헤더_없는_형식에서도_영문코드를_찾는다(tmp_path):
+    path = tmp_path / "w.csv"
+    path.write_text("0015N0,아로마티카,1000\n", encoding="utf-8-sig")
+    rows = parse_watchlist_csv(str(path))
+    assert rows[0][0] == "0015N0" and rows[0][1] == "아로마티카"

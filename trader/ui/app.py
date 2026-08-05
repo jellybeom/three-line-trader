@@ -42,7 +42,10 @@ from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
 
 _POLL_MS = 200
-_CODE_PATTERN = re.compile(r"^['\u2019A]*(\d{6})$")  # 영웅문은 '096770 처럼 따옴표 접두
+# 종목코드는 6자리이며 **숫자로만 이루어지지 않는다** — 신주인수권·스팩 등에는
+# 영문자가 섞인다(실측 2026-08-05: 아로마티카 0015N0). 숫자만 허용하면 조용히 누락된다.
+# 앞의 따옴표(영웅문의 '096770)와 시장구분 접두 A 는 걷어낸다.
+_CODE_PATTERN = re.compile(r"^['\u2019]*A?([0-9][0-9A-Z]{5})$", re.IGNORECASE)
 _NUMERIC_CELL = re.compile(r"^[\d,.+\-%\s]*$")
 
 
@@ -67,7 +70,7 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
 
     def extract_code(cell: str) -> str | None:
         m = _CODE_PATTERN.match(cell.strip().strip('"'))
-        return m.group(1) if m else None
+        return m.group(1).upper() if m else None  # 0015n0 → 0015N0 로 통일
 
     result: list[tuple[str, str, str, tuple | None]] = []
     seen: set[str] = set()
