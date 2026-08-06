@@ -402,6 +402,8 @@ class Core:
                     return
                 name, _ = await asyncio.to_thread(self._broker.stock_info, s)
                 self._bus.events.put(bus.SymbolInfo(s, name))
+            case bus.Notice(kind=kind, text=text, symbol=sym):
+                self._log(sym, kind, text)
             case bus.RequestDailySummary():
                 await self.send_daily_summary()
             case bus.ChartRequest(symbol=s):

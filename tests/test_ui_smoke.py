@@ -161,3 +161,77 @@ def test_행_클릭이_각_버튼_콜백으로_연결된다(app):
         app.positions._on_click(event)
 
     assert called == [("chart", "005930"), ("edit", "005930"), ("del", "005930")]
+
+
+# ── CSV 불러오기 결과 기록 (2026-08-06) ───────────────────────
+
+
+def test_CSV_등록_실패는_로그와_알림으로도_남는다(app, tmp_path):
+    """팝업은 닫으면 사라진다 — 입력 실수는 나중에 되짚을 수 있어야 한다."""
+    from unittest.mock import patch
+
+    from trader.ui import bus
+
+    csv_path = tmp_path / "w.csv"
+    csv_path.write_text(
+        "종목코드,종목명,1선,2선,3선\n"
+        "005930,삼성전자,10000,9000,8000\n"
+        "195870,해성디에스,4030,38350,37200\n",  # 1선 오타 (40300 → 4030)
+        encoding="utf-8-sig",
+    )
+
+    app._funds = bus.Funds(
+        total=1_000_000, max_symbols=5, buy1_amount=100_000, buy2_amount=100_000
+    )
+    with (
+        patch("trader.ui.app.filedialog.askopenfilename", return_value=str(csv_path)),
+        patch("trader.ui.app.messagebox.showinfo"),
+        patch("trader.ui.app.messagebox.showwarning"),
+    ):
+        app._import_csv()
+
+    notices, registers = [], []
+    while not app._bus.commands.empty():
+        cmd = app._bus.commands.get_nowait()
+        if isinstance(cmd, bus.Notice):
+            notices.append(cmd)
+        elif isinstance(cmd, bus.Register):
+            registers.append(cmd.symbol)
+
+    assert registers == ["005930"]  # 정상 종목만 등록
+    kinds = [n.kind for n in notices]
+    assert "등록" in kinds and "경고" in kinds
+    fail = [n.text for n in notices if n.kind == "경고"][0]
+    assert "해성디에스(195870)" in fail
+    assert "4,030" in fail and "38,350" in fail  # 어떤 값이 잘못됐는지 알 수 있다
+
+
+def test_문제가_없으면_요약만_남긴다(app, tmp_path):
+    from unittest.mock import patch
+
+    from trader.ui import bus
+
+    csv_path = tmp_path / "w.csv"
+    csv_path.write_text(
+        "종목코드,종목명,1선,2선,3선\n005930,삼성전자,10000,9000,8000\n",
+        encoding="utf-8-sig",
+    )
+    app._funds = bus.Funds(
+        total=1_000_000, max_symbols=5, buy1_amount=100_000, buy2_amount=100_000
+    )
+    with (
+        patch("trader.ui.app.filedialog.askopenfilename", return_value=str(csv_path)),
+        patch("trader.ui.app.messagebox.showinfo"),
+    ):
+        app._import_csv()
+
+    notices = [c for c in _drain_commands(app._bus) if isinstance(c, bus.Notice)]
+    assert [n.kind for n in notices] == ["등록"]
+    assert "등록 실패" not in notices[0].text
+
+
+def _drain_commands(b):
+    out = []
+    while not b.commands.empty():
+        out.append(b.commands.get_nowait())
+    return out

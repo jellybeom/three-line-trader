@@ -160,6 +160,8 @@ class SimCore:
                     )
                 case bus.SendChartDiscord():
                     pass
+                case bus.Notice(kind=kind, text=text, symbol=sym):
+                    self._log(sym, kind, text)
                 case bus.RequestDailySummary():
                     _, fills = self._store.daily_report(self._date)
                     self._log(

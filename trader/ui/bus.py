@@ -229,6 +229,19 @@ class SendChartDiscord:
 
 
 @dataclass(frozen=True)
+class Notice:
+    """UI 에서 일어난 일을 코어에 기록·발송 요청 (CSV 불러오기 결과 등).
+
+    팝업창은 닫으면 사라져 나중에 확인할 수 없다. 사용자의 입력 실수처럼 되짚어야 하는
+    내용은 로그와 Discord 에도 남긴다.
+    """
+
+    kind: str  # 등록 / 경고 / 에러 ...
+    text: str
+    symbol: str = "시스템"
+
+
+@dataclass(frozen=True)
 class RequestDailySummary:
     """오늘 매매 요약을 Discord 로 즉시 발송 (스케줄과 별개로 수동 확인용)."""
 

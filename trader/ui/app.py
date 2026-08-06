@@ -502,6 +502,7 @@ class App(tk.Tk):
             messagebox.showerror("불러오기 실패", str(e))
             return
         registered = staged = 0
+        rejected: list[str] = []  # 값이 잘못돼 등록하지 못한 종목 (사용자 입력 실수)
         for code, name, memo, lines in items:
             if code in self._registry or code in self._staged:
                 continue
@@ -519,7 +520,10 @@ class App(tk.Tk):
                         tp_ratios=self._funds.tp_ratios,
                     )
                 except ValueError as e:
-                    messagebox.showwarning("등록 제외", f"{code}({name}): {e}")
+                    rejected.append(
+                        f"{name}({code}) 1선 {lines[0]:,.0f} / 2선 {lines[1]:,.0f} / "
+                        f"3선 {lines[2]:,.0f} — {e}"
+                    )
                     continue
                 self._bus.commands.put(
                     bus.Register(code, name, params, Position(), memo=memo)
@@ -532,12 +536,30 @@ class App(tk.Tk):
         if not items:
             messagebox.showwarning("불러오기", "CSV 에서 종목코드를 찾지 못했습니다.")
             return
-        skipped = len(items) - registered - staged
+        skipped = len(items) - registered - staged - len(rejected)
         message = f"정식 등록 {registered}종목 · 3선 미입력 {staged}종목 (중복 {skipped}종목 제외)"
         if staged:
             message += (
                 "\n미입력 종목은 ✎ 로 1·2·3선을 입력해야 감시를 시작할 수 있습니다."
             )
+
+        # 팝업은 닫으면 사라진다 — 결과와 특히 '등록 실패' 는 로그·Discord 에도 남긴다
+        summary = (
+            f"CSV 불러오기 — 등록 {registered}종목 · 3선 미입력 {staged}종목 "
+            f"· 중복 제외 {skipped}종목"
+        )
+        if rejected:
+            summary += f" · **등록 실패 {len(rejected)}종목**"
+        self._bus.commands.put(bus.Notice("등록", summary))
+        for detail in rejected:
+            self._bus.commands.put(bus.Notice("경고", f"CSV 등록 실패 — {detail}"))
+
+        if rejected:
+            message += "\n\n등록하지 못한 종목 (값 확인 필요):\n· " + "\n· ".join(
+                rejected
+            )
+            messagebox.showwarning("불러오기 완료 (일부 제외)", message)
+            return
         messagebox.showinfo("불러오기 완료", message)
 
     def _reset(self, symbol: str | None) -> None:
