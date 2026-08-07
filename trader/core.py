@@ -30,6 +30,7 @@ from trader.notifier import (
     build_batch_embed,
     build_daily_summary_embed,
     build_proximity_embed,
+    build_registration_embed,
     build_trade_embed,
     format_message,
     format_trade,
@@ -403,6 +404,15 @@ class Core:
                     return
                 name, _ = await asyncio.to_thread(self._broker.stock_info, s)
                 self._bus.events.put(bus.SymbolInfo(s, name))
+            case bus.RegistrationNotice(rows=rows, warnings=warns):
+                summary = f"CSV 불러오기 — 등록 {len(rows)}종목"
+                if warns:
+                    summary += f" · 실패 {len(warns)}종목"
+                self._log("시스템", "등록", summary, notify=False)
+                if self._bot is not None:
+                    await self._send_embed(
+                        build_registration_embed(self._date, list(rows), list(warns))
+                    )
             case bus.Notice(kind=kind, text=text, symbol=sym):
                 self._log(sym, kind, text)
             case bus.RequestDailySummary():

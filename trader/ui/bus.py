@@ -241,6 +241,17 @@ class SendChartDiscord:
 
 
 @dataclass(frozen=True)
+class RegistrationNotice:
+    """CSV 등록 결과 — 종목별 선정 근거를 담은 알림을 코어가 발송한다.
+
+    rows: {symbol, name, tags, base_date, memo, qty} 목록.
+    """
+
+    rows: tuple
+    warnings: tuple = ()
+
+
+@dataclass(frozen=True)
 class Notice:
     """UI 에서 일어난 일을 코어에 기록·발송 요청 (CSV 불러오기 결과 등).
 

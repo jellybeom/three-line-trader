@@ -160,6 +160,13 @@ class SimCore:
                     )
                 case bus.SendChartDiscord():
                     pass
+                case bus.RegistrationNotice(rows=rows):
+                    self._log(
+                        "시스템",
+                        "등록",
+                        f"CSV 불러오기 — {len(rows)}종목",
+                        notify=False,
+                    )
                 case bus.Notice(kind=kind, text=text, symbol=sym):
                     self._log(sym, kind, text)
                 case bus.RequestDailySummary():

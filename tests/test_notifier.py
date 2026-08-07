@@ -299,3 +299,105 @@ def test_틱이_없어_최저가가_없으면_근접도를_넣지_않는다():
         "2026-08-05", [_waiting("005430", "한국공항", 79_100, 0)], []
     )
     assert not [f for f in embed["fields"] if "근접도" in f["name"]]
+
+
+# ── 관심종목 등록 알림 (2026-08-08) ───────────────────────────
+
+
+def test_기준봉_경과일_계산():
+    from trader.notifier import base_date_label
+
+    assert base_date_label("2026-08-05", "2026-08-07") == "D+2"
+    assert base_date_label("2026-08-07", "2026-08-07") == "D0"
+    assert base_date_label("", "2026-08-07") == ""  # 기준봉 미입력
+    assert base_date_label("이상한값", "2026-08-07") == ""  # 형식 오류도 조용히
+
+
+def test_등록_알림에_선정_근거가_담긴다():
+    """상태·잔량 같은 기계적 정보 대신 '무엇을 왜 골랐는지' 를 남긴다."""
+    from trader.notifier import build_registration_embed
+
+    rows = [
+        {
+            "symbol": "900290",
+            "name": "GRT",
+            "tags": "KOSPI상승장,테마주",
+            "base_date": "2026-08-05",
+            "memo": "메모 내용",
+            "qty": 122,
+        }
+    ]
+    embed = build_registration_embed("2026-08-08", rows)
+    body = embed["description"]
+    assert "**GRT**(`900290`)" in body
+    assert body.count("GRT") == 1  # 종목명 중복 표기 없음
+    assert "`#KOSPI상승장`" in body and "`#테마주`" in body
+    assert "기준봉 D+3" in body
+    assert "메모 내용" in body
+    assert "상태" not in body and "잔량" not in body
+
+
+def test_소량_종목은_등록_알림에서_경고한다():
+    from trader.notifier import build_registration_embed
+
+    rows = [
+        {
+            "symbol": "004800",
+            "name": "효성",
+            "tags": "",
+            "base_date": "",
+            "memo": "",
+            "qty": 1,
+        },
+        {
+            "symbol": "005930",
+            "name": "삼성전자",
+            "tags": "",
+            "base_date": "",
+            "memo": "",
+            "qty": 7,
+        },
+    ]
+    body = build_registration_embed("2026-08-08", rows)["description"]
+    assert "⚠️ 1차 1주" in body
+    assert body.count("⚠️") == 1  # 충분한 수량에는 경고가 붙지 않는다
+
+
+def test_종목이_여러개면_구분선이_들어간다():
+    from trader.notifier import build_registration_embed
+
+    rows = [
+        {
+            "symbol": f"00593{i}",
+            "name": f"종목{i}",
+            "tags": "",
+            "base_date": "",
+            "memo": "",
+            "qty": 10,
+        }
+        for i in range(3)
+    ]
+    body = build_registration_embed("2026-08-08", rows)["description"]
+    assert body.count("─" * 18) == 2  # 종목 사이에만
+
+
+def test_등록_실패가_있으면_주황색_필드로_분리된다():
+    from trader.notifier import build_registration_embed
+
+    embed = build_registration_embed(
+        "2026-08-08",
+        [
+            {
+                "symbol": "005930",
+                "name": "삼성전자",
+                "tags": "",
+                "base_date": "",
+                "memo": "",
+                "qty": 10,
+            }
+        ],
+        ["해성디에스(195870) 1선 > 2선 > 3선 위반"],
+    )
+    assert embed["color"] == 0xEF6C00
+    assert "해성디에스" in embed["fields"][0]["value"]
+    assert "해성디에스" not in embed["description"]

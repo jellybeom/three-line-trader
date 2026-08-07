@@ -166,6 +166,40 @@ def test_행_클릭이_각_버튼_콜백으로_연결된다(app):
 # ── CSV 불러오기 결과 기록 (2026-08-06) ───────────────────────
 
 
+def test_CSV_태그와_기준봉이_등록_알림까지_전달된다(app, tmp_path):
+    """파싱 → Register 명령 → 등록 알림까지 선정 근거가 끊기지 않아야 한다."""
+    from unittest.mock import patch
+
+    from trader.ui import bus
+
+    csv_path = tmp_path / "w.csv"
+    csv_path.write_text(
+        "종목코드,종목명,메모,1선,2선,3선,태그,기준봉\n"
+        '900290,GRT,메모 내용,3355,3215,3105,"#KOSPI상승장,#테마주",2026-08-05\n',
+        encoding="utf-8-sig",
+    )
+
+    app._funds = bus.Funds(
+        total=2_025_000, max_symbols=5, buy1_amount=405_000, buy2_amount=405_000
+    )
+    with (
+        patch("trader.ui.app.filedialog.askopenfilename", return_value=str(csv_path)),
+        patch("trader.ui.app.messagebox.showinfo"),
+    ):
+        app._import_csv()
+
+    cmds = _drain_commands(app._bus)
+    reg = [c for c in cmds if isinstance(c, bus.Register)][0]
+    assert reg.tags == "KOSPI상승장,테마주" and reg.base_date == "2026-08-05"
+    assert reg.memo == "메모 내용"
+
+    notice = [c for c in cmds if isinstance(c, bus.RegistrationNotice)][0]
+    row = notice.rows[0]
+    assert row["tags"] == "KOSPI상승장,테마주"
+    assert row["base_date"] == "2026-08-05"
+    assert row["qty"] == 405_000 // 3355  # 1차 예상 수량 (소량 경고 판단용)
+
+
 def test_CSV_등록_실패는_로그와_알림으로도_남는다(app, tmp_path):
     """팝업은 닫으면 사라진다 — 입력 실수는 나중에 되짚을 수 있어야 한다."""
     from unittest.mock import patch
@@ -193,15 +227,14 @@ def test_CSV_등록_실패는_로그와_알림으로도_남는다(app, tmp_path)
     notices, registers = [], []
     while not app._bus.commands.empty():
         cmd = app._bus.commands.get_nowait()
-        if isinstance(cmd, bus.Notice):
+        if isinstance(cmd, bus.RegistrationNotice):
             notices.append(cmd)
         elif isinstance(cmd, bus.Register):
             registers.append(cmd.symbol)
 
     assert registers == ["005930"]  # 정상 종목만 등록
-    kinds = [n.kind for n in notices]
-    assert "등록" in kinds and "경고" in kinds
-    fail = [n.text for n in notices if n.kind == "경고"][0]
+    assert notices, "등록 결과 알림이 없음"
+    fail = notices[0].warnings[0]
     assert "해성디에스(195870)" in fail
     assert "4,030" in fail and "38,350" in fail  # 어떤 값이 잘못됐는지 알 수 있다
 
@@ -225,9 +258,10 @@ def test_문제가_없으면_요약만_남긴다(app, tmp_path):
     ):
         app._import_csv()
 
-    notices = [c for c in _drain_commands(app._bus) if isinstance(c, bus.Notice)]
-    assert [n.kind for n in notices] == ["등록"]
-    assert "등록 실패" not in notices[0].text
+    notices = [
+        c for c in _drain_commands(app._bus) if isinstance(c, bus.RegistrationNotice)
+    ]
+    assert len(notices) == 1 and notices[0].warnings == ()
 
 
 def _drain_commands(b):

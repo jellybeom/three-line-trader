@@ -172,6 +172,70 @@ def build_alert_embed(kind: str, label: str, text: str) -> dict:
     }
 
 
+def base_date_label(base_date: str, trade_date: str) -> str:
+    """기준봉으로부터 며칠째인지 — 'D+2' 형태. 날짜가 없거나 이상하면 빈 문자열."""
+    import datetime as _dt
+
+    if not base_date:
+        return ""
+    try:
+        days = (
+            _dt.date.fromisoformat(trade_date) - _dt.date.fromisoformat(base_date)
+        ).days
+    except ValueError:
+        return ""
+    return f"D{days:+d}" if days else "D0"
+
+
+def build_registration_embed(
+    trade_date: str, rows: list[dict], warnings: list[str] | None = None
+) -> dict:
+    """관심종목 등록 알림 — 종목마다 선정 근거(태그·기준봉)를 함께 보여준다.
+
+    rows: {symbol, name, tags, base_date, memo, qty(1차 예상 수량)} 목록.
+    등록은 '무엇을 왜 골랐는지' 를 남기는 자리이므로 상태·잔량 같은 기계적 정보 대신
+    선정 근거를 싣는다.
+    """
+    lines = []
+    for r in rows[:40]:
+        if lines:  # 종목 사이에 옅은 구분선 — 목록이 길어도 경계가 보인다
+            lines.append("─" * 18)
+        head = f"▸ **{r['name']}**(`{r['symbol']}`)"
+        meta = []
+        if tags := r.get("tags"):
+            meta.append(" ".join(f"`#{t}`" for t in tags.split(",") if t))
+        if label := base_date_label(r.get("base_date", ""), trade_date):
+            meta.append(f"기준봉 {label}")
+        if meta:
+            head += " · " + " · ".join(meta)
+        lines.append(head)
+        detail = []
+        if (qty := r.get("qty")) is not None and qty < 3:
+            detail.append(f"⚠️ 1차 {qty}주 — 단계 익절 어려움")
+        if memo := r.get("memo"):
+            detail.append(f"📝 {memo}")
+        if detail:
+            lines.append("　" + " · ".join(detail))
+    if len(rows) > 40:
+        lines.append(f"…외 {len(rows) - 40}종목")
+
+    embed = {
+        "title": f"➕ 관심종목 등록 {len(rows)}종목 · {trade_date}",
+        "description": "\n".join(lines)[:4000] or "\u200b",
+        "color": _COLOR_INFO,
+    }
+    if warnings:
+        embed["fields"] = [
+            {
+                "name": f"⚠️ 확인 필요 {len(warnings)}건",
+                "value": "\n".join(warnings[:10])[:1024],
+                "inline": False,
+            }
+        ]
+        embed["color"] = _COLOR_WARN
+    return embed
+
+
 def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
     """짧은 알림 여러 건을 한 장의 embed 로 묶는다.
 

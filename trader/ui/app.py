@@ -531,6 +531,7 @@ class App(tk.Tk):
             return
         registered = staged = 0
         rejected: list[str] = []  # 값이 잘못돼 등록하지 못한 종목 (사용자 입력 실수)
+        added: list[dict] = []  # 등록 알림용 — 종목별 선정 근거를 함께 싣는다
         for code, name, memo, lines, tags, base_date in items:
             if code in self._registry or code in self._staged:
                 continue
@@ -564,6 +565,16 @@ class App(tk.Tk):
                         base_date=base_date,
                     )
                 )
+                added.append(
+                    {
+                        "symbol": code,
+                        "name": name,
+                        "tags": tags,
+                        "base_date": base_date,
+                        "memo": memo,
+                        "qty": int(params.buy1_amount // params.line1),
+                    }
+                )
                 registered += 1
             else:
                 self._staged[code] = name
@@ -580,15 +591,14 @@ class App(tk.Tk):
             )
 
         # 팝업은 닫으면 사라진다 — 결과와 특히 '등록 실패' 는 로그·Discord 에도 남긴다
-        summary = (
-            f"CSV 불러오기 — 등록 {registered}종목 · 3선 미입력 {staged}종목 "
-            f"· 중복 제외 {skipped}종목"
-        )
-        if rejected:
-            summary += f" · **등록 실패 {len(rejected)}종목**"
-        self._bus.commands.put(bus.Notice("등록", summary))
-        for detail in rejected:
-            self._bus.commands.put(bus.Notice("경고", f"CSV 등록 실패 — {detail}"))
+        if added or rejected:
+            self._bus.commands.put(
+                bus.RegistrationNotice(tuple(added), tuple(rejected))
+            )
+        if staged or skipped:
+            self._bus.commands.put(
+                bus.Notice("등록", f"3선 미입력 {staged}종목 · 중복 제외 {skipped}종목")
+            )
 
         if rejected:
             message += "\n\n등록하지 못한 종목 (값 확인 필요):\n· " + "\n· ".join(
