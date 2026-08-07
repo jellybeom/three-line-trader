@@ -571,3 +571,100 @@ def test_시간외_봉_판별():
     check = lambda rows: any(r[0][:8] == today and r[0][8:12] > "1530" for r in rows)
     assert check(rows_krx_only) is False
     assert check(rows_nxt) is True
+
+
+def test_Discord_명령으로_요청하면_Discord로_전송된다(tmp_path):
+    """명령을 낸 자리에서 결과를 봐야 한다 — UI 창만 뜨면 원격 조회의 의미가 없다."""
+    from trader.core import Core
+    from trader.state_machine import Params, Position, State
+    from trader.store import Store
+    from trader.ui import bus
+
+    sent = []
+
+    class FakeBot:
+        async def send_images(self, paths, caption=""):
+            sent.append((list(paths), caption))
+            return True
+
+        def set_blocked(self, *a):
+            pass
+
+    b = bus.Bus()
+    core = Core(b, db_dir=str(tmp_path))
+    core._date = "2026-08-06"
+    core._store = Store(str(tmp_path / "t.db"))
+    core._broker = ChartStubBroker()
+    core._bot = FakeBot()
+    params = Params(line1=101, line2=100, line3=99, buy1_amount=110, buy2_amount=110)
+    pos = Position(state=State.BUY1, avg_price=100, total_bought=10, remaining=10)
+    core._store.register_symbol(core._date, "005930", "삼성전자", params, pos)
+    core._entries["005930"] = {
+        "name": "삼성전자",
+        "params": params,
+        "pos": pos,
+        "price": 100,
+        "memo": "",
+        "high": 101,
+        "low": 99,
+        "day_low": 99,
+    }
+
+    async def scenario():
+        core.request_chart("005930", to_discord=True)
+        await core._drain_commands()
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if sent:
+                break
+
+    asyncio.run(scenario())
+    assert sent, "Discord 로 전송되지 않음"
+    paths, caption = sent[0]
+    assert len(paths) == 2 and "삼성전자" in caption
+
+    events = []
+    while not b.events.empty():
+        events.append(b.events.get_nowait())
+    assert not [
+        e for e in events if isinstance(e, bus.ChartReady)
+    ]  # UI 창은 뜨지 않는다
+    core._store.close()
+
+
+def test_UI_버튼은_기존대로_창으로_뜬다(tmp_path):
+    from trader.core import Core
+    from trader.state_machine import Params, Position, State
+    from trader.store import Store
+    from trader.ui import bus
+
+    b = bus.Bus()
+    core = Core(b, db_dir=str(tmp_path))
+    core._date = "2026-08-06"
+    core._store = Store(str(tmp_path / "t.db"))
+    core._broker = ChartStubBroker()
+    params = Params(line1=101, line2=100, line3=99, buy1_amount=110, buy2_amount=110)
+    pos = Position(state=State.BUY1, avg_price=100, total_bought=10, remaining=10)
+    core._store.register_symbol(core._date, "005930", "삼성전자", params, pos)
+    core._entries["005930"] = {
+        "name": "삼성전자",
+        "params": params,
+        "pos": pos,
+        "price": 100,
+        "memo": "",
+        "high": 101,
+        "low": 99,
+        "day_low": 99,
+    }
+
+    async def scenario():
+        core.request_chart("005930")  # to_discord 기본값 False
+        await core._drain_commands()
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if any(isinstance(e, bus.ChartReady) for e in list(b.events.queue)):
+                return
+
+    asyncio.run(scenario())
+    assert any(isinstance(e, bus.ChartReady) for e in list(b.events.queue))
+    core._store.close()

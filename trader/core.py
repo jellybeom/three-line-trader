@@ -406,14 +406,20 @@ class Core:
                 self._log(sym, kind, text)
             case bus.RequestDailySummary():
                 await self.send_daily_summary()
-            case bus.ChartRequest(symbol=s):
+            case bus.ChartRequest(symbol=s, to_discord=to_discord):
                 if self._broker is None:
                     self._log(s, "에러", "차트는 키움 연결 후 생성할 수 있습니다")
                     return
-                if s not in self._entries or s in self._chart_busy:
+                if s not in self._entries:
+                    self._log(s, "에러", "관심종목에 없는 종목입니다")
+                    return
+                if s in self._chart_busy:
+                    self._log(s, "차트", "이미 생성 중입니다", notify=False)
                     return
                 self._log(s, "차트", "복기 차트 생성 중... (수 초 소요)", notify=False)
-                asyncio.create_task(self._chart_task(s, to_ui=True))
+                asyncio.create_task(
+                    self._chart_task(s, to_ui=not to_discord, to_discord=to_discord)
+                )
             case bus.SendChartDiscord(symbol=s, paths=paths):
                 if self._bot is None:
                     self._log(s, "에러", "Discord 연결 후 전송할 수 있습니다")
@@ -1194,6 +1200,10 @@ class Core:
         return self._deposit_display
 
     @property
+    def notify_level(self) -> str:
+        return self._notify_level
+
+    @property
     def kiwoom_connected(self) -> bool:
         return self._broker is not None
 
@@ -1243,8 +1253,8 @@ class Core:
     def request_daily_summary(self) -> None:
         self._bus.commands.put(bus.RequestDailySummary())
 
-    def request_chart(self, symbol: str) -> None:
-        self._bus.commands.put(bus.ChartRequest(symbol))
+    def request_chart(self, symbol: str, to_discord: bool = False) -> None:
+        self._bus.commands.put(bus.ChartRequest(symbol, to_discord=to_discord))
 
     async def fetch_deposit(self) -> float:
         if self._broker is None:

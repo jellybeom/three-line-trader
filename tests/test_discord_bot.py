@@ -263,8 +263,6 @@ def test_대시보드_갱신은_봇이_없으면_아무_일도_하지_않는다(
 
 
 class _CommandCore:
-    entries: dict = {}
-    running = False
     trade_date = "2026-08-03"
     mode_real = True
     deposit_display = None
@@ -272,29 +270,39 @@ class _CommandCore:
 
     def __init__(self):
         self.calls = []
+        self.entries = {"005930": {"name": "삼성전자", "pos": Position(), "price": 0}}
+        self.running = False
+        self.notify_level = "전체"
 
     def request_running(self, on):
         self.calls.append(("running", on))
+        self.running = on  # 코어가 명령을 처리한 상태를 흉내
 
     def request_notify_level(self, level):
         self.calls.append(("notify", level))
+        self.notify_level = level
 
     def request_daily_summary(self):
         self.calls.append(("summary",))
 
-    def request_chart(self, symbol):
-        self.calls.append(("chart", symbol))
+    def request_chart(self, symbol, to_discord=False):
+        self.calls.append(("chart", symbol, to_discord))
 
     def find_symbol(self, text):
-        return "005930" if text == "삼성전자" else None
+        return "005930" if text in ("삼성전자", "005930") else None
 
 
-class _Response:
-    def __init__(self):
-        self.msg = None
+class _Sink:
+    """response / followup 공용 — 마지막 메시지를 보관한다."""
+
+    def __init__(self, box):
+        self._box = box
 
     async def send_message(self, content=None, **kw):
-        self.msg = content or "(embed)"
+        self._box.append(content or "(embed)")
+
+    async def send(self, content=None, **kw):
+        self._box.append(content or "(embed)")
 
     async def defer(self):
         pass
@@ -304,7 +312,13 @@ class _Interaction:
     def __init__(self, user_id, channel_id):
         self.user = type("U", (), {"id": user_id})()
         self.channel_id = channel_id
-        self.response = _Response()
+        self.messages: list = []
+        self.response = _Sink(self.messages)
+        self.followup = _Sink(self.messages)
+
+    @property
+    def msg(self):
+        return self.messages[-1] if self.messages else None
 
 
 def _tree_with_commands(core, allowed=100, channel=999):
@@ -335,12 +349,12 @@ def test_허용되지_않은_사용자의_명령은_코어에_닿지_않는다()
 
     other = _Interaction(101, 999)  # 다른 사용자
     asyncio.run(watch.callback(other, choice))
-    assert "권한이 없습니다" in other.response.msg
+    assert "권한이 없습니다" in other.msg
     assert core.calls == []
 
     wrong_channel = _Interaction(100, 111)  # 다른 채널
     asyncio.run(watch.callback(wrong_channel, choice))
-    assert "채널에서만" in wrong_channel.response.msg
+    assert "채널에서만" in wrong_channel.msg
     assert core.calls == []
 
 
@@ -355,6 +369,7 @@ def test_허용된_사용자의_명령은_코어_요청으로_이어진다():
         commands["감시"].callback(ok, app_commands.Choice(name="시작", value="start"))
     )
     assert core.calls == [("running", True)]
+    assert "완료" in ok.msg  # 실제 반영을 확인하고 답한다
 
     asyncio.run(
         commands["알림"].callback(
@@ -369,11 +384,13 @@ def test_없는_종목은_차트를_요청하지_않는다():
     chart = _tree_with_commands(core)["차트"]
     missing = _Interaction(100, 999)
     asyncio.run(chart.callback(missing, "없는종목"))
-    assert "없습니다" in missing.response.msg
+    assert "없습니다" in missing.msg
     assert core.calls == []
 
-    asyncio.run(chart.callback(_Interaction(100, 999), "삼성전자"))
-    assert core.calls == [("chart", "005930")]
+    ok = _Interaction(100, 999)
+    asyncio.run(chart.callback(ok, "삼성전자"))
+    assert core.calls == [("chart", "005930", True)]  # Discord 로 전송
+    assert "이 채널에 올라옵니다" in ok.msg
 
 
 # ── 발송 경로 (웹훅 제거 후 봇이 유일한 경로) ──────────────────
@@ -455,7 +472,9 @@ def test_고정_실패는_원인을_알려준다():
     warnings = []
 
     class Core(_CommandCore):
-        running = True
+        def __init__(self):
+            super().__init__()
+            self.running = True
 
         def on_bot_warning(self, text):
             warnings.append(text)
@@ -499,3 +518,63 @@ def test_상태_조회는_최신_금액으로_갱신한다(core):
     assert calls == ["deposit", "account"]
     assert core.deposit_display == 1_793_453
     assert core.account["asset"] == 2_025_184
+
+
+def test_종목_자동완성은_코드와_이름_모두로_찾는다():
+    """관심종목이 수십 개라 코드를 외우기 어렵다."""
+    core = _CommandCore()
+    core.entries = {
+        "056080": {"name": "유진로봇", "pos": Position(), "price": 0},
+        "0015N0": {"name": "아로마티카", "pos": Position(), "price": 0},
+    }
+    chart = _tree_with_commands(core)["차트"]
+    auto = chart._params["종목"].autocomplete
+
+    for text, expected in (
+        ("유진", "056080"),
+        ("0015", "0015N0"),
+        ("아로마", "0015N0"),
+    ):
+        choices = asyncio.run(auto(_Interaction(100, 999), text))
+        assert [c.value for c in choices] == [expected], text
+
+    assert len(asyncio.run(auto(_Interaction(100, 999), ""))) == 2  # 빈 입력은 전체
+    assert (
+        asyncio.run(auto(_Interaction(101, 999), "유진")) == []
+    )  # 타인에게는 노출 안 함
+
+
+def test_키움이_끊기면_차트_명령을_거절한다():
+    core = _CommandCore()
+    core.kiwoom_connected = False
+    chart = _tree_with_commands(core)["차트"]
+    interaction = _Interaction(100, 999)
+    asyncio.run(chart.callback(interaction, "삼성전자"))
+    assert "키움이 연결되어 있지 않아" in interaction.msg
+    assert core.calls == []
+
+
+def test_감시_시작은_키움_연결을_먼저_확인한다():
+    from discord import app_commands
+
+    core = _CommandCore()
+    core.kiwoom_connected = False
+    watch = _tree_with_commands(core)["감시"]
+    interaction = _Interaction(100, 999)
+    asyncio.run(
+        watch.callback(interaction, app_commands.Choice(name="시작", value="start"))
+    )
+    assert "감시를 시작할 수 없습니다" in interaction.msg
+    assert core.calls == []
+
+
+def test_알림_수준은_반영을_확인하고_답한다():
+    from discord import app_commands
+
+    core = _CommandCore()
+    notify = _tree_with_commands(core)["알림"]
+    interaction = _Interaction(100, 999)
+    asyncio.run(
+        notify.callback(interaction, app_commands.Choice(name="에러만", value="에러만"))
+    )
+    assert "에러만" in interaction.msg and core.notify_level == "에러만"

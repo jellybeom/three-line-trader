@@ -215,9 +215,15 @@ class CarryOver:
 
 @dataclass(frozen=True)
 class ChartRequest:
-    """복기 차트 생성 요청 (📈 버튼). 생성되면 ChartReady 이벤트가 온다."""
+    """복기 차트 생성 요청.
+
+    결과는 **요청한 곳으로** 돌아간다 — 📈 버튼은 UI 창(ChartReady 이벤트),
+    Discord 슬래시 명령은 Discord 채널. 명령을 낸 자리에서 결과를 못 보면
+    원격 조회의 의미가 없다.
+    """
 
     symbol: str
+    to_discord: bool = False  # True 면 UI 창 대신 Discord 채널로 전송
 
 
 @dataclass(frozen=True)

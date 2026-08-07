@@ -287,6 +287,22 @@ class TraderBot:
 
     # ── 슬래시 명령 ────────────────────────────────────────────
 
+    @staticmethod
+    async def _settled(check, timeout: float = 3.0) -> bool:
+        """명령이 실제로 반영될 때까지 잠깐 기다린다.
+
+        봇은 상태를 직접 바꾸지 않고 명령 큐에 넣으므로(UI 와 같은 경로), 곧바로
+        "요청했습니다" 라고만 답하면 코어가 거부해도 사용자는 알 수 없다.
+        """
+        import asyncio as _asyncio
+
+        deadline = _asyncio.get_running_loop().time() + timeout
+        while _asyncio.get_running_loop().time() < deadline:
+            if check():
+                return True
+            await _asyncio.sleep(0.1)
+        return False
+
     def _register_commands(self, tree) -> None:
         core, config = self._core, self._config
 
@@ -337,11 +353,13 @@ class TraderBot:
                 return
             core.request_daily_summary()
             await interaction.response.send_message(
-                "📊 요약을 발송합니다.", ephemeral=True
+                "📊 요약을 발송합니다 — 잠시 후 이 채널에 올라옵니다.", ephemeral=True
             )
 
-        @tree.command(name="차트", description="복기 차트를 생성해 전송합니다")
-        @app_commands.describe(종목="종목코드 또는 종목명 일부")
+        @tree.command(name="차트", description="복기 차트를 생성해 이 채널로 보냅니다")
+        @app_commands.describe(
+            종목="종목코드 또는 종목명 (일부만 입력해도 후보가 뜹니다)"
+        )
         async def chart(interaction, 종목: str) -> None:
             if not await guard(interaction):
                 return
@@ -351,10 +369,35 @@ class TraderBot:
                     f"'{종목}' 에 해당하는 관심종목이 없습니다.", ephemeral=True
                 )
                 return
-            core.request_chart(symbol)
+            if not core.kiwoom_connected:
+                await interaction.response.send_message(
+                    "키움이 연결되어 있지 않아 차트를 만들 수 없습니다.", ephemeral=True
+                )
+                return
+            name = core.entries[symbol]["name"]
+            core.request_chart(
+                symbol, to_discord=True
+            )  # 명령을 낸 곳(Discord)으로 전송
             await interaction.response.send_message(
-                "📈 차트를 생성합니다 (수 초 소요).", ephemeral=True
+                f"📈 {name}({symbol}) 차트를 생성합니다 — 잠시 후 이 채널에 올라옵니다.",
+                ephemeral=True,
             )
+
+        @chart.autocomplete("종목")
+        async def chart_autocomplete(interaction, current: str):
+            """관심종목이 수십 개라 코드를 외우기 어렵다 — 입력하면서 고르게 한다."""
+            if not config.allows(interaction.user.id):
+                return []
+            text = (current or "").strip().lower()
+            hits = [
+                (s, e["name"])
+                for s, e in core.entries.items()
+                if not text or text in s.lower() or text in e["name"].lower()
+            ]
+            return [
+                app_commands.Choice(name=f"{name} ({sym})", value=sym)
+                for sym, name in sorted(hits, key=lambda x: x[1])[:25]
+            ]
 
         @tree.command(name="감시", description="감시를 시작하거나 중지합니다")
         @app_commands.describe(동작="시작 또는 중지")
@@ -367,9 +410,21 @@ class TraderBot:
         async def watch(interaction, 동작: app_commands.Choice[str]) -> None:
             if not await guard(interaction):
                 return
-            core.request_running(동작.value == "start")
-            await interaction.response.send_message(
-                f"👁️ 감시 {'시작' if 동작.value == 'start' else '중지'}를 요청했습니다."
+            want = 동작.value == "start"
+            if want and not core.kiwoom_connected:
+                await interaction.response.send_message(
+                    "⛔ 키움이 연결되어 있지 않아 감시를 시작할 수 없습니다.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer()
+            core.request_running(want)
+            ok = await self._settled(lambda: core.running == want)
+            label = "시작" if want else "중지"
+            await interaction.followup.send(
+                f"👁️ 감시 {label} 완료 ({len(core.entries)}종목)"
+                if ok
+                else f"⚠️ 감시 {label} 요청이 반영되지 않았습니다 — 프로그램 로그를 확인하세요"
             )
 
         @tree.command(name="알림", description="알림 수준을 변경합니다")
@@ -383,5 +438,11 @@ class TraderBot:
         async def notify(interaction, 수준: app_commands.Choice[str]) -> None:
             if not await guard(interaction):
                 return
+            await interaction.response.defer()
             core.request_notify_level(수준.value)
-            await interaction.response.send_message(f"🔔 알림 수준: **{수준.value}**")
+            ok = await self._settled(lambda: core.notify_level == 수준.value)
+            await interaction.followup.send(
+                f"🔔 알림 수준: **{수준.value}**"
+                if ok
+                else "⚠️ 알림 수준 변경이 반영되지 않았습니다"
+            )
