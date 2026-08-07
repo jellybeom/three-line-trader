@@ -49,6 +49,24 @@ _CODE_PATTERN = re.compile(r"^['\u2019]*A?([0-9][0-9A-Z]{5})$", re.IGNORECASE)
 _NUMERIC_CELL = re.compile(r"^[\d,.+\-%\s]*$")
 
 
+def _parse_tags(cell: str) -> str:
+    """태그 셀 정규화 — 쉼표·공백·`#` 어느 조합으로 적어도 같은 결과가 되게 한다.
+
+    "#KOSPI상승장, #테마주" / "테마주 상한가" / "#테마주,상한가" → "테마주,상한가"
+    """
+    if not cell:
+        return ""
+    parts = [
+        t.strip().lstrip("#").strip()
+        for t in cell.replace("#", ",#").replace(" ", ",").split(",")
+    ]
+    seen: list[str] = []
+    for tag in parts:
+        if tag and tag not in seen:
+            seen.append(tag)
+    return ",".join(seen)
+
+
 def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
     """영웅문 관심종목 CSV → [(종목코드, 종목명, 메모, 3선가격 또는 None)].
 
@@ -111,7 +129,7 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
                     cell(row, name_idx) or code,
                     cell(row, memo_idx),
                     lines,
-                    cell(row, tag_idx).replace(" ", "").replace("#", ""),
+                    _parse_tags(cell(row, tag_idx)),
                     cell(row, base_idx),
                 )
             )

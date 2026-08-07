@@ -125,6 +125,11 @@ class RegisterDialog(tk.Toplevel):
                 state="readonly",
             )
             self._base_date.pack(side="left")
+            # 화살표뿐 아니라 입력칸을 눌러도 캘린더가 펼쳐지게 한다.
+            # 기본 동작과 겹치면 이중 토글(열림→닫힘)이 되므로 'break' 로 차단한다.
+            self._base_date.bind(
+                "<Button-1>", lambda _e: (self._base_date.drop_down(), "break")[1]
+            )
             # DateEntry 는 생성 시 오늘 날짜를 채운다. 기준봉은 '모름' 일 수 있으므로
             # 위젯이 자리를 잡은 뒤 비운다 — 다만 편집 프리필을 덮지 않도록,
             # 그 시점에 값이 없을 때만 비운다.
@@ -150,9 +155,7 @@ class RegisterDialog(tk.Toplevel):
 
         # 종목 선정 근거 태그 — 기준봉 시점의 판단이라 종목에 고정된다.
         # 나중에 "#테마주로 고른 종목들의 성적" 같은 집계의 축이 된다.
-        ttk.Label(form, text="선정 태그").grid(
-            row=row, column=0, sticky="nw", pady=(6, 2)
-        )
+        ttk.Label(form, text="태그").grid(row=row, column=0, sticky="nw", pady=(6, 2))
         tag_box = ttk.Frame(form)
         tag_box.grid(row=row, column=1, sticky="w", pady=(6, 2))
         self._tag_vars: dict[str, tk.BooleanVar] = {}

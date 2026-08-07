@@ -143,8 +143,45 @@ def test_태그와_기준봉_열을_읽는다(tmp_path):
     assert row[5] == "2026-08-05"
 
 
+def test_태그는_구분자와_무관하게_같은_결과가_된다(tmp_path):
+    """쉼표·공백·# 를 섞어 적어도 집계가 갈라지지 않아야 한다."""
+    from trader.ui.app import _parse_tags
+
+    for raw in (
+        "#KOSPI상승장, #테마주",
+        "KOSPI상승장 테마주",
+        "#KOSPI상승장#테마주",
+        "KOSPI상승장,,테마주",
+    ):
+        assert _parse_tags(raw) == "KOSPI상승장,테마주", raw
+    assert _parse_tags("테마주,테마주") == "테마주"  # 중복 제거
+    assert _parse_tags("") == "" and _parse_tags("   ") == ""
+
+
 def test_태그_열이_없어도_읽힌다(tmp_path):
     path = tmp_path / "w.csv"
     path.write_text("종목코드,종목명\n005930,삼성전자\n", encoding="utf-8-sig")
     row = parse_watchlist_csv(str(path))[0]
     assert row[4] == "" and row[5] == ""
+
+
+def test_태그_칸이_비어_있어도_오류가_없다(tmp_path):
+    path = tmp_path / "w.csv"
+    path.write_text(
+        "종목코드,종목명,1선,2선,3선,태그,기준봉\n"
+        "005930,삼성전자,70000,68000,66000,,\n"
+        "000660,SK하이닉스,50000,48000,46000,#테마주,\n",
+        encoding="utf-8-sig",
+    )
+    rows = parse_watchlist_csv(str(path))
+    assert rows[0][4] == "" and rows[0][5] == ""
+    assert rows[1][4] == "테마주" and rows[1][5] == ""
+
+
+def test_목록에_없는_태그도_그대로_저장된다(tmp_path):
+    """태그 목록은 나중에 늘어날 수 있다 — 미리 막지 않는다."""
+    path = tmp_path / "w.csv"
+    path.write_text(
+        "종목코드,종목명,태그\n005930,삼성전자,#눌림목\n", encoding="utf-8-sig"
+    )
+    assert parse_watchlist_csv(str(path))[0][4] == "눌림목"
