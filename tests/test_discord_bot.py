@@ -335,7 +335,15 @@ def _tree_with_commands(core, allowed=100, channel=999):
 
 def test_슬래시_명령이_모두_등록된다():
     commands = _tree_with_commands(_CommandCore())
-    assert set(commands) == {"상태", "주문가능", "요약", "차트", "감시", "알림"}
+    assert set(commands) == {
+        "상태",
+        "주문가능",
+        "요약",
+        "차트",
+        "감시",
+        "알림",
+        "근접도",
+    }
     # 주문을 내는 조작은 일부러 넣지 않는다 (계정 탈취 시 피해 제한)
     assert "청산" not in commands and "삭제" not in commands
 
@@ -578,3 +586,71 @@ def test_알림_수준은_반영을_확인하고_답한다():
         notify.callback(interaction, app_commands.Choice(name="에러만", value="에러만"))
     )
     assert "에러만" in interaction.msg and core.notify_level == "에러만"
+
+
+# ── /근접도 · /요약 날짜 (2026-08-07) ──────────────────────────
+
+
+def test_새_명령이_등록된다():
+    commands = _tree_with_commands(_CommandCore())
+    assert "근접도" in commands and "요약" in commands
+
+
+def test_근접도는_1선에_가까운_순으로_보여준다(core):
+    from trader.state_machine import Params, Position, State
+
+    for sym, name, line1, low in (
+        ("056080", "유진로봇", 12_800, 12_900),
+        ("005930", "삼성전자", 50_000, 58_000),
+    ):
+        p = Params(
+            line1=line1,
+            line2=line1 * 0.95,
+            line3=line1 * 0.9,
+            buy1_amount=200_000,
+            buy2_amount=200_000,
+        )
+        pos = Position(state=State.WAITING, day_low=low)
+        core._store.register_symbol(core._date, sym, name, p, pos)
+        core._entries[sym] = {
+            "name": name,
+            "params": p,
+            "pos": pos,
+            "price": low,
+            "memo": "",
+            "high": 0,
+            "low": 0,
+            "day_low": low,
+        }
+
+    embed = core.proximity_embed()
+    lines = embed["description"].splitlines()
+    assert "유진로봇" in lines[0] and "삼성전자" in lines[1]  # 가까운 순
+    assert "3% 이내 1종목" in embed["footer"]["text"]
+
+
+def test_과거_날짜_요약을_조회할_수_있다(core):
+    from trader.state_machine import Params, Position, State
+
+    p = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=100_000
+    )
+    pos = Position(
+        state=State.CLOSED,
+        avg_price=10_000,
+        total_bought=10,
+        remaining=0,
+        realized_pnl=5_000,
+        fees=300,
+    )
+    core._store.register_symbol("2026-08-06", "005930", "삼성전자", p, pos)
+
+    embed = asyncio.run(core.summary_embed("2026-08-06"))
+    assert "2026-08-06" in embed["title"]
+    assert "+4,700원" in embed["description"]  # 세후
+    assert "2026-08-06" in core.trade_dates()
+
+
+def test_기록이_없는_날짜는_그렇게_알려준다(core):
+    embed = asyncio.run(core.summary_embed("2020-01-01"))
+    assert "등록된 관심종목이 없습니다" in embed["description"]

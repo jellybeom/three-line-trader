@@ -223,6 +223,20 @@ def _fill_markers(ax, bars: list[Bar], fills: list[Fill], daily: bool) -> None:
         )
 
 
+def _apply_xticks(axes, ticks: list[int], labels: list[str]) -> None:
+    """모든 패널에 **같은 x 눈금**을 적용한다 (라벨은 맨 아래 패널만).
+
+    패널마다 눈금이 다르면 세로 격자가 어긋나, 캔들이 몇 시쯤인지 아래 거래량과
+    대조할 수 없다(2026-08-07 피드백). 눈금을 공유하면 격자가 한 줄로 이어진다.
+    """
+    for i, axis in enumerate(axes):
+        axis.set_xticks(ticks)
+        if i == len(axes) - 1:
+            axis.set_xticklabels(labels, fontsize=6.5)
+        else:
+            axis.set_xticklabels([])
+
+
 def _style(ax, show_x: bool = False) -> None:
     ax.grid(True, linewidth=0.3, alpha=0.4)
     ax.tick_params(labelsize=7)
@@ -337,20 +351,27 @@ def render_daily(
             fontsize=9,
             color="gray",
         )
-    # 월이 바뀌는 봉에 눈금과 세로 보조선 — 영웅문처럼 달 경계를 한눈에
+    # 월 경계 + 그 사이 보조 눈금 — 네 패널이 같은 격자를 쓰도록 공유한다
     month_starts = [
         i
         for i in range(1, len(visible))
         if visible[i].key[4:6] != visible[i - 1].key[4:6]
-    ] or [0]
-    for axis in (ax_main, ax_vol, ax_val, ax_kospi):
+    ]
+    # 월 경계를 우선 배치하고, 그 사이가 넓으면 중간 눈금을 채운다.
+    # 라벨이 겹치지 않도록 최소 간격을 둔다.
+    marks: dict[int, str] = {
+        i: f"{visible[i].key[:4]}-{visible[i].key[4:6]}" for i in month_starts
+    }
+    for i in range(0, len(visible), 5):
+        if all(abs(i - m) >= 5 for m in marks):
+            marks[i] = f"{visible[i].key[4:6]}/{visible[i].key[6:8]}"
+    ticks = sorted(marks)
+    labels = [marks[i] for i in ticks]
+    panels = (ax_main, ax_vol, ax_val, ax_kospi)
+    _apply_xticks(panels, ticks, labels)
+    for axis in panels:  # 월 경계는 더 진하게 — 달이 바뀌는 지점을 한눈에
         for i in month_starts:
-            axis.axvline(i - 0.5, color="gray", linewidth=0.6, alpha=0.5, zorder=0)
-    ax_kospi.set_xticks(month_starts)
-    ax_kospi.set_xticklabels(
-        [f"{visible[i].key[:4]}-{visible[i].key[4:6]}" for i in month_starts],
-        fontsize=7,
-    )
+            axis.axvline(i - 0.5, color="gray", linewidth=0.8, alpha=0.6, zorder=0)
     _style(ax_kospi, show_x=True)
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -404,9 +425,9 @@ def render_minute(
     day_starts = [
         i for i in range(1, len(bars)) if bars[i].key[:8] != bars[i - 1].key[:8]
     ]
-    for i in day_starts:  # 날짜 경계선
-        ax.axvline(i - 0.5, color="gray", linewidth=0.6, linestyle="--", alpha=0.6)
-        ax_vol.axvline(i - 0.5, color="gray", linewidth=0.6, linestyle="--", alpha=0.6)
+    for i in day_starts:  # 날짜 경계선 (점선으로 구분)
+        ax.axvline(i - 0.5, color="gray", linewidth=0.8, linestyle="--", alpha=0.7)
+        ax_vol.axvline(i - 0.5, color="gray", linewidth=0.8, linestyle="--", alpha=0.7)
     ax.set_title(title, fontsize=11, loc="left")
     _style(ax)
 
@@ -418,30 +439,17 @@ def render_minute(
     )
     ax_vol.set_ylabel(f"거래량({mvol_unit}주)", fontsize=7)
     _comma_axis(ax_vol)
-    ticks = [0, *day_starts]
-    labels = [f"{bars[i].key[4:6]}/{bars[i].key[6:8]}" for i in ticks]
-    hour_ticks = [
-        i
+    # 정시마다 눈금 — 캔들이 몇 시쯤인지 아래 거래량과 나란히 읽을 수 있게 한다
+    hour_marks = {
+        i: bars[i].key[8:10]
         for i in range(len(bars))
-        if bars[i].key[8:12]
-        in (
-            "1000",
-            "1100",
-            "1200",
-            "1300",
-            "1400",
-            "1500",
-            "1600",
-            "1700",
-            "1800",
-            "1900",
-        )
-        and i not in ticks
-    ]
-    ax_vol.set_xticks(ticks + hour_ticks)
-    ax_vol.set_xticklabels(  # 시:분 대신 시만 — 겹침 방지
-        labels + [bars[i].key[8:10] for i in hour_ticks], fontsize=6.5
-    )
+        if bars[i].key[10:12] in ("00", "01", "02")
+        and (i == 0 or bars[i].key[8:10] != bars[i - 1].key[8:10])
+    }
+    day_marks = {i: f"{bars[i].key[4:6]}/{bars[i].key[6:8]}" for i in [0, *day_starts]}
+    marks = {**hour_marks, **day_marks}  # 날짜 경계는 날짜로 표기
+    ticks = sorted(marks)
+    _apply_xticks((ax, ax_vol), ticks, [marks[i] for i in ticks])
     _style(ax_vol, show_x=True)
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)

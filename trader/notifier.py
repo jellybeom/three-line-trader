@@ -211,6 +211,72 @@ def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
     return embed
 
 
+def proximity_rows(symbols: list[dict]) -> list[tuple[float, dict]]:
+    """미진입 종목의 (1선 대비 최저가 괴리율, 종목) — 가까운 순.
+
+    진입이 없는 날이 '설정이 보수적' 인지 '시장이 안 맞는' 것인지 구분하는 근거다.
+    """
+    rows = [
+        ((s["day_low"] - s["line1"]) / s["line1"], s)
+        for s in symbols
+        if not s["total_bought"] and s.get("day_low") and s.get("line1")
+    ]
+    rows.sort(key=lambda x: x[0])
+    return rows
+
+
+def build_proximity_field(symbols: list[dict], top: int = 5) -> dict | None:
+    """일일 요약에 붙일 근접도 필드 (없으면 None)."""
+    rows = proximity_rows(symbols)
+    if not rows:
+        return None
+    lines = [
+        f"`{gap:+6.1%}` {s['name']}({s['symbol']}) · 최저 {s['day_low']:,.0f} "
+        f"/ 1선 {s['line1']:,.0f}"
+        for gap, s in rows[:top]
+    ]
+    lines.append("\n" + _proximity_counts(rows))
+    return {
+        "name": "🎯 1선 근접도 (미진입)",
+        "value": "\n".join(lines)[:1024],
+        "inline": False,
+    }
+
+
+def _proximity_counts(rows: list[tuple[float, dict]]) -> str:
+    def within(pct: float) -> int:
+        return sum(1 for gap, _ in rows if gap <= pct)
+
+    return (
+        f"3% 이내 **{within(0.03)}종목** · 5% 이내 **{within(0.05)}종목** · "
+        f"10% 이내 **{within(0.10)}종목** (총 {len(rows)}종목)"
+    )
+
+
+def build_proximity_embed(trade_date: str, symbols: list[dict], top: int = 12) -> dict:
+    """`/근접도` 전용 — 요약보다 많은 종목을 보여준다."""
+    rows = proximity_rows(symbols)
+    if not rows:
+        return {
+            "title": f"🎯 {trade_date} 1선 근접도",
+            "description": "아직 시세를 받은 미진입 종목이 없습니다.",
+            "color": _COLOR_FLAT,
+        }
+    lines = [
+        f"`{gap:+6.1%}` {s['name']}({s['symbol']}) · 최저 {s['day_low']:,.0f} "
+        f"/ 1선 {s['line1']:,.0f}"
+        for gap, s in rows[:top]
+    ]
+    if len(rows) > top:
+        lines.append(f"…외 {len(rows) - top}종목")
+    return {
+        "title": f"🎯 {trade_date} 1선 근접도 (미진입 {len(rows)}종목)",
+        "description": "\n".join(lines)[:4000],
+        "color": _COLOR_INFO,
+        "footer": {"text": _proximity_counts(rows).replace("**", "")},
+    }
+
+
 def build_daily_summary_embed(
     trade_date: str,
     symbols: list[dict],
@@ -289,32 +355,8 @@ def build_daily_summary_embed(
             {"name": f"외 {len(traded) - 20}종목", "value": "\u200b", "inline": False}
         )
 
-    # 미진입 종목의 1선 근접도 — 진입이 없는 날이 '설정이 보수적' 인지
-    # '시장이 안 맞는' 것인지 구분하는 근거가 된다.
-    near = []
-    for s in symbols:
-        if s["total_bought"] or not s.get("day_low") or not s.get("line1"):
-            continue
-        near.append(((s["day_low"] - s["line1"]) / s["line1"], s))
-    if near:
-        near.sort(key=lambda x: x[0])
-        lines_near = [
-            f"`{gap:+6.1%}` {s['name']}({s['symbol']}) · 최저 {s['day_low']:,.0f} "
-            f"/ 1선 {s['line1']:,.0f}"
-            for gap, s in near[:5]
-        ]
-        within = lambda pct: sum(1 for gap, _ in near if gap <= pct)  # noqa: E731
-        lines_near.append(
-            f"\n3% 이내 **{within(0.03)}종목** · 5% 이내 **{within(0.05)}종목** · "
-            f"10% 이내 **{within(0.10)}종목** (총 {len(near)}종목)"
-        )
-        fields.append(
-            {
-                "name": "🎯 1선 근접도 (미진입)",
-                "value": "\n".join(lines_near)[:1024],
-                "inline": False,
-            }
-        )
+    if field := build_proximity_field(symbols):  # 미진입 종목의 1선 근접도
+        fields.append(field)
 
     if (
         account

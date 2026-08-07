@@ -29,6 +29,7 @@ from trader.notifier import (
     build_alert_embed,
     build_batch_embed,
     build_daily_summary_embed,
+    build_proximity_embed,
     build_trade_embed,
     format_message,
     format_trade,
@@ -1252,6 +1253,42 @@ class Core:
 
     def request_daily_summary(self) -> None:
         self._bus.commands.put(bus.RequestDailySummary())
+
+    def proximity_embed(self, trade_date: str = "") -> dict:
+        """1선 근접도 조회 (봇 전용). 장중에는 메모리 값을 우선 반영한다."""
+        date = trade_date or self._date
+        if date == self._date:
+            self._flush_day_lows(force=True)
+        symbols, _ = self._store.daily_report(date)
+        return build_proximity_embed(date, symbols)
+
+    async def summary_embed(self, trade_date: str = "") -> dict:
+        """지정한 매매일의 요약 embed. 과거 날짜도 조회할 수 있다."""
+        date = trade_date or self._date
+        symbols, fills = self._store.daily_report(date)
+        if not symbols:
+            return {
+                "title": f"📊 {date} 매매 요약",
+                "description": "그 날짜에는 등록된 관심종목이 없습니다.",
+                "color": 0x616161,
+            }
+        if date == self._date:  # 오늘이면 계좌·주문가능금액을 최신으로
+            self._flush_day_lows(force=True)
+            deposit = None
+            if self._broker is not None:
+                try:
+                    self._invalidate_deposit()
+                    deposit = await self._get_deposit()
+                except BrokerError:
+                    deposit = None
+            return build_daily_summary_embed(
+                date, symbols, fills, deposit, await self.refresh_account()
+            )
+        return build_daily_summary_embed(date, symbols, fills)  # 과거는 기록만
+
+    def trade_dates(self, limit: int = 10) -> list[str]:
+        """최근 매매일 목록 (요약 조회 자동완성용)."""
+        return self._store.recent_trade_dates(limit)
 
     def request_chart(self, symbol: str, to_discord: bool = False) -> None:
         self._bus.commands.put(bus.ChartRequest(symbol, to_discord=to_discord))

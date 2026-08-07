@@ -347,13 +347,43 @@ class TraderBot:
                 "-# 현금 + 당일 매도대금 재사용분 (영웅문 [예수금] 탭과 다른 값입니다)"
             )
 
-        @tree.command(name="요약", description="오늘 매매 요약을 지금 발송합니다")
-        async def summary(interaction) -> None:
+        @tree.command(
+            name="요약", description="매매 요약을 봅니다 (날짜를 비우면 오늘)"
+        )
+        @app_commands.describe(날짜="YYYY-MM-DD (비우면 오늘)")
+        async def summary(interaction, 날짜: str = "") -> None:
             if not await guard(interaction):
                 return
-            core.request_daily_summary()
+            await interaction.response.defer()
+            try:
+                embed = await core.summary_embed(날짜.strip())
+            except ValueError:
+                await interaction.followup.send(
+                    "날짜는 YYYY-MM-DD 형식으로 입력하세요."
+                )
+                return
+            await interaction.followup.send(embed=self._to_embed(embed))
+
+        @summary.autocomplete("날짜")
+        async def summary_autocomplete(interaction, current: str):
+            """기록이 있는 매매일만 고르게 한다 — 빈 날짜를 조회할 일이 없다."""
+            if not config.allows(interaction.user.id):
+                return []
+            text = (current or "").strip()
+            return [
+                app_commands.Choice(name=d, value=d)
+                for d in core.trade_dates(25)
+                if text in d
+            ][:25]
+
+        @tree.command(
+            name="근접도", description="미진입 종목이 1선에 얼마나 가까운지 봅니다"
+        )
+        async def proximity(interaction) -> None:
+            if not await guard(interaction):
+                return
             await interaction.response.send_message(
-                "📊 요약을 발송합니다 — 잠시 후 이 채널에 올라옵니다.", ephemeral=True
+                embed=self._to_embed(core.proximity_embed())
             )
 
         @tree.command(name="차트", description="복기 차트를 생성해 이 채널로 보냅니다")

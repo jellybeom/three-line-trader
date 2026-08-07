@@ -370,6 +370,14 @@ class Store:
         ]
         return symbol_rows, fills
 
+    def recent_trade_dates(self, limit: int = 10) -> list[str]:
+        """기록이 있는 매매일 (최근 순)."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT trade_date FROM symbols ORDER BY trade_date DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [r["trade_date"] for r in rows]
+
     def slippage_report(self, since: str = "", until: str = "") -> list[dict]:
         """시장가 체결 오차 집계용 원자료 — 판정가·체결가가 모두 있는 체결만.
 
