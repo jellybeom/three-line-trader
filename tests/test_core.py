@@ -659,3 +659,108 @@ def test_편집시_태그를_비워도_기존_값이_유지된다(core):
     )  # 태그 없이 편집
     _, _, _, _, tags, base_date = core._store.load_all(core._date)["005930"]
     assert tags == "테마주" and base_date == "2026-08-05"
+
+
+# ── 태그 전달 / 삭제 알림 / 등록 알림 (2026-08-08) ─────────────
+
+
+def test_태그와_기준봉이_UI_로_전달된다(core):
+    """저장은 되는데 편집 창이 비어 보이던 버그 — PositionUpdate 에 실려야 한다."""
+    from trader.ui import bus as b
+
+    core._running = False
+    asyncio.run(
+        core._handle_command(
+            bus.Register(
+                "005930",
+                "삼성전자",
+                P,
+                Position(),
+                memo="메모",
+                tags="테마주,상한가",
+                base_date="2026-08-05",
+            )
+        )
+    )
+    updates = [e for e in _drain(core._bus) if isinstance(e, b.PositionUpdate)]
+    assert updates[-1].tags == "테마주,상한가"
+    assert updates[-1].base_date == "2026-08-05"
+    assert updates[-1].memo == "메모"
+
+
+def test_복원_후에도_태그가_UI_로_전달된다(core):
+    """재시작 경로(load_all → _emit_position)에서도 빠지지 않아야 한다."""
+    from trader.ui import bus as b
+
+    core._store.register_symbol(
+        core._date,
+        "005930",
+        "삼성전자",
+        P,
+        memo="메모",
+        tags="섹터주",
+        base_date="2026-08-04",
+    )
+    core._load_date(core._date)
+    core._emit_date_loaded()
+    updates = [e for e in _drain(core._bus) if isinstance(e, b.PositionUpdate)]
+    assert updates[-1].tags == "섹터주" and updates[-1].base_date == "2026-08-04"
+
+
+def test_삭제_알림에_종목명이_들어간다(core):
+    """삭제 시점엔 목록에서 이미 빠져 이름을 찾을 수 없다 — 따로 넘겨야 한다."""
+    from trader.ui import bus as b
+
+    core._bot = object()  # 알림 버퍼는 봇이 있을 때만 채워진다
+    core._notify_level = "전체"
+    core._running = False
+    asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, Position())))
+    _drain(core._bus)
+    core._notice_batch.clear()
+
+    asyncio.run(core._handle_command(bus.Delete("005930")))
+    assert core._notice_batch, "삭제 알림이 없음"
+    _, label, _ = core._notice_batch[-1]
+    assert label == "삼성전자(005930)"
+
+
+def test_CSV_등록_알림은_한_번만_발송된다(core):
+    """예전에는 결과 embed 와 건수 알림이 따로 나가 두 번 왔다."""
+    sent = []
+
+    class FakeBot:
+        async def send_embed(self, embed):
+            sent.append(embed)
+            return True
+
+        async def send_text(self, text):
+            sent.append(text)
+            return True
+
+    core._bot = FakeBot()
+    core._notify_level = "전체"
+    asyncio.run(
+        core._handle_command(
+            bus.RegistrationNotice(
+                (
+                    {
+                        "symbol": "005930",
+                        "name": "삼성전자",
+                        "tags": "테마주",
+                        "base_date": "2026-08-05",
+                        "memo": "",
+                        "qty": 10,
+                    },
+                ),
+                (),
+                2,
+                1,
+            )
+        )
+    )
+    asyncio.run(core._flush_notices())
+
+    assert len(sent) == 1
+    assert "등록 1종목" in sent[0]["title"]
+    assert "3선 미입력 2종목" in sent[0]["footer"]["text"]
+    assert "중복 제외 1종목" in sent[0]["footer"]["text"]

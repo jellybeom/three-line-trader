@@ -591,13 +591,10 @@ class App(tk.Tk):
             )
 
         # 팝업은 닫으면 사라진다 — 결과와 특히 '등록 실패' 는 로그·Discord 에도 남긴다
-        if added or rejected:
+        # 알림은 한 번만 — 등록 결과 embed 안에 미입력·중복 건수까지 담는다
+        if added or rejected or staged or skipped:
             self._bus.commands.put(
-                bus.RegistrationNotice(tuple(added), tuple(rejected))
-            )
-        if staged or skipped:
-            self._bus.commands.put(
-                bus.Notice("등록", f"3선 미입력 {staged}종목 · 중복 제외 {skipped}종목")
+                bus.RegistrationNotice(tuple(added), tuple(rejected), staged, skipped)
             )
 
         if rejected:

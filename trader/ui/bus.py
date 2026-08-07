@@ -249,6 +249,8 @@ class RegistrationNotice:
 
     rows: tuple
     warnings: tuple = ()
+    staged: int = 0  # 3선 미입력으로 대기 목록에 들어간 종목 수
+    skipped: int = 0  # 이미 등록돼 있어 건너뛴 종목 수
 
 
 @dataclass(frozen=True)

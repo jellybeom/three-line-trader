@@ -404,14 +404,22 @@ class Core:
                     return
                 name, _ = await asyncio.to_thread(self._broker.stock_info, s)
                 self._bus.events.put(bus.SymbolInfo(s, name))
-            case bus.RegistrationNotice(rows=rows, warnings=warns):
+            case bus.RegistrationNotice(
+                rows=rows, warnings=warns, staged=staged, skipped=skipped
+            ):
                 summary = f"CSV 불러오기 — 등록 {len(rows)}종목"
+                if staged:
+                    summary += f" · 3선 미입력 {staged}종목"
+                if skipped:
+                    summary += f" · 중복 제외 {skipped}종목"
                 if warns:
                     summary += f" · 실패 {len(warns)}종목"
                 self._log("시스템", "등록", summary, notify=False)
                 if self._bot is not None:
                     await self._send_embed(
-                        build_registration_embed(self._date, list(rows), list(warns))
+                        build_registration_embed(
+                            self._date, list(rows), list(warns), staged, skipped
+                        )
                     )
             case bus.Notice(kind=kind, text=text, symbol=sym):
                 self._log(sym, kind, text)
@@ -508,11 +516,12 @@ class Core:
                         s, "에러", "감시 중에는 삭제할 수 없습니다 — 먼저 중지하세요"
                     )
                     return
+                name = self._entries.get(s, {}).get("name", "")
                 self._store.delete_symbol(self._date, s)
                 self._entries.pop(s, None)
                 self._clear_block(s)
                 self._bus.events.put(bus.SymbolRemoved(s))
-                self._log(s, "삭제", "관심종목 제외")
+                self._log(s, "삭제", "관심종목 제외", name=name)
                 await self._sync_watcher_symbols()
             case bus.Reset(symbol=s) if s in self._entries:
                 try:
@@ -1764,10 +1773,18 @@ class Core:
             self._emit_position(symbol)
 
     def _emit_position(self, symbol: str) -> None:
+        # 태그·기준봉도 함께 보낸다 — UI 가 편집 창을 채울 때 쓰는 유일한 경로다.
+        # 빠뜨리면 저장은 되는데 편집 창은 비어 보인다(2026-08-08 실측 버그).
         e = self._entries[symbol]
         self._bus.events.put(
             bus.PositionUpdate(
-                symbol, e["name"], e["pos"], e["params"], e.get("memo", "")
+                symbol,
+                e["name"],
+                e["pos"],
+                e["params"],
+                e.get("memo", ""),
+                e.get("tags", ""),
+                e.get("base_date", ""),
             )
         )
 
@@ -1835,7 +1852,10 @@ class Core:
             )
         )
 
-    def _log(self, symbol: str, kind: str, text: str, notify: bool = True) -> None:
+    def _log(
+        self, symbol: str, kind: str, text: str, notify: bool = True, name: str = ""
+    ) -> None:
+        """이벤트 기록. name 은 종목이 이미 목록에서 빠진 뒤 남기는 로그(삭제 등)용."""
         self._store.log(self._date, symbol, kind, text)
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
         if not (
@@ -1843,7 +1863,7 @@ class Core:
         ):
             return
         if kind in _BATCH_KINDS:  # 여러 건이 몰리는 정보성 알림 → 모아서 한 장으로
-            name = self._entries.get(symbol, {}).get("name", "")
+            name = name or self._entries.get(symbol, {}).get("name", "")
             label = f"{name}({symbol})" if name and symbol != "시스템" else symbol
             self._notice_batch.append((kind, label, text))
             self._notice_at = time.monotonic()

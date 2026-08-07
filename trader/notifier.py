@@ -188,7 +188,11 @@ def base_date_label(base_date: str, trade_date: str) -> str:
 
 
 def build_registration_embed(
-    trade_date: str, rows: list[dict], warnings: list[str] | None = None
+    trade_date: str,
+    rows: list[dict],
+    warnings: list[str] | None = None,
+    staged: int = 0,
+    skipped: int = 0,
 ) -> dict:
     """관심종목 등록 알림 — 종목마다 선정 근거(태그·기준봉)를 함께 보여준다.
 
@@ -219,11 +223,18 @@ def build_registration_embed(
     if len(rows) > 40:
         lines.append(f"…외 {len(rows) - 40}종목")
 
+    extra = []
+    if staged:
+        extra.append(f"3선 미입력 {staged}종목")
+    if skipped:
+        extra.append(f"중복 제외 {skipped}종목")
     embed = {
         "title": f"➕ 관심종목 등록 {len(rows)}종목 · {trade_date}",
         "description": "\n".join(lines)[:4000] or "\u200b",
         "color": _COLOR_INFO,
     }
+    if extra:
+        embed["footer"] = {"text": " · ".join(extra)}
     if warnings:
         embed["fields"] = [
             {
