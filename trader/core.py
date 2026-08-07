@@ -432,7 +432,14 @@ class Core:
                 self._bus.events.put(bus.NotifyLevel(lv))
                 self._log("시스템", "설정", f"Discord 알림 수준: {lv}")
             case bus.Register(
-                symbol=s, name=n, params=p, position=pos, edit=edit, memo=memo
+                symbol=s,
+                name=n,
+                params=p,
+                position=pos,
+                edit=edit,
+                memo=memo,
+                tags=tags,
+                base_date=base_date,
             ):
                 if self._running:
                     self._log(
@@ -453,7 +460,12 @@ class Core:
                         self._log(s, "에러", "편집 대상 종목이 없습니다")
                         return
                     pos = self._entries[s]["pos"]
-                self._store.register_symbol(self._date, s, n, p, pos, memo=memo)
+                if s in self._entries:  # 편집에서 비워 보내면 기존 값을 유지한다
+                    tags = tags or self._entries[s].get("tags", "")
+                    base_date = base_date or self._entries[s].get("base_date", "")
+                self._store.register_symbol(
+                    self._date, s, n, p, pos, memo=memo, tags=tags, base_date=base_date
+                )
                 price = (
                     self._entries[s]["price"] if s in self._entries else pos.avg_price
                 )
@@ -463,9 +475,13 @@ class Core:
                     "pos": pos,
                     "price": price,
                     "memo": memo,
+                    "tags": tags,
+                    "base_date": base_date,
                     "high": pos.high_price,
                     "low": pos.low_price,
                     "day_low": pos.day_low,
+                    "day_open": pos.day_open,
+                    "day_close": pos.day_close,
                 }
                 self._clear_block(s)
                 self._emit_position(s)
@@ -713,6 +729,11 @@ class Core:
         # 당일 최저가는 진입 전에도 기록한다 — "1선에 얼마나 근접했나" 를 알아야
         # 진입이 없는 날이 '설정이 보수적' 인지 '시장이 안 맞는' 것인지 구분된다.
         e["day_low"] = min(e.get("day_low") or tick.price, tick.price)
+        # 당일 등락률 기준 — 감시 시작 후 첫 체결가와 마지막 체결가.
+        # 내가 고른 종목군이 그날 어땠는지(벤치마크) 계산에 쓴다.
+        if not e.get("day_open"):
+            e["day_open"] = tick.price
+        e["day_close"] = tick.price
         if pos.total_bought and pos.state is not State.CLOSED:  # 보유 구간만 추적
             e["high"] = max(e.get("high") or 0.0, tick.price)
             e["low"] = min(e.get("low") or tick.price, tick.price)
@@ -734,6 +755,8 @@ class Core:
                 high_price=e.get("high") or 0.0,
                 low_price=e.get("low") or 0.0,
                 day_low=e.get("day_low") or 0.0,
+                day_open=e.get("day_open") or 0.0,
+                day_close=e.get("day_close") or 0.0,
             )
             self._store.save_transition(
                 self._date, symbol, from_state, e["pos"], d, price
@@ -964,6 +987,8 @@ class Core:
             high_price=e.get("high") or 0.0,
             low_price=e.get("low") or 0.0,
             day_low=e.get("day_low") or 0.0,
+            day_open=e.get("day_open") or 0.0,
+            day_close=e.get("day_close") or 0.0,
         )
         self._store.save_transition(
             self._date,
@@ -1353,9 +1378,12 @@ class Core:
         self._day_low_at = now
         for symbol, e in self._entries.items():
             low = e.get("day_low") or 0.0
+            close = e.get("day_close") or 0.0
             pos = e["pos"]
-            if low and pos.day_low != low:
-                e["pos"] = replace(pos, day_low=low)
+            if low and (pos.day_low != low or pos.day_close != close):
+                e["pos"] = replace(
+                    pos, day_low=low, day_open=e.get("day_open") or 0.0, day_close=close
+                )
                 self._store.save_position(self._date, symbol, e["pos"])
 
     async def _tick_auto_connect(self) -> None:
@@ -1686,7 +1714,7 @@ class Core:
         self._entries = {}
         self._block_logged.clear()
         self._block_notified.clear()
-        for symbol, (name, params, pos, memo) in self._store.load_all(
+        for symbol, (name, params, pos, memo, tags, base_date) in self._store.load_all(
             trade_date
         ).items():
             self._entries[symbol] = {
@@ -1695,9 +1723,13 @@ class Core:
                 "pos": pos,
                 "price": pos.avg_price,
                 "memo": memo,
+                "tags": tags,
+                "base_date": base_date,
                 "high": pos.high_price,
                 "low": pos.low_price,
                 "day_low": pos.day_low,
+                "day_open": pos.day_open,
+                "day_close": pos.day_close,
             }
 
     def _warn_restored_pending(self) -> None:

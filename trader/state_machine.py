@@ -105,6 +105,8 @@ class Position:
     high_price: float = 0.0  # 보유 중 최고가 (MFE 계산용, 0 = 미기록)
     low_price: float = 0.0  # 보유 중 최저가 (MAE 계산용, 0 = 미기록)
     day_low: float = 0.0  # 감시 중 당일 최저가 (진입 전 포함 — 1선 근접도 분석용)
+    day_open: float = 0.0  # 감시 중 첫 체결가 (당일 등락률 = day_close/day_open - 1)
+    day_close: float = 0.0  # 감시 중 마지막 체결가
 
     def __post_init__(self) -> None:
         if self.state in _HOLDING_STATES:

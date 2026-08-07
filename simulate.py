@@ -57,7 +57,7 @@ class SimCore:
         """해당 매매일의 관심종목 리스트를 로드한다."""
         self._date = trade_date
         self._entries = {}
-        for symbol, (name, params, pos, memo) in self._store.load_all(
+        for symbol, (name, params, pos, memo, *_) in self._store.load_all(
             trade_date
         ).items():
             price = pos.avg_price if pos.avg_price else params.line1 * 1.03

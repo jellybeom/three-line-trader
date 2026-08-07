@@ -235,3 +235,77 @@ def _drain_commands(b):
     while not b.commands.empty():
         out.append(b.commands.get_nowait())
     return out
+
+
+# ── 기준봉 날짜 위젯 (2026-08-07) ─────────────────────────────
+
+
+def _dialog(app, edit=None):
+    from trader.ui import bus
+    from trader.ui.register_dialog import RegisterDialog
+
+    sent = []
+    funds = bus.Funds(
+        total=1_000_000, max_symbols=5, buy1_amount=100_000, buy2_amount=100_000
+    )
+    dialog = RegisterDialog(app, on_submit=sent.append, funds=funds, edit=edit)
+    app.update()
+    return dialog, sent
+
+
+def test_신규_등록의_기준봉은_비어있다(app):
+    """달력 위젯이 오늘 날짜를 자동으로 채우면, 모르는 기준봉이 오늘로 기록된다."""
+    dialog, _ = _dialog(app)
+    assert dialog._vars["base_date"].get() == ""
+
+
+def test_기준봉을_고르고_지울_수_있다(app):
+    dialog, sent = _dialog(app)
+    if dialog._base_date is None:
+        pytest.skip("tkcalendar 미설치")
+
+    dialog._base_date.set_date("2026-08-05")
+    app.update()
+    assert dialog._vars["base_date"].get() == "2026-08-05"
+
+    dialog._vars["base_date"].set("")  # '지우기' 버튼과 같은 동작
+    app.update()
+    assert dialog._vars["base_date"].get() == ""
+
+
+def test_선택한_기준봉과_태그가_명령에_실린다(app):
+    dialog, sent = _dialog(app)
+    dialog._vars["symbol"].set("005930")
+    dialog._vars["name"].set("삼성전자")
+    for key, value in (("line1", "10,000"), ("line2", "9,000"), ("line3", "8,000")):
+        dialog._vars[key].set(value)
+    dialog._vars["base_date"].set("2026-08-05")
+    dialog._tag_vars["테마주"].set(True)
+    dialog._submit()
+
+    assert sent[-1].base_date == "2026-08-05"
+    assert sent[-1].tags == "테마주"
+
+
+def test_편집시_기존_기준봉이_유지된다(app):
+    """생성 직후 비우는 동작이 프리필을 덮어쓰면 안 된다."""
+    from trader.state_machine import Params, Position
+
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=100_000
+    )
+    dialog, _ = _dialog(
+        app,
+        edit=(
+            "005930",
+            "삼성전자",
+            params,
+            Position(),
+            "메모",
+            "테마주,상한가",
+            "2026-07-30",
+        ),
+    )
+    app.update()
+    assert dialog._vars["base_date"].get() == "2026-07-30"
+    assert {t for t, v in dialog._tag_vars.items() if v.get()} == {"테마주", "상한가"}

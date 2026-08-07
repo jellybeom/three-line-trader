@@ -27,6 +27,8 @@ class PositionUpdate:
     position: Position
     params: Params
     memo: str = ""
+    tags: str = ""  # 종목 선정 근거 (편집 창 프리필용)
+    base_date: str = ""  # 기준봉 날짜
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,10 @@ class Register:
     position: Position | None
     edit: bool = False
     memo: str = ""
+    # 종목 선정 근거 — 기준봉(급등일) 시점의 판단이라 종목에 고정된다.
+    # 쉼표 구분 문자열 (예: "KOSPI상승장,테마주")
+    tags: str = ""
+    base_date: str = ""  # 기준봉 날짜 (YYYY-MM-DD)
 
 
 @dataclass(frozen=True)

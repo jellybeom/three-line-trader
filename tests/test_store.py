@@ -41,7 +41,7 @@ def reopen(store: Store, tmp_path) -> Store:
 def test_등록_후_복원하면_설정과_포지션이_그대로(store, tmp_path):
     store.register_symbol(D, "005930", "삼성전자", P)
     store = reopen(store, tmp_path)
-    name, params, pos, _memo = store.load_all(D)["005930"]
+    name, params, pos, _memo, *_ = store.load_all(D)["005930"]
     assert name == "삼성전자"
     assert params == P  # 3선, 수량, 익절률/비중, 버퍼 전부 일치
     assert pos == Position()  # 신규 등록 기본값은 '대기'
@@ -59,7 +59,7 @@ def test_오버나이트_상태로_등록하면_그_상태로_복원(store, tmp_
     )
     store.register_symbol(D, "005930", "삼성전자", P, overnight)
     store = reopen(store, tmp_path)
-    _, _, pos, _ = store.load_all(D)["005930"]
+    _, _, pos, _, *_ = store.load_all(D)["005930"]
     assert pos == overnight
     store.close()
 
@@ -74,7 +74,7 @@ def test_재등록하면_설정이_대체되고_이전_상태가_이벤트에_�
         buy2_amount=500_000,
     )
     store.register_symbol(D, "005930", "삼성전자", p2)
-    _, params, _, _ = store.load_all(D)["005930"]
+    _, params, _, _, *_ = store.load_all(D)["005930"]
     assert params == p2
     events = store.fetch_events("005930")
     assert len(events) == 2
@@ -99,7 +99,7 @@ def test_전이_저장은_포지션과_이벤트를_함께_남김(store):
     pos = apply_fill(mark_pending(pos), d, fill_price=9_950, fill_qty=d.qty)
     store.save_transition(D, "005930", State.WAITING, pos, d, price=9_950)
 
-    _, _, restored, _ = store.load_all(D)["005930"]
+    _, _, restored, _, *_ = store.load_all(D)["005930"]
     assert restored.state is State.BUY1 and restored.avg_price == 9_950
     ev = store.fetch_events("005930")[-1]
     assert (ev["kind"], ev["from_state"], ev["to_state"]) == (
@@ -120,7 +120,7 @@ def test_전체_사이클_후_재시작해도_최종_상태_복원(store, tmp_pa
         state_before = pos.state
 
     store = reopen(store, tmp_path)  # 장애 후 재시작
-    _, _, restored, _ = store.load_all(D)["005930"]
+    _, _, restored, _, *_ = store.load_all(D)["005930"]
     assert restored.state is State.CLOSED and restored.remaining == 0
     assert len(store.fetch_events("005930")) == 5  # 등록 1 + 전이 4
     store.close()
@@ -134,7 +134,7 @@ def test_주문_전송_직후_죽어도_pending이_복원됨(store, tmp_path):
     store.save_position(D, "005930", pos)
 
     store = reopen(store, tmp_path)
-    _, _, restored, _ = store.load_all(D)["005930"]
+    _, _, restored, _, *_ = store.load_all(D)["005930"]
     assert restored.pending is True
     store.close()
 
@@ -173,7 +173,7 @@ def test_관리자_리셋은_종료가_아니면_거부되고_DB도_불변(store
     store.register_symbol(D, "005930", "삼성전자", P, holding)
     with pytest.raises(ValueError):
         store.admin_reset(D, "005930", holding)
-    _, _, pos, _ = store.load_all(D)["005930"]
+    _, _, pos, _, *_ = store.load_all(D)["005930"]
     assert pos == holding  # 실패한 리셋이 DB 를 바꾸지 않음
 
 
@@ -210,8 +210,8 @@ def test_같은_종목도_매매일이_다르면_독립(store):
         p_next,
         Position(state=State.BUY1, avg_price=10_000, total_bought=100, remaining=60),
     )
-    _, params_17, pos_17, _ = store.load_all("2026-07-17")["005930"]
-    _, params_18, pos_18, _ = store.load_all("2026-07-18")["005930"]
+    _, params_17, pos_17, _, *_ = store.load_all("2026-07-17")["005930"]
+    _, params_18, pos_18, _, *_ = store.load_all("2026-07-18")["005930"]
     assert params_17 == P and pos_17 == Position()  # 전날 리스트는 그대로
     assert params_18 == p_next and pos_18.remaining == 60  # 다음날은 오버나이트 상태
     assert store.list_dates() == ["2026-07-18", "2026-07-17"]  # 최신순
@@ -221,7 +221,7 @@ def test_실현손익이_저장되고_복원됨(store, tmp_path):
     pos = Position(state=State.CLOSED, realized_pnl=44_000)
     store.register_symbol(D, "005930", "삼성전자", P, pos)
     store = reopen(store, tmp_path)
-    _, _, restored, _ = store.load_all(D)["005930"]
+    _, _, restored, _, *_ = store.load_all(D)["005930"]
     assert restored.realized_pnl == 44_000
     store.close()
 
@@ -428,3 +428,73 @@ def test_이관_경로가_없는_버전은_종전대로_안내한다(tmp_path):
     con.close()
     with pytest.raises(RuntimeError, match="스키마 버전 불일치"):
         Store(path)
+
+
+# ── 선정 태그 · 벤치마크 (2026-08-07) ─────────────────────────
+
+
+def test_태그와_기준봉이_저장되고_복원된다(store):
+    p = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=100_000
+    )
+    store.register_symbol(
+        D,
+        "005930",
+        "삼성전자",
+        p,
+        memo="급등주",
+        tags="KOSPI상승장,테마주",
+        base_date="2026-08-05",
+    )
+    name, _, _, memo, tags, base_date = store.load_all(D)["005930"]
+    assert name == "삼성전자" and memo == "급등주"
+    assert tags == "KOSPI상승장,테마주" and base_date == "2026-08-05"
+
+    rows, _ = store.daily_report(D)
+    assert rows[0]["tags"] == "KOSPI상승장,테마주"
+
+
+def test_당일_시가_종가가_저장된다(store):
+    """관심종목 평균 등락률(벤치마크) 계산의 재료."""
+    p = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=100_000
+    )
+    pos = Position(day_low=9_800, day_open=10_200, day_close=10_500)
+    store.register_symbol(D, "005930", "삼성전자", p, pos)
+    _, _, restored, *_ = store.load_all(D)["005930"]
+    assert restored.day_open == 10_200 and restored.day_close == 10_500
+
+    rows, _ = store.daily_report(D)
+    assert rows[0]["day_open"] == 10_200 and rows[0]["day_close"] == 10_500
+
+
+def test_v9_DB도_데이터를_지키며_이관된다(tmp_path):
+    import sqlite3
+
+    import trader.store as store_mod
+
+    path = tmp_path / "v9.db"
+    schema_v9 = store_mod._SCHEMA
+    for line in (
+        "    tags TEXT NOT NULL DEFAULT '',"
+        "      -- 종목 선정 근거 (쉼표 구분, 예: 'KOSPI상승장,테마주')\n",
+        "    base_date TEXT NOT NULL DEFAULT '', "
+        "-- 기준봉 날짜 (YYYY-MM-DD) — 선정의 기준이 된 급등일\n",
+        "    day_open     REAL NOT NULL DEFAULT 0,   "
+        "-- 감시 중 첫 체결가 (당일 등락률 기준)\n",
+        "    day_close    REAL NOT NULL DEFAULT 0,   -- 감시 중 마지막 체결가\n",
+    ):
+        schema_v9 = schema_v9.replace(line, "")
+    con = sqlite3.connect(path)
+    con.executescript(schema_v9)
+    con.execute("PRAGMA user_version=9")
+    con.execute("""INSERT INTO events (ts, trade_date, symbol, kind, reason)
+                   VALUES ('t', '2026-08-06', '005930', '체결', '매수 10주')""")
+    con.commit()
+    con.close()
+
+    migrated = Store(path)
+    cols = {r[1] for r in migrated._conn.execute("PRAGMA table_info(symbols)")}
+    assert {"tags", "base_date"} <= cols
+    assert len(migrated.recent_events("2026-08-06")) == 1  # 기존 이력 보존
+    migrated.close()

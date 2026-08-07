@@ -89,6 +89,9 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
     code_idx = next((i for i, c in enumerate(header) if "종목코드" in c), None)
     name_idx = next((i for i, c in enumerate(header) if "종목명" in c), None)
     memo_idx = next((i for i, c in enumerate(header) if "메모" in c), None)
+    # 선정 태그·기준봉 날짜 (선택 열) — 없으면 빈 값으로 둔다
+    tag_idx = next((i for i, c in enumerate(header) if "태그" in c), None)
+    base_idx = next((i for i, c in enumerate(header) if "기준봉" in c), None)
     line_idxs = tuple(
         next((i for i, c in enumerate(header) if f"{n}선" in c), None)
         for n in (1, 2, 3)
@@ -103,7 +106,14 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
             seen.add(code)
             lines = parse_lines(row, line_idxs) if has_lines else None
             result.append(
-                (code, cell(row, name_idx) or code, cell(row, memo_idx), lines)
+                (
+                    code,
+                    cell(row, name_idx) or code,
+                    cell(row, memo_idx),
+                    lines,
+                    cell(row, tag_idx).replace(" ", "").replace("#", ""),
+                    cell(row, base_idx),
+                )
             )
         return result
 
@@ -123,7 +133,7 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
             break
         if code and code not in seen:
             seen.add(code)
-            result.append((code, name or code, "", None))
+            result.append((code, name or code, "", None, "", ""))
     return result
 
 
@@ -476,12 +486,12 @@ class App(tk.Tk):
             return
         if symbol not in self._registry:
             return
-        name, params, pos, memo = self._registry[symbol]
+        name, params, pos, memo, tags, base_date = self._registry[symbol]
         RegisterDialog(
             self,
             on_submit=self._submit_register,
             funds=self._funds,
-            edit=(symbol, name, params, pos, memo),
+            edit=(symbol, name, params, pos, memo, tags, base_date),
         )
 
     def _import_csv(self) -> None:
@@ -503,7 +513,7 @@ class App(tk.Tk):
             return
         registered = staged = 0
         rejected: list[str] = []  # 값이 잘못돼 등록하지 못한 종목 (사용자 입력 실수)
-        for code, name, memo, lines in items:
+        for code, name, memo, lines, tags, base_date in items:
             if code in self._registry or code in self._staged:
                 continue
             if lines:  # CSV 에 1/2/3선이 채워져 있으면 곧바로 정식 등록
@@ -526,7 +536,15 @@ class App(tk.Tk):
                     )
                     continue
                 self._bus.commands.put(
-                    bus.Register(code, name, params, Position(), memo=memo)
+                    bus.Register(
+                        code,
+                        name,
+                        params,
+                        Position(),
+                        memo=memo,
+                        tags=tags,
+                        base_date=base_date,
+                    )
                 )
                 registered += 1
             else:
@@ -708,7 +726,7 @@ class App(tk.Tk):
     def _manual_sell(self, symbol: str) -> None:
         if symbol in self._staged or symbol not in self._registry:
             return
-        name, _, pos, _ = self._registry[symbol]
+        name, _, pos, *_ = self._registry[symbol]
         if pos.remaining <= 0:
             messagebox.showinfo("청산 불가", "청산할 잔량이 없습니다.")
             return
@@ -813,10 +831,16 @@ class App(tk.Tk):
     def _dispatch(self, ev) -> None:
         match ev:
             case bus.PositionUpdate(
-                symbol=s, name=n, position=p, params=prm, memo=memo
+                symbol=s,
+                name=n,
+                position=p,
+                params=prm,
+                memo=memo,
+                tags=tags,
+                base_date=base_date,
             ):
                 self._staged.pop(s, None)  # 3선 입력 완료 → 대기 해제
-                self._registry[s] = (n, prm, p, memo)
+                self._registry[s] = (n, prm, p, memo, tags, base_date)
                 self.positions.upsert(s, n, p, prm, memo)
                 self._update_summary()
                 self._update_pnl()
@@ -909,8 +933,8 @@ class App(tk.Tk):
     def _update_summary(self) -> None:
         holding = sum(
             1
-            for _, _, p, _ in self._registry.values()
-            if p.state not in (State.WAITING, State.CLOSED)
+            for entry in self._registry.values()
+            if entry[2].state not in (State.WAITING, State.CLOSED)
         )
         self._summary.configure(
             text=f"감시 {len(self._registry)}종목 · 보유 {holding}종목"
@@ -948,9 +972,10 @@ class App(tk.Tk):
         self.events.deselect()
 
     def _update_pnl(self) -> None:
-        realized = sum(p.realized_pnl for _, _, p, _ in self._registry.values())
+        realized = sum(entry[2].realized_pnl for entry in self._registry.values())
         unrealized = invested = 0.0
-        for s, (_, _, p, _) in self._registry.items():
+        for s, entry in self._registry.items():
+            p = entry[2]
             if p.remaining and s in self._last_price:
                 unrealized += (self._last_price[s] - p.avg_price) * p.remaining
             invested += p.avg_price * p.total_bought

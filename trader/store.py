@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     tp_rate1  REAL NOT NULL, tp_rate2  REAL NOT NULL, tp_rate3  REAL NOT NULL,
     tp_ratio1 REAL NOT NULL, tp_ratio2 REAL NOT NULL, tp_ratio3 REAL NOT NULL,
     memo TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',      -- 종목 선정 근거 (쉼표 구분, 예: 'KOSPI상승장,테마주')
+    base_date TEXT NOT NULL DEFAULT '', -- 기준봉 날짜 (YYYY-MM-DD) — 선정의 기준이 된 급등일
     updated_at TEXT NOT NULL,
     PRIMARY KEY (trade_date, symbol)
 );
@@ -47,6 +49,8 @@ CREATE TABLE IF NOT EXISTS positions (
     high_price   REAL NOT NULL DEFAULT 0,   -- 보유 중 최고가 (MFE)
     low_price    REAL NOT NULL DEFAULT 0,   -- 보유 중 최저가 (MAE)
     day_low      REAL NOT NULL DEFAULT 0,   -- 감시 중 당일 최저가 (진입 전 포함, 근접도 분석)
+    day_open     REAL NOT NULL DEFAULT 0,   -- 감시 중 첫 체결가 (당일 등락률 기준)
+    day_close    REAL NOT NULL DEFAULT 0,   -- 감시 중 마지막 체결가
     pending      INTEGER NOT NULL DEFAULT 0,
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (trade_date, symbol),
@@ -93,13 +97,19 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 9  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 10  # 스키마 변경 시 1 증가.
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
 # 여기 없는 버전 차이는 데이터 구조가 바뀐 것이므로 종전대로 명확한 에러로 안내한다.
 _MIGRATIONS: dict[int, tuple[str, ...]] = {
     8: ("ALTER TABLE events ADD COLUMN trigger_price REAL",),  # 슬리피지 기록용
     9: ("ALTER TABLE positions ADD COLUMN day_low REAL",),  # 1선 근접도 분석용
+    10: (  # 매매일지: 종목 선정 근거(태그·기준봉)와 벤치마크(시가·종가)
+        "ALTER TABLE symbols ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE symbols ADD COLUMN base_date TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE positions ADD COLUMN day_open REAL",
+        "ALTER TABLE positions ADD COLUMN day_close REAL",
+    ),
 }
 
 
@@ -167,6 +177,8 @@ class Store:
         params: Params,
         position: Position = Position(),
         memo: str = "",
+        tags: str = "",
+        base_date: str = "",
     ) -> None:
         """관심종목 등록/갱신. 기존 설정과 포지션을 통째로 대체한다.
 
@@ -180,8 +192,8 @@ class Store:
                 """INSERT INTO symbols
                    (trade_date, symbol, name, line1, line2, line3, buy1_amount, buy2_amount,
                     tp_rate1, tp_rate2, tp_rate3, tp_ratio1, tp_ratio2, tp_ratio3,
-                    memo, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    memo, tags, base_date, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(trade_date, symbol) DO UPDATE SET
                     name=excluded.name, line1=excluded.line1, line2=excluded.line2,
                     line3=excluded.line3, buy1_amount=excluded.buy1_amount,
@@ -189,7 +201,8 @@ class Store:
                     tp_rate1=excluded.tp_rate1, tp_rate2=excluded.tp_rate2,
                     tp_rate3=excluded.tp_rate3, tp_ratio1=excluded.tp_ratio1,
                     tp_ratio2=excluded.tp_ratio2, tp_ratio3=excluded.tp_ratio3,
-                    memo=excluded.memo,
+                    memo=excluded.memo, tags=excluded.tags,
+                    base_date=excluded.base_date,
                     updated_at=excluded.updated_at""",
                 (
                     trade_date,
@@ -203,6 +216,8 @@ class Store:
                     *params.tp_rates,
                     *params.tp_ratios,
                     memo,
+                    tags,
+                    base_date,
                     _now(),
                 ),
             )
@@ -231,16 +246,18 @@ class Store:
 
     # ── 복원 ────────────────────────────────────────────────────
 
-    def load_all(self, trade_date: str) -> dict[str, tuple[str, Params, Position, str]]:
-        """해당 매매일의 전 종목 복원: {종목코드: (종목명, 설정, 포지션, 메모)}.
+    def load_all(
+        self, trade_date: str
+    ) -> dict[str, tuple[str, Params, Position, str, str, str]]:
+        """해당 매매일의 전 종목 복원: {종목코드: (종목명, 설정, 포지션, 메모, 태그, 기준봉일)}.
 
         Position 생성자 검증을 통과하지 못하는 행이 있으면 즉시 실패한다.
         """
-        result: dict[str, tuple[str, Params, Position, str]] = {}
+        result: dict[str, tuple[str, Params, Position, str, str, str]] = {}
         rows = self._conn.execute(
             """SELECT s.*, p.state, p.avg_price, p.total_bought, p.remaining,
                       p.realized_pnl, p.fees, p.high_price, p.low_price, p.day_low,
-                      p.pending
+                      p.day_open, p.day_close, p.pending
                FROM symbols s JOIN positions p USING(trade_date, symbol)
                WHERE s.trade_date=?""",
             (trade_date,),
@@ -267,12 +284,21 @@ class Store:
                     high_price=r["high_price"],
                     low_price=r["low_price"],
                     day_low=r["day_low"] or 0.0,
+                    day_open=r["day_open"] or 0.0,
+                    day_close=r["day_close"] or 0.0,
                 )
             except ValueError as e:
                 raise ValueError(
                     f"복원 실패 — 종목 {r['symbol']} 데이터 이상: {e}"
                 ) from e
-            result[r["symbol"]] = (r["name"], params, position, r["memo"])
+            result[r["symbol"]] = (
+                r["name"],
+                params,
+                position,
+                r["memo"],
+                r["tags"] or "",
+                r["base_date"] or "",
+            )
         return result
 
     # ── 상태 변경 기록 ──────────────────────────────────────────
@@ -351,9 +377,10 @@ class Store:
         symbol_rows = [
             dict(r)
             for r in self._conn.execute(
-                """SELECT s.symbol, s.name, s.memo, s.line1, p.state, p.avg_price,
-                      p.total_bought, p.remaining, p.realized_pnl, p.fees,
-                      p.high_price, p.low_price, p.day_low
+                """SELECT s.symbol, s.name, s.memo, s.line1, s.tags, s.base_date,
+                      p.state, p.avg_price, p.total_bought, p.remaining,
+                      p.realized_pnl, p.fees, p.high_price, p.low_price,
+                      p.day_low, p.day_open, p.day_close
                FROM symbols s JOIN positions p USING(trade_date, symbol)
                WHERE s.trade_date=? ORDER BY s.symbol""",
                 (trade_date,),
@@ -509,14 +536,16 @@ class Store:
         self._conn.execute(
             """INSERT INTO positions
                (trade_date, symbol, state, avg_price, total_bought, remaining,
-                realized_pnl, fees, high_price, low_price, day_low, pending, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                realized_pnl, fees, high_price, low_price, day_low, day_open, day_close,
+                pending, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(trade_date, symbol) DO UPDATE SET
                 state=excluded.state, avg_price=excluded.avg_price,
                 total_bought=excluded.total_bought, remaining=excluded.remaining,
                 realized_pnl=excluded.realized_pnl, fees=excluded.fees,
                 high_price=excluded.high_price, low_price=excluded.low_price,
-                day_low=excluded.day_low,
+                day_low=excluded.day_low, day_open=excluded.day_open,
+                day_close=excluded.day_close,
                 pending=excluded.pending, updated_at=excluded.updated_at""",
             (
                 trade_date,
@@ -530,6 +559,8 @@ class Store:
                 pos.high_price,
                 pos.low_price,
                 pos.day_low,
+                pos.day_open,
+                pos.day_close,
                 int(pos.pending),
                 _now(),
             ),

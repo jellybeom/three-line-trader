@@ -111,7 +111,7 @@ def test_체결통보_수신시_상태_확정과_기록(core):
     pos = core._entries["005930"]["pos"]
     assert pos.state is State.BUY1 and pos.pending is False
     assert pos.avg_price == 9_960  # 평단은 실제 체결가 기준
-    _, _, restored, _ = core._store.load_all(core._date)["005930"]
+    _, _, restored, _, *_ = core._store.load_all(core._date)["005930"]
     assert restored == pos  # DB 에도 확정 상태 저장
 
 
@@ -624,3 +624,38 @@ def test_최저가_기록은_판정에_영향을_주지_않는다(core):
     asyncio.run(tick(core, 10_500))
     asyncio.run(tick(core, 9_950))  # 1선 이탈 → 정상 진입
     assert core._broker.orders == [("매수", "005930", 100)]
+
+
+def test_감시_중_시가와_종가가_기록된다(core):
+    """관심종목 평균 등락률(벤치마크)의 재료 — 진입하지 않은 종목도 필요하다."""
+    register(core)
+    for price in (10_500, 10_200, 10_800):
+        asyncio.run(tick(core, price))
+    e = core._entries["005930"]
+    assert e["day_open"] == 10_500 and e["day_close"] == 10_800
+
+    core._flush_day_lows(force=True)
+    rows, _ = core._store.daily_report(core._date)
+    assert rows[0]["day_open"] == 10_500 and rows[0]["day_close"] == 10_800
+
+
+def test_편집시_태그를_비워도_기존_값이_유지된다(core):
+    """태그는 기준봉 시점의 판단이라, 3선만 손볼 때 지워지면 안 된다."""
+    core._running = False
+    asyncio.run(
+        core._handle_command(
+            bus.Register(
+                "005930",
+                "삼성전자",
+                P,
+                Position(),
+                tags="테마주",
+                base_date="2026-08-05",
+            )
+        )
+    )
+    asyncio.run(
+        core._handle_command(bus.Register("005930", "삼성전자", P, None, edit=True))
+    )  # 태그 없이 편집
+    _, _, _, _, tags, base_date = core._store.load_all(core._date)["005930"]
+    assert tags == "테마주" and base_date == "2026-08-05"

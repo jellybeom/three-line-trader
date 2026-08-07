@@ -5,6 +5,11 @@ import pytest
 from trader.ui.app import parse_watchlist_csv
 
 
+def head4(path):
+    """앞 4개 필드(코드·이름·메모·3선)만 비교 — 태그·기준봉은 별도 테스트에서 다룬다."""
+    return [row[:4] for row in parse_watchlist_csv(path)]
+
+
 def _write(tmp_path, content: str, encoding: str = "cp949"):
     p = tmp_path / "watch.csv"
     p.write_bytes(content.encode(encoding))
@@ -18,7 +23,7 @@ def test_영웅문_실물_형식_헤더와_따옴표_접두(tmp_path):
         '신,,모나리자,"2,170","29.94",1760 2170 1760 2170,"26,381",,\'012690\n'
     )
     path = _write(tmp_path, content)
-    assert parse_watchlist_csv(path) == [
+    assert head4(path) == [
         ("096770", "SK이노베이션", "급등주", None),
         ("012690", "모나리자", "", None),
     ]
@@ -31,7 +36,7 @@ def test_사용자가_1_2_3선_열을_채우면_가격까지_읽는다(tmp_path)
         "모나리자,012690,,,,\n"  # 3선 비어있음 → None
     )
     path = _write(tmp_path, content)
-    assert parse_watchlist_csv(path) == [
+    assert head4(path) == [
         ("005930", "삼성전자", "대형주", (70000.0, 68000.0, 66000.0)),
         ("012690", "모나리자", "", None),
     ]
@@ -39,7 +44,7 @@ def test_사용자가_1_2_3선_열을_채우면_가격까지_읽는다(tmp_path)
 
 def test_기본_형식_코드와_종목명(tmp_path):
     path = _write(tmp_path, "005930,삼성전자,72400\n000660,SK하이닉스,198500\n")
-    assert parse_watchlist_csv(path) == [
+    assert head4(path) == [
         ("005930", "삼성전자", "", None),
         ("000660", "SK하이닉스", "", None),
     ]
@@ -50,27 +55,27 @@ def test_A접두_코드와_헤더행_및_중복_처리(tmp_path):
         tmp_path,
         "종목코드,종목명,현재가\nA005930,삼성전자,72400\nA005930,삼성전자,72400\n",
     )
-    assert parse_watchlist_csv(path) == [("005930", "삼성전자", "", None)]
+    assert head4(path) == [("005930", "삼성전자", "", None)]
 
 
 def test_열_순서가_달라도_인식(tmp_path):
     path = _write(tmp_path, "삼성전자,005930,+2.5%\n")
-    assert parse_watchlist_csv(path) == [("005930", "삼성전자", "", None)]
+    assert head4(path) == [("005930", "삼성전자", "", None)]
 
 
 def test_utf8_인코딩_폴백(tmp_path):
     path = _write(tmp_path, "005930,삼성전자\n", encoding="utf-8-sig")
-    assert parse_watchlist_csv(path) == [("005930", "삼성전자", "", None)]
+    assert head4(path) == [("005930", "삼성전자", "", None)]
 
 
 def test_종목명이_없으면_코드로_대체(tmp_path):
     path = _write(tmp_path, "005930,72400,+1.2%\n")
-    assert parse_watchlist_csv(path) == [("005930", "005930", "", None)]
+    assert head4(path) == [("005930", "005930", "", None)]
 
 
 def test_코드가_없는_행은_무시(tmp_path):
     path = _write(tmp_path, "관심종목 목록\n\n005930,삼성전자\n합계,3종목\n")
-    assert parse_watchlist_csv(path) == [("005930", "삼성전자", "", None)]
+    assert head4(path) == [("005930", "삼성전자", "", None)]
 
 
 # ── 영문자가 섞인 종목코드 (2026-08-05 실측 누락) ─────────────
@@ -120,3 +125,26 @@ def test_헤더_없는_형식에서도_영문코드를_찾는다(tmp_path):
     path.write_text("0015N0,아로마티카,1000\n", encoding="utf-8-sig")
     rows = parse_watchlist_csv(str(path))
     assert rows[0][0] == "0015N0" and rows[0][1] == "아로마티카"
+
+
+# ── 선정 태그 · 기준봉 (2026-08-07) ───────────────────────────
+
+
+def test_태그와_기준봉_열을_읽는다(tmp_path):
+    """태그는 기준봉 시점의 선정 근거라 종목에 고정된다."""
+    path = tmp_path / "w.csv"
+    path.write_text(
+        "종목코드,종목명,1선,2선,3선,태그,기준봉\n"
+        '005930,삼성전자,70000,68000,66000,"#KOSPI상승장, #테마주",2026-08-05\n',
+        encoding="utf-8-sig",
+    )
+    row = parse_watchlist_csv(str(path))[0]
+    assert row[4] == "KOSPI상승장,테마주"  # # 과 공백은 정리
+    assert row[5] == "2026-08-05"
+
+
+def test_태그_열이_없어도_읽힌다(tmp_path):
+    path = tmp_path / "w.csv"
+    path.write_text("종목코드,종목명\n005930,삼성전자\n", encoding="utf-8-sig")
+    row = parse_watchlist_csv(str(path))[0]
+    assert row[4] == "" and row[5] == ""
