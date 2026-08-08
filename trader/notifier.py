@@ -236,7 +236,6 @@ def build_briefing_embed(
         "title": f"🔔 {trade_date} 감시 시작 · 관심종목 {len(symbols)}종목",
         "description": "\n".join(lines) or "\u200b",
         "color": _COLOR_LINK,
-        "footer": {"text": "전체 목록은 /관심종목 으로 확인하세요"},
     }
     if warned:
         embed["fields"] = [

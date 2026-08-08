@@ -668,3 +668,10 @@ def test_UI_버튼은_기존대로_창으로_뜬다(tmp_path):
     asyncio.run(scenario())
     assert any(isinstance(e, bus.ChartReady) for e in list(b.events.queue))
     core._store.close()
+
+
+def test_계단_지표는_익절_트리거와_같은_값만_둔다():
+    """10% 이상 선은 캔들에서 멀어 y축을 늘리고 캔들을 아래로 눌러버린다."""
+    from trader.chart import _STEP_PCTS
+
+    assert _STEP_PCTS == (0.03, 0.05, 0.07)

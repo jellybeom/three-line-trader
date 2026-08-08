@@ -451,7 +451,7 @@ def test_브리핑은_나열_대신_집계로_보여준다():
     assert "D+5 1종목" in body  # 기준봉 경과일 분포
     assert "총 2,025,000원" in body and "**주문가능** 1,793,453원" in body
     assert "GRT" not in body  # 개별 종목은 나열하지 않는다
-    assert "/관심종목" in embed["footer"]["text"]
+    assert "footer" not in embed  # 안내 문구는 두지 않는다
 
 
 def test_브리핑은_소량_종목만_따로_짚는다():

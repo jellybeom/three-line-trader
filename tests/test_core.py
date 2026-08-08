@@ -816,7 +816,6 @@ def test_감시_시작하면_개장_브리핑이_나간다(core):
     body = briefing[0]["description"]
     assert "`#테마주` 1" in body
     assert "총 2,025,000원" in body and "최대 5종목" in body
-    assert "/관심종목" in briefing[0]["footer"]["text"]
 
 
 def test_관심종목_조회는_태그와_메모를_보여준다(core):
