@@ -670,8 +670,18 @@ def test_UI_버튼은_기존대로_창으로_뜬다(tmp_path):
     core._store.close()
 
 
-def test_계단_지표는_익절_트리거와_같은_값만_둔다():
-    """10% 이상 선은 캔들에서 멀어 y축을 늘리고 캔들을 아래로 눌러버린다."""
-    from trader.chart import _STEP_PCTS
+def test_계단_지표는_당일_저가_대비_3_5_7퍼센트다():
+    """익절 트리거(평단 대비)와는 기준점이 다른 지표다 — 숫자만 같을 뿐이다.
+
+    10% 이상 선은 캔들에서 멀어 y축을 늘리고 캔들을 아래로 눌러 제외했다.
+    """
+    from trader.chart import _STEP_PCTS, day_low_steps
 
     assert _STEP_PCTS == (0.03, 0.05, 0.07)
+
+    bars = [
+        Bar("20260807090000", 100, 101, 100, 100),
+        Bar("20260807090300", 100, 101, 90, 95),
+    ]
+    lows = day_low_steps(bars)
+    assert lows == [100, 90]  # 계단의 바닥은 '그날 누적 최저가' 이지 평단이 아니다
