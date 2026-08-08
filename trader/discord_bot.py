@@ -377,6 +377,37 @@ class TraderBot:
             ][:25]
 
         @tree.command(
+            name="관심종목", description="오늘 관심종목의 태그·메모·기준봉을 봅니다"
+        )
+        @app_commands.describe(태그="특정 태그만 보기 (선택)", 쪽="페이지 (기본 1)")
+        async def watchlist(interaction, 태그: str = "", 쪽: int = 1) -> None:
+            if not await guard(interaction):
+                return
+            await interaction.response.send_message(
+                embed=self._to_embed(
+                    core.watchlist_embed(page=쪽, tag=태그.lstrip("#"))
+                )
+            )
+
+        @watchlist.autocomplete("태그")
+        async def watchlist_autocomplete(interaction, current: str):
+            """실제로 쓰인 태그만 후보로 — 오타로 빈 결과가 나오지 않게 한다."""
+            if not config.allows(interaction.user.id):
+                return []
+            text = (current or "").strip().lstrip("#")
+            used: dict[str, int] = {}
+            for e in core.entries.values():
+                for tag in (
+                    t.strip() for t in (e.get("tags") or "").split(",") if t.strip()
+                ):
+                    used[tag] = used.get(tag, 0) + 1
+            return [
+                app_commands.Choice(name=f"#{t} ({n}종목)", value=t)
+                for t, n in sorted(used.items(), key=lambda x: -x[1])
+                if text in t
+            ][:25]
+
+        @tree.command(
             name="근접도", description="미진입 종목이 1선에 얼마나 가까운지 봅니다"
         )
         async def proximity(interaction) -> None:

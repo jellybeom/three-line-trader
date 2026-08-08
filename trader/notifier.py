@@ -187,6 +187,108 @@ def base_date_label(base_date: str, trade_date: str) -> str:
     return f"D{days:+d}" if days else "D0"
 
 
+def _tag_counts(symbols: list[dict]) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {}
+    for s in symbols:
+        for tag in (t.strip() for t in (s.get("tags") or "").split(",") if t.strip()):
+            counts[tag] = counts.get(tag, 0) + 1
+    return sorted(counts.items(), key=lambda x: -x[1])
+
+
+def _base_date_counts(symbols: list[dict], trade_date: str) -> list[tuple[str, int]]:
+    """기준봉 경과일 분포 — 'D+1 12종목' 처럼 묶어 보여주기 위한 집계."""
+    counts: dict[str, int] = {}
+    for s in symbols:
+        label = base_date_label(s.get("base_date", ""), trade_date)
+        if label:
+            counts[label] = counts.get(label, 0) + 1
+    return sorted(counts.items(), key=lambda x: int(x[0].lstrip("D") or 0))
+
+
+def build_briefing_embed(
+    trade_date: str,
+    symbols: list[dict],
+    funds: dict | None = None,
+    deposit: float | None = None,
+) -> dict:
+    """개장 브리핑 — 감시 시작 시 '오늘 무엇을 들고 시작하는가' 를 한 장으로.
+
+    종목을 일일이 나열하면 수십 줄이 되고 Discord 제한에 걸린다. 여기서는 **집계와
+    확인이 필요한 항목만** 싣고, 전체 목록은 `/관심종목` 으로 조회한다.
+    """
+    warned = [s for s in symbols if s.get("qty") is not None and 0 < s["qty"] < 3]
+    lines = []
+    if tags := _tag_counts(symbols):
+        lines.append("**태그** " + " · ".join(f"`#{t}` {n}" for t, n in tags[:8]))
+    if bases := _base_date_counts(symbols, trade_date):
+        lines.append(
+            "**기준봉** " + " · ".join(f"{label} {n}종목" for label, n in bases[:8])
+        )
+    if funds:
+        lines.append(
+            f"**자금** 총 {funds['total']:,.0f}원 · 최대 {funds['max_symbols']}종목 "
+            f"· 종목당 {funds['per_symbol']:,.0f}원"
+        )
+    if deposit is not None:
+        lines.append(f"**주문가능** {deposit:,.0f}원")
+
+    embed = {
+        "title": f"🔔 {trade_date} 감시 시작 · 관심종목 {len(symbols)}종목",
+        "description": "\n".join(lines) or "\u200b",
+        "color": _COLOR_LINK,
+        "footer": {"text": "전체 목록은 /관심종목 으로 확인하세요"},
+    }
+    if warned:
+        embed["fields"] = [
+            {
+                "name": f"⚠️ 소량 진입 예상 {len(warned)}종목",
+                "value": "\n".join(
+                    f"{s['name']}({s['symbol']}) 1차 {s['qty']}주" for s in warned[:10]
+                )[:1024],
+                "inline": False,
+            }
+        ]
+    return embed
+
+
+def build_watchlist_embed(
+    trade_date: str,
+    symbols: list[dict],
+    page: int = 1,
+    per_page: int = 15,
+    tag: str = "",
+) -> dict:
+    """`/관심종목` — 종목별 태그·메모·기준봉을 페이지로 나눠 보여준다."""
+    rows = [s for s in symbols if not tag or tag in (s.get("tags") or "")]
+    total_pages = max(1, -(-len(rows) // per_page))
+    page = min(max(page, 1), total_pages)
+    chunk = rows[(page - 1) * per_page : page * per_page]
+
+    lines = []
+    for s in chunk:
+        head = f"**{s['name']}**(`{s['symbol']}`)"
+        meta = []
+        if tags := (s.get("tags") or ""):
+            meta.append(" ".join(f"`#{t}`" for t in tags.split(",") if t))
+        if label := base_date_label(s.get("base_date", ""), trade_date):
+            meta.append(f"기준봉 {label}")
+        if meta:
+            head += " · " + " · ".join(meta)
+        lines.append(head)
+        if memo := (s.get("memo") or ""):
+            lines.append(f"　📝 {memo}")
+
+    title = f"📋 {trade_date} 관심종목 {len(rows)}종목"
+    if tag:
+        title += f" · #{tag}"
+    return {
+        "title": title,
+        "description": "\n".join(lines)[:4000] or "해당하는 종목이 없습니다.",
+        "color": _COLOR_INFO,
+        "footer": {"text": f"{page}/{total_pages} 쪽"},
+    }
+
+
 def build_registration_embed(
     trade_date: str,
     rows: list[dict],

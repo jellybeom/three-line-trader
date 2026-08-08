@@ -400,38 +400,6 @@ def test_충분한_수량이면_경고하지_않는다(core):
 
 
 # ── 알림 묶음 발송 ─────────────────────────────────────────────
-
-
-def test_등록_알림은_모였다가_한_번에_나간다(core):
-    """CSV 로 수십 종목을 넣으면 줄 단위 발송은 수십 초가 걸린다 — 한 장으로 묶는다."""
-    sent = []
-
-    class FakeBot:
-        async def send_text(self, text):
-            sent.append(("text", text))
-            return True
-
-        async def send_embed(self, embed):
-            sent.append(("embed", embed))
-            return True
-
-    core._bot = FakeBot()
-    core._notify_level = "전체"
-    core._running = False
-
-    async def scenario():
-        for i in range(3):
-            await core._handle_command(
-                bus.Register(f"00593{i}", f"종목{i}", P, Position())
-            )
-        assert sent == []  # 아직 버퍼에만 쌓인 상태
-        await core._flush_notices()
-
-    asyncio.run(scenario())
-    assert len(sent) == 1 and sent[0][0] == "embed"
-    assert "등록 3건" in sent[0][1]["title"]
-
-
 def test_체결_알림은_묶지_않고_즉시_나간다(core):
     sent = []
 
@@ -707,23 +675,6 @@ def test_복원_후에도_태그가_UI_로_전달된다(core):
     assert updates[-1].tags == "섹터주" and updates[-1].base_date == "2026-08-04"
 
 
-def test_삭제_알림에_종목명이_들어간다(core):
-    """삭제 시점엔 목록에서 이미 빠져 이름을 찾을 수 없다 — 따로 넘겨야 한다."""
-    from trader.ui import bus as b
-
-    core._bot = object()  # 알림 버퍼는 봇이 있을 때만 채워진다
-    core._notify_level = "전체"
-    core._running = False
-    asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, Position())))
-    _drain(core._bus)
-    core._notice_batch.clear()
-
-    asyncio.run(core._handle_command(bus.Delete("005930")))
-    assert core._notice_batch, "삭제 알림이 없음"
-    _, label, _ = core._notice_batch[-1]
-    assert label == "삼성전자(005930)"
-
-
 def test_일괄_등록은_종목별_알림을_보내지_않는다(core):
     """CSV 는 결과 embed 로 한 번에 알린다 — 종목마다 또 보내면 중복이다."""
     sent = []
@@ -752,27 +703,6 @@ def test_일괄_등록은_종목별_알림을_보내지_않는다(core):
     # 화면 로그와 DB 기록은 그대로 남는다
     assert "005930" in core._entries
     assert [r for r in core._store.recent_events(core._date) if r[2] == "등록"]
-
-
-def test_수동_등록은_종목별_알림이_나간다(core):
-    sent = []
-
-    class FakeBot:
-        async def send_embed(self, embed):
-            sent.append(embed.get("title", ""))
-            return True
-
-        async def send_text(self, text):
-            sent.append(text)
-            return True
-
-    core._bot = FakeBot()
-    core._notify_level = "전체"
-    core._running = False
-
-    asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, Position())))
-    asyncio.run(core._flush_notices())
-    assert sent and "삼성전자(005930)" in sent[0]
 
 
 def test_CSV_등록_알림은_한_번만_발송된다(core):
@@ -815,3 +745,108 @@ def test_CSV_등록_알림은_한_번만_발송된다(core):
     assert "등록 1종목" in sent[0]["title"]
     assert "3선 미입력 2종목" in sent[0]["footer"]["text"]
     assert "중복 제외 1종목" in sent[0]["footer"]["text"]
+
+
+# ── 관심종목 편성은 조용히, 개장 브리핑으로 대체 (2026-08-08) ──
+
+
+class _RecordingBot:
+    def __init__(self):
+        self.sent = []
+
+    async def send_embed(self, embed):
+        self.sent.append(embed)
+        return True
+
+    async def send_text(self, text):
+        self.sent.append(text)
+        return True
+
+    def set_blocked(self, *a):
+        pass
+
+
+def test_등록_편집_삭제는_Discord_로_알리지_않는다(core):
+    """저녁에 몰아서 하는 편성 작업이라 건건이 알리면 소음이 된다."""
+    bot = _RecordingBot()
+    core._bot = bot
+    core._notify_level = "전체"
+    core._running = False
+
+    asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, Position())))
+    asyncio.run(
+        core._handle_command(bus.Register("005930", "삼성전자", P, None, edit=True))
+    )
+    asyncio.run(core._handle_command(bus.Delete("005930")))
+    asyncio.run(core._flush_notices())
+    assert bot.sent == []
+
+    # 화면 로그와 DB 기록은 그대로 남는다
+    kinds = {r[2] for r in core._store.recent_events(core._date)}
+    assert {"등록", "편집", "삭제"} <= kinds
+
+
+def test_감시_시작하면_개장_브리핑이_나간다(core):
+    bot = _RecordingBot()
+    core._bot = bot
+    core._notify_level = "전체"
+    core._running = False
+    core._store.set_setting("funds_total", "2025000")
+    core._max_symbols = 5
+    asyncio.run(
+        core._handle_command(
+            bus.Register(
+                "005930",
+                "삼성전자",
+                P,
+                Position(),
+                tags="테마주",
+                base_date="2026-08-05",
+            )
+        )
+    )
+
+    asyncio.run(core._handle_command(bus.SetRunning(True)))
+    asyncio.run(core._flush_notices())
+
+    briefing = [
+        e for e in bot.sent if isinstance(e, dict) and "감시 시작" in e["title"]
+    ]
+    assert briefing, "브리핑이 없음"
+    body = briefing[0]["description"]
+    assert "`#테마주` 1" in body
+    assert "총 2,025,000원" in body and "최대 5종목" in body
+    assert "/관심종목" in briefing[0]["footer"]["text"]
+
+
+def test_관심종목_조회는_태그와_메모를_보여준다(core):
+    core._running = False
+    for sym, name, tags, memo in (
+        ("005930", "삼성전자", "테마주", "메모A"),
+        ("000660", "하이닉스", "섹터주", ""),
+    ):
+        asyncio.run(
+            core._handle_command(
+                bus.Register(
+                    sym,
+                    name,
+                    P,
+                    Position(),
+                    memo=memo,
+                    tags=tags,
+                    base_date="2026-08-05",
+                )
+            )
+        )
+
+    embed = core.watchlist_embed()
+    body = embed["description"]
+    assert "삼성전자" in body and "하이닉스" in body
+    assert "`#테마주`" in body and "📝 메모A" in body
+    assert "1/1 쪽" in embed["footer"]["text"]
+
+    filtered = core.watchlist_embed(tag="섹터주")
+    assert (
+        "하이닉스" in filtered["description"]
+        and "삼성전자" not in filtered["description"]
+    )

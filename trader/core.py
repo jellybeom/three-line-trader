@@ -30,7 +30,9 @@ from trader.notifier import (
     build_batch_embed,
     build_daily_summary_embed,
     build_proximity_embed,
+    build_briefing_embed,
     build_registration_embed,
+    build_watchlist_embed,
     build_trade_embed,
     format_message,
     format_trade,
@@ -73,21 +75,11 @@ _MIN_ENTRY_QTY = 3  # 1차 매수 수량이 이 미만이면 분할 익절이 �
 _BATCH_QUIET_SEC = 2.0  # 이 시간 동안 새 알림이 없으면 모아둔 것을 한 장으로 보낸다
 _BATCH_MAX = 50  # 버퍼가 이만큼 차면 기다리지 않고 즉시 발송
 # 묶음 대상: 한 번에 여러 건이 쏟아지는 정보성 알림. 체결 알림은 즉시성이 중요해 제외한다.
-_BATCH_KINDS = (
-    "등록",
-    "편집",
-    "삭제",
-    "보류",
-    "경고",
-    "에러",
-    "설정",
-    "리셋",
-    "이월",
-    "연결",
-    "감시",
-    "시작",
-    "요약",
-)
+_BATCH_KINDS = ("보류", "경고", "에러", "설정", "연결", "감시", "시작", "요약")
+# 관심종목 편성 작업(등록·편집·삭제·리셋·이월)은 저녁에 PC 앞에서 몰아서 하므로
+# 건건이 알리면 소음이 된다. 화면 로그와 DB 에만 남기고, Discord 에는 08:55 개장
+# 브리핑으로 '오늘 무엇을 들고 시작하는지' 를 한 번에 알린다.
+_SILENT_KINDS = ("등록", "편집", "삭제", "리셋", "이월")
 _LOOP_SEC = 0.1
 
 
@@ -547,6 +539,8 @@ class Core:
                 self._running = r
                 self._bus.events.put(bus.WatchStatus(r))
                 self._log("시스템", "감시", "감시 시작" if r else "감시 중지")
+                if r:
+                    await self.send_briefing()
             case bus.SetFunds(
                 total=t,
                 max_symbols=m,
@@ -1641,6 +1635,7 @@ class Core:
         self._log(
             "시스템", "감시", f"자동 스케줄 — 감시 시작 ({len(self._entries)}종목)"
         )
+        await self.send_briefing()
 
     async def _review_after_hours(self) -> None:
         """20:05 시간외 리뷰 — 대체거래소(NXT) 거래가 실제로 있었던 종목만 3분봉 재전송.
@@ -1701,6 +1696,60 @@ class Core:
             f"시간외 리뷰 완료 — 재전송 {reviewed}종목 / 확인 {len(traded)}종목",
             notify=False,
         )
+
+    def _watchlist_rows(self, trade_date: str = "") -> list[dict]:
+        """관심종목 목록 (브리핑·조회 공용). 1차 예상 수량까지 계산해 붙인다."""
+        date = trade_date or self._date
+        if date == self._date:  # 오늘은 메모리 값이 최신
+            return [
+                {
+                    "symbol": s,
+                    "name": e["name"],
+                    "tags": e.get("tags", ""),
+                    "base_date": e.get("base_date", ""),
+                    "memo": e.get("memo", ""),
+                    "qty": self._entry_qty(e["params"]),
+                }
+                for s, e in sorted(self._entries.items(), key=lambda kv: kv[1]["name"])
+            ]
+        symbols, _ = self._store.daily_report(date)
+        return [
+            {
+                "symbol": s["symbol"],
+                "name": s["name"],
+                "tags": s.get("tags", ""),
+                "base_date": s.get("base_date", ""),
+                "memo": s.get("memo", ""),
+                "qty": None,
+            }
+            for s in symbols
+        ]
+
+    def watchlist_embed(
+        self, page: int = 1, tag: str = "", trade_date: str = ""
+    ) -> dict:
+        """`/관심종목` — 종목별 태그·메모·기준봉을 페이지로."""
+        date = trade_date or self._date
+        return build_watchlist_embed(date, self._watchlist_rows(date), page, tag=tag)
+
+    async def send_briefing(self) -> None:
+        """감시 시작 브리핑 — 오늘 무엇을 들고 시작하는지 한 장으로 알린다."""
+        if self._bot is None:
+            return
+        rows = self._watchlist_rows()
+        total = float(self._store.get_setting("funds_total", "0"))
+        funds = {
+            "total": total,
+            "max_symbols": self._max_symbols,
+            "per_symbol": total / self._max_symbols if self._max_symbols else 0,
+        }
+        deposit = None
+        if self._broker is not None:
+            try:
+                deposit = await self._get_deposit()
+            except BrokerError:
+                deposit = None
+        await self._send_embed(build_briefing_embed(self._date, rows, funds, deposit))
 
     async def send_daily_summary(self) -> None:
         """하루 매매 요약을 Discord 로 발송한다 (알림 수준과 무관하게 항상 발송)."""
@@ -1861,6 +1910,8 @@ class Core:
         """이벤트 기록. name 은 종목이 이미 목록에서 빠진 뒤 남기는 로그(삭제 등)용."""
         self._store.log(self._date, symbol, kind, text)
         self._bus.events.put(bus.LogLine(_now(), symbol, kind, text))
+        if kind in _SILENT_KINDS:
+            return  # 화면 로그·DB 에는 남되 Discord 로는 보내지 않는다
         if not (
             notify and self._bot and should_notify(self._notify_level, symbol, kind)
         ):

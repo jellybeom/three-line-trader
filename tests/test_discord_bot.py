@@ -343,6 +343,7 @@ def test_슬래시_명령이_모두_등록된다():
         "감시",
         "알림",
         "근접도",
+        "관심종목",
     }
     # 주문을 내는 조작은 일부러 넣지 않는다 (계정 탈취 시 피해 제한)
     assert "청산" not in commands and "삭제" not in commands
@@ -654,3 +655,27 @@ def test_과거_날짜_요약을_조회할_수_있다(core):
 def test_기록이_없는_날짜는_그렇게_알려준다(core):
     embed = asyncio.run(core.summary_embed("2020-01-01"))
     assert "등록된 관심종목이 없습니다" in embed["description"]
+
+
+def test_관심종목_명령은_태그와_쪽수를_받는다():
+    core = _CommandCore()
+    core.entries = {
+        "005930": {"name": "삼성전자", "pos": Position(), "price": 0, "tags": "테마주"},
+        "000660": {"name": "하이닉스", "pos": Position(), "price": 0, "tags": "섹터주"},
+    }
+    core.watchlist_embed = lambda page=1, tag="", trade_date="": {
+        "title": f"조회 page={page} tag={tag}",
+        "description": "",
+        "color": 0,
+    }
+
+    commands = _tree_with_commands(core)
+    watchlist = commands["관심종목"]
+    interaction = _Interaction(100, 999)
+    asyncio.run(watchlist.callback(interaction, "#테마주", 2))
+    assert interaction.msg == "(embed)"
+
+    auto = watchlist._params["태그"].autocomplete
+    choices = asyncio.run(auto(_Interaction(100, 999), ""))
+    assert {c.value for c in choices} == {"테마주", "섹터주"}  # 실제 쓰인 태그만
+    assert asyncio.run(auto(_Interaction(101, 999), "")) == []  # 타인에게는 비공개

@@ -401,3 +401,109 @@ def test_등록_실패가_있으면_주황색_필드로_분리된다():
     assert embed["color"] == 0xEF6C00
     assert "해성디에스" in embed["fields"][0]["value"]
     assert "해성디에스" not in embed["description"]
+
+
+# ── 개장 브리핑 · 관심종목 조회 (2026-08-08) ──────────────────
+
+
+def _watch_rows():
+    return [
+        {
+            "symbol": "900290",
+            "name": "GRT",
+            "tags": "KOSPI상승장,테마주",
+            "base_date": "2026-08-05",
+            "memo": "거래대금 급증",
+            "qty": 120,
+        },
+        {
+            "symbol": "004800",
+            "name": "효성",
+            "tags": "섹터주",
+            "base_date": "2026-08-07",
+            "memo": "",
+            "qty": 1,
+        },
+        {
+            "symbol": "043260",
+            "name": "성호전자",
+            "tags": "상한가,테마주",
+            "base_date": "",
+            "memo": "",
+            "qty": 25,
+        },
+    ]
+
+
+def test_브리핑은_나열_대신_집계로_보여준다():
+    """종목을 일일이 적으면 수십 줄이 되고 Discord 제한에 걸린다."""
+    from trader.notifier import build_briefing_embed
+
+    embed = build_briefing_embed(
+        "2026-08-10",
+        _watch_rows(),
+        {"total": 2_025_000, "max_symbols": 5, "per_symbol": 405_000},
+        1_793_453,
+    )
+    body = embed["description"]
+    assert "관심종목 3종목" in embed["title"]
+    assert "`#테마주` 2" in body and "`#섹터주` 1" in body
+    assert "D+5 1종목" in body  # 기준봉 경과일 분포
+    assert "총 2,025,000원" in body and "**주문가능** 1,793,453원" in body
+    assert "GRT" not in body  # 개별 종목은 나열하지 않는다
+    assert "/관심종목" in embed["footer"]["text"]
+
+
+def test_브리핑은_소량_종목만_따로_짚는다():
+    from trader.notifier import build_briefing_embed
+
+    embed = build_briefing_embed("2026-08-10", _watch_rows())
+    field = embed["fields"][0]
+    assert "소량 진입 예상 1종목" in field["name"]
+    assert "효성(004800) 1차 1주" in field["value"]
+    assert "GRT" not in field["value"]
+
+
+def test_관심종목_조회는_태그_메모_기준봉을_모두_보여준다():
+    from trader.notifier import build_watchlist_embed
+
+    body = build_watchlist_embed("2026-08-10", _watch_rows())["description"]
+    assert "**GRT**(`900290`)" in body
+    assert "`#KOSPI상승장`" in body and "기준봉 D+5" in body
+    assert "📝 거래대금 급증" in body
+    assert "기준봉" not in body.split("성호전자")[1]  # 기준봉 없으면 표기 생략
+
+
+def test_관심종목_조회는_페이지로_나뉜다():
+    """수십 종목이어도 '…외 N종목' 으로 잘리지 않고 전부 볼 수 있어야 한다."""
+    from trader.notifier import build_watchlist_embed
+
+    rows = [
+        {
+            "symbol": f"00593{i:02d}",
+            "name": f"종목{i:02d}",
+            "tags": "",
+            "base_date": "",
+            "memo": "",
+            "qty": 10,
+        }
+        for i in range(40)
+    ]
+    first = build_watchlist_embed("2026-08-10", rows, page=1, per_page=15)
+    assert first["footer"]["text"] == "1/3 쪽"
+    assert "종목00" in first["description"] and "종목20" not in first["description"]
+
+    last = build_watchlist_embed("2026-08-10", rows, page=3, per_page=15)
+    assert "종목39" in last["description"]
+    assert "…외" not in last["description"]  # 생략 없이 끝까지
+
+    over = build_watchlist_embed("2026-08-10", rows, page=99, per_page=15)
+    assert over["footer"]["text"] == "3/3 쪽"  # 범위를 넘으면 마지막 쪽
+
+
+def test_관심종목_조회를_태그로_거를_수_있다():
+    from trader.notifier import build_watchlist_embed
+
+    embed = build_watchlist_embed("2026-08-10", _watch_rows(), tag="테마주")
+    assert "관심종목 2종목" in embed["title"] and "#테마주" in embed["title"]
+    assert "효성" not in embed["description"]
