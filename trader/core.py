@@ -458,6 +458,7 @@ class Core:
                 memo=memo,
                 tags=tags,
                 base_date=base_date,
+                quiet=quiet,
             ):
                 if self._running:
                     self._log(
@@ -507,8 +508,10 @@ class Core:
                     s,
                     "등록" if not edit else "편집",
                     f"{n} (상태: {pos.state.value}, 잔량 {pos.remaining}주)",
+                    notify=not quiet,
                 )
-                self._warn_small_qty(s, n, p)
+                if not quiet:  # 일괄 등록은 결과 알림에 소량 경고가 이미 담겨 있다
+                    self._warn_small_qty(s, n, p)
                 await self._sync_watcher_symbols()
             case bus.Delete(symbol=s):
                 if self._running:

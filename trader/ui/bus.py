@@ -167,6 +167,9 @@ class Register:
     # 쉼표 구분 문자열 (예: "KOSPI상승장,테마주")
     tags: str = ""
     base_date: str = ""  # 기준봉 날짜 (YYYY-MM-DD)
+    # CSV 일괄 등록은 RegistrationNotice 로 결과를 한 번에 알리므로, 종목별 알림은 끈다.
+    # (화면 로그와 DB 기록은 그대로 남는다)
+    quiet: bool = False
 
 
 @dataclass(frozen=True)

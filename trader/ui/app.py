@@ -563,6 +563,7 @@ class App(tk.Tk):
                         memo=memo,
                         tags=tags,
                         base_date=base_date,
+                        quiet=True,
                     )
                 )
                 added.append(

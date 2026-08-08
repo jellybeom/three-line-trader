@@ -724,6 +724,57 @@ def test_삭제_알림에_종목명이_들어간다(core):
     assert label == "삼성전자(005930)"
 
 
+def test_일괄_등록은_종목별_알림을_보내지_않는다(core):
+    """CSV 는 결과 embed 로 한 번에 알린다 — 종목마다 또 보내면 중복이다."""
+    sent = []
+
+    class FakeBot:
+        async def send_embed(self, embed):
+            sent.append(embed.get("title", ""))
+            return True
+
+        async def send_text(self, text):
+            sent.append(text)
+            return True
+
+    core._bot = FakeBot()
+    core._notify_level = "전체"
+    core._running = False
+
+    asyncio.run(
+        core._handle_command(
+            bus.Register("005930", "삼성전자", P, Position(), quiet=True)
+        )
+    )
+    asyncio.run(core._flush_notices())
+    assert sent == [], "일괄 등록인데 종목별 알림이 나갔다"
+
+    # 화면 로그와 DB 기록은 그대로 남는다
+    assert "005930" in core._entries
+    assert [r for r in core._store.recent_events(core._date) if r[2] == "등록"]
+
+
+def test_수동_등록은_종목별_알림이_나간다(core):
+    sent = []
+
+    class FakeBot:
+        async def send_embed(self, embed):
+            sent.append(embed.get("title", ""))
+            return True
+
+        async def send_text(self, text):
+            sent.append(text)
+            return True
+
+    core._bot = FakeBot()
+    core._notify_level = "전체"
+    core._running = False
+
+    asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, Position())))
+    asyncio.run(core._flush_notices())
+    assert sent and "삼성전자(005930)" in sent[0]
+
+
 def test_CSV_등록_알림은_한_번만_발송된다(core):
     """예전에는 결과 embed 와 건수 알림이 따로 나가 두 번 왔다."""
     sent = []
