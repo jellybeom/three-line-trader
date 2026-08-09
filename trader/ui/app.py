@@ -453,6 +453,7 @@ class App(tk.Tk):
             on_chart=self._open_chart,
             on_csv=self._import_csv,
             on_carry=self._carry_over,
+            on_carry_position=self._carry_position,
             on_manual_sell=self._manual_sell,
         )
         self.events = EventsView(
@@ -792,6 +793,10 @@ class App(tk.Tk):
         ):
             self._bus.commands.put(bus.ManualSell(symbol))
 
+    def _carry_position(self, symbol: str) -> None:
+        """포지션만 이월 — 다음 매매일의 3선·메모는 그대로 두고 상태·평단·수량만 덮어쓴다."""
+        self._bus.commands.put(bus.CarryPosition(symbol))
+
     def _carry_over(self, symbol: str) -> None:
         if symbol in self._staged:
             messagebox.showwarning("이월 불가", "3선 미입력 종목은 이월할 수 없습니다.")
@@ -893,10 +898,12 @@ class App(tk.Tk):
                 memo=memo,
                 tags=tags,
                 base_date=base_date,
+                day_open=day_open,
             ):
                 self._staged.pop(s, None)  # 3선 입력 완료 → 대기 해제
                 self._registry[s] = (n, prm, p, memo, tags, base_date)
-                self.positions.upsert(s, n, p, prm, memo)
+                self.positions.set_day_open(s, day_open)
+                self.positions.upsert(s, n, p, prm, memo, base_date, self._current_date)
                 self._update_summary()
                 self._update_pnl()
             case bus.Tick(symbol=s, price=p):

@@ -928,3 +928,74 @@ def test_이월해도_태그와_기준봉이_따라간다(core):
     assert tags == "테마주,KOSPI상승장"
     assert base_date == "2026-08-07"
     assert pos.remaining == 20  # 포지션도 함께 넘어간다
+
+
+# ── 포지션만 이월 (2026-08-10) ────────────────────────────────
+
+
+def test_포지션만_이월하면_대상날짜의_3선과_메모는_유지된다(core):
+    """다음 매매일에 이미 잡아둔 3선은 그날 판단이므로 덮어쓰면 안 된다."""
+    from trader.state_machine import Params as P2
+
+    core._running = False
+    held = Position(state=State.BUY1, avg_price=9_900, total_bought=20, remaining=20)
+    asyncio.run(
+        core._handle_command(
+            bus.Register(
+                "005930",
+                "삼성전자",
+                P,
+                held,
+                memo="오늘메모",
+                tags="테마주",
+                base_date="2026-08-05",
+            )
+        )
+    )
+
+    tomorrow = core._next_trade_date()
+    next_params = P2(
+        line1=11_000,
+        line2=10_500,
+        line3=9_800,
+        buy1_amount=200_000,
+        buy2_amount=200_000,
+    )
+    core._store.register_symbol(
+        tomorrow,
+        "005930",
+        "삼성전자",
+        next_params,
+        memo="내일메모",
+        tags="상한가",
+        base_date="2026-08-05",
+    )
+
+    asyncio.run(core._handle_command(bus.CarryPosition("005930")))
+
+    _, params, pos, memo, tags, _ = core._store.load_all(tomorrow)["005930"]
+    assert params.line1 == 11_000 and memo == "내일메모" and tags == "상한가"  # 그대로
+    assert pos.state is State.BUY1 and pos.avg_price == 9_900  # 포지션만 덮어씀
+    assert pos.remaining == 20 and pos.total_bought == 20
+
+
+def test_대상날짜에_없는_종목은_포지션_이월을_거부한다(core):
+    """어느 3선 설정을 쓸지 알 수 없으므로 조용히 만들지 않는다."""
+    core._running = False
+    held = Position(state=State.BUY1, avg_price=9_900, total_bought=20, remaining=20)
+    asyncio.run(core._handle_command(bus.Register("005930", "삼성전자", P, held)))
+
+    asyncio.run(core._handle_command(bus.CarryPosition("005930")))
+    assert "005930" not in core._store.load_all(core._next_trade_date())
+
+    texts = [r[3] for r in core._store.recent_events(core._date)]
+    assert any("등록되지 않은 종목" in t for t in texts)
+
+
+def test_감시_중에는_포지션_이월도_막힌다(core):
+    core._running = True
+    register(
+        core, Position(state=State.BUY1, avg_price=9_900, total_bought=20, remaining=20)
+    )
+    asyncio.run(core._handle_command(bus.CarryPosition("005930")))
+    assert "005930" not in core._store.load_all(core._next_trade_date())

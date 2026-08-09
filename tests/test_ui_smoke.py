@@ -343,3 +343,89 @@ def test_편집시_기존_기준봉이_유지된다(app):
     app.update()
     assert dialog._vars["base_date"].get() == "2026-07-30"
     assert {t for t, v in dialog._tag_vars.items() if v.get()} == {"테마주", "상한가"}
+
+
+# ── 다중 선택 메뉴 · 신규 열 (2026-08-10) ─────────────────────
+
+
+def _fill(app, symbols):
+    from trader.state_machine import Params, Position
+    from trader.ui import bus
+
+    app._dispatch(bus.TradeDate("2026-08-10"))
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=200_000, buy2_amount=200_000
+    )
+    for sym, name, base in symbols:
+        app._dispatch(
+            bus.PositionUpdate(sym, name, Position(), params, "메모", "테마주", base)
+        )
+    app.update()
+
+
+def test_등락률_열은_첫_체결가_대비로_계산된다(app):
+    from trader.ui import bus
+
+    _fill(app, [("005930", "삼성전자", "")])
+    app._dispatch(bus.Tick("005930", 10_000))  # 첫 체결가가 기준이 된다
+    app._dispatch(bus.Tick("005930", 10_500))
+    app.update()
+    assert app.positions.tree.set("005930", "change") == "+5.00%"
+
+
+def test_기준봉_열은_경과일을_보여준다(app):
+    _fill(app, [("005930", "삼성전자", "2026-08-05"), ("000660", "하이닉스", "")])
+    tree = app.positions.tree
+    assert tree.set("005930", "base") == "D+5"
+    assert tree.set("000660", "base") == ""  # 기준봉이 없으면 빈칸
+
+
+def test_매매일이_바뀌면_등락률_기준도_초기화된다(app):
+    from trader.ui import bus
+
+    _fill(app, [("005930", "삼성전자", "")])
+    app._dispatch(bus.Tick("005930", 10_000))
+    app.update()
+    app.positions.clear()
+    assert app.positions._day_open == {}
+
+
+def test_여러_종목을_선택해_이월할_수_있다(app):
+    _fill(app, [("005930", "삼성전자", ""), ("000660", "하이닉스", "")])
+    called = []
+    app.positions._on_carry_position = called.append
+    app.positions._menu_targets = ["005930", "000660"]
+    app.positions._call(app.positions._on_carry_position)
+    assert called == ["005930", "000660"]
+
+
+def test_한_종목_전용_기능은_다중_선택에서_동작하지_않는다(app):
+    """편집·수동 청산·리셋은 한 종목씩 다뤄야 하는 기능이다."""
+    _fill(app, [("005930", "삼성전자", ""), ("000660", "하이닉스", "")])
+    called = []
+    app.positions._on_edit = called.append
+    app.positions._menu_targets = ["005930", "000660"]
+    app.positions._call(app.positions._on_edit, single=True)
+    assert called == []
+
+    app.positions._menu_targets = ["005930"]  # 하나만 고르면 동작한다
+    app.positions._call(app.positions._on_edit, single=True)
+    assert called == ["005930"]
+
+
+def test_메뉴_순서가_의도대로다(app):
+    menu = app.positions._menu
+    labels = [
+        menu.entrycget(i, "label")
+        for i in range(menu.index("end") + 1)
+        if menu.type(i) == "command"
+    ]
+    assert labels == [
+        "다음 매매일로 이월 (상태·평단·수량)",
+        "다음 매매일로 이월 (전체)",
+        "수동 전량 청산 (시장가)",
+        "종료 → 대기 초기화",
+        "차트 보기",
+        "편집",
+        "관심종목 제외",
+    ]

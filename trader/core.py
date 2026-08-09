@@ -357,6 +357,47 @@ class Core:
         match cmd:
             case bus.ManualSell(symbol=s):
                 await self._manual_sell(s)
+            case bus.CarryPosition(symbol=s):
+                if self._running:
+                    self._log(
+                        s, "에러", "감시 중에는 이월할 수 없습니다 — 먼저 중지하세요"
+                    )
+                    return
+                e = self._entries.get(s)
+                if e is None:
+                    return
+                if e["pos"].pending:
+                    self._log(s, "에러", "체결 대기 중인 종목은 이월할 수 없습니다")
+                    return
+                target = self._next_trade_date()
+                existing = self._store.load_all(target).get(s)
+                if existing is None:
+                    self._log(
+                        s,
+                        "에러",
+                        f"{target} 에 등록되지 않은 종목입니다 — 먼저 등록하거나 "
+                        "'다음 매매일로 이월 (전체)' 를 쓰세요",
+                    )
+                    return
+                # 3선·메모·태그는 대상 날짜에 설정해 둔 값을 그대로 두고 포지션만 덮어쓴다
+                name, params, _, memo, tags, base_date = existing
+                self._store.register_symbol(
+                    target,
+                    s,
+                    name,
+                    params,
+                    e["pos"],
+                    memo=memo,
+                    tags=tags,
+                    base_date=base_date,
+                )
+                self._log(
+                    s,
+                    "이월",
+                    f"{target} 로 포지션 이월 (상태 {e['pos'].state.value} · "
+                    f"평단 {e['pos'].avg_price:,.0f} · "
+                    f"잔량 {e['pos'].remaining}/{e['pos'].total_bought})",
+                )
             case bus.CarryOver(symbol=s):
                 if self._running:
                     self._log(
@@ -369,13 +410,11 @@ class Core:
                 if e["pos"].pending:
                     self._log(s, "에러", "체결 대기 중인 종목은 이월할 수 없습니다")
                     return
-                target = date.fromisoformat(self._date) + timedelta(days=1)
-                while target.weekday() >= 5:  # 주말 건너뛰고 다음 영업일
-                    target += timedelta(days=1)
+                target = self._next_trade_date()
                 # 태그·기준봉은 종목 선정 근거라 이월해도 그대로 따라가야 한다.
                 # 빠뜨리면 이월된 날의 매매가 태그 집계에서 통째로 누락된다.
                 self._store.register_symbol(
-                    target.isoformat(),
+                    target,
                     s,
                     e["name"],
                     e["params"],
@@ -387,7 +426,7 @@ class Core:
                 self._log(
                     s,
                     "이월",
-                    f"{target.isoformat()} 리스트로 이월 (상태: {e['pos'].state.value}, "
+                    f"{target} 리스트로 이월 (상태: {e['pos'].state.value}, "
                     f"잔량 {e['pos'].remaining}주)",
                 )
             case bus.ConnectKiwoom():
@@ -1786,6 +1825,13 @@ class Core:
 
     # ── 상태 로드 / 발행 ────────────────────────────────────────
 
+    def _next_trade_date(self) -> str:
+        """다음 영업일 (주말 건너뜀)."""
+        target = date.fromisoformat(self._date) + timedelta(days=1)
+        while target.weekday() >= 5:
+            target += timedelta(days=1)
+        return target.isoformat()
+
     def _load_date(self, trade_date: str) -> None:
         self._date = trade_date
         self._entries = {}
@@ -1843,6 +1889,7 @@ class Core:
                 e.get("memo", ""),
                 e.get("tags", ""),
                 e.get("base_date", ""),
+                e.get("day_open") or 0.0,
             )
         )
 

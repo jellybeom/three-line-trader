@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from datetime import date
 from tkinter import messagebox, ttk
 from typing import Callable
 
@@ -23,6 +24,7 @@ _COLUMNS = (
     "name",
     "state",
     "price",
+    "change",
     "avg",
     "qty",
     "pnl",
@@ -31,6 +33,7 @@ _COLUMNS = (
     "line2",
     "line3",
     "range",
+    "base",
     "memo",
     "chart",
     "edit",
@@ -41,6 +44,7 @@ _HEADINGS = (
     "종목명",
     "상태",
     "현재가",
+    "등락률",
     "평단가",
     "잔량/총량",
     "수익률",
@@ -49,6 +53,7 @@ _HEADINGS = (
     "2선",
     "3선",
     "1↔3선",
+    "기준봉",
     "메모",
     "",
     "",
@@ -58,6 +63,17 @@ _ADD_ROW = "__add__"
 _CSV_ROW = "__csv__"
 _SPECIAL = {_ADD_ROW, _CSV_ROW}
 _BASE_HEADINGS = dict(zip(_COLUMNS, _HEADINGS))
+
+
+def _base_label(base_date: str, trade_date: str) -> str:
+    """기준봉으로부터 며칠째인지 — 'D+2'. 날짜가 없거나 이상하면 빈칸."""
+    if not (base_date and trade_date):
+        return ""
+    try:
+        days = (date.fromisoformat(trade_date) - date.fromisoformat(base_date)).days
+    except ValueError:
+        return ""
+    return f"D{days:+d}" if days else "D0"
 
 
 class PositionsView(ttk.Frame):
@@ -71,6 +87,7 @@ class PositionsView(ttk.Frame):
         on_chart: Callable[[str], None],
         on_csv: Callable[[], None],
         on_carry: Callable[[str], None],
+        on_carry_position: Callable[[str], None],
         on_manual_sell: Callable[[str], None],
     ):
         super().__init__(master)
@@ -81,21 +98,28 @@ class PositionsView(ttk.Frame):
         self._on_chart = on_chart
         self._on_csv = on_csv
         self._on_carry = on_carry
+        self._on_carry_position = on_carry_position
         self._on_manual_sell = on_manual_sell
         self._avg: dict[str, float] = {}  # 수익률 계산용 평단 캐시
         self._closed: set[str] = set()  # 종료 종목: 수익률을 종료 시점 값으로 고정
         self._blocked: dict[str, str] = {}  # 진입 보류 중인 종목 → 사유
+        self._day_open: dict[str, float] = {}  # 종목별 당일 첫 체결가 (등락률 기준)
         self._sort_reverse: dict[str, bool] = {}
 
-        self.tree = ttk.Treeview(self, columns=_COLUMNS, show="headings")
+        # extended: Ctrl·Shift 로 여러 종목을 골라 한 번에 처리할 수 있다
+        self.tree = ttk.Treeview(
+            self, columns=_COLUMNS, show="headings", selectmode="extended"
+        )
         for col, head in zip(_COLUMNS, _HEADINGS):
             self.tree.heading(col, text=head, command=lambda c=col: self._sort(c))
             if col in ("chart", "edit", "del"):
                 self.tree.column(col, width=32, anchor="center", stretch=False)
             elif col == "code":
                 self.tree.column(col, width=76, anchor="center", stretch=False)
-            elif col == "range":
-                self.tree.column(col, width=60, anchor="e")
+            elif col in ("range", "change"):
+                self.tree.column(col, width=64, anchor="e")
+            elif col == "base":  # 기준봉 D+n — 짧은 값이라 좁게
+                self.tree.column(col, width=52, anchor="center")
             elif col == "memo":
                 self.tree.column(col, width=110, anchor="center")
             else:
@@ -116,24 +140,37 @@ class PositionsView(ttk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        self._menu_target: str | None = None
+        self._menu_targets: list[str] = []
         self._menu = tk.Menu(self, tearoff=0)
-        self._menu.add_command(label="편집", command=lambda: self._call(self._on_edit))
+        # 여러 종목을 한 번에 처리할 수 있는 항목을 위에, 한 종목씩 다뤄야 하는 항목은 아래에.
         self._menu.add_command(
-            label="종료 → 대기 초기화", command=lambda: self._call(self._on_reset)
+            label="다음 매매일로 이월 (상태·평단·수량)",
+            command=lambda: self._call(self._on_carry_position),
         )
         self._menu.add_command(
-            label="다음 매매일로 이월 (상태 유지)",
+            label="다음 매매일로 이월 (전체)",
             command=lambda: self._call(self._on_carry),
         )
         self._menu.add_command(
             label="수동 전량 청산 (시장가)",
-            command=lambda: self._call(self._on_manual_sell),
+            command=lambda: self._call(self._on_manual_sell, single=True),
+        )
+        self._menu.add_command(
+            label="종료 → 대기 초기화",
+            command=lambda: self._call(self._on_reset, single=True),
         )
         self._menu.add_separator()
         self._menu.add_command(
+            label="차트 보기", command=lambda: self._call(self._on_chart)
+        )
+        self._menu.add_command(
+            label="편집", command=lambda: self._call(self._on_edit, single=True)
+        )
+        self._menu.add_command(
             label="관심종목 제외", command=lambda: self._call(self._confirm_delete)
         )
+        # 한 종목에만 의미가 있는 항목 (여러 개 선택 시 비활성화)
+        self._single_only = ("수동 전량 청산 (시장가)", "종료 → 대기 초기화", "편집")
         self.tree.bind("<Button-3>", self._popup_menu)
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Button-1>", self._on_click)
@@ -143,7 +180,14 @@ class PositionsView(ttk.Frame):
     # ── 이벤트 반영 (app.py 가 호출) ────────────────────────────
 
     def upsert(
-        self, symbol: str, name: str, pos: Position, params: Params, memo: str = ""
+        self,
+        symbol: str,
+        name: str,
+        pos: Position,
+        params: Params,
+        memo: str = "",
+        base_date: str = "",
+        trade_date: str = "",
     ) -> None:
         self._avg[symbol] = pos.avg_price
         qty = f"{pos.remaining}/{pos.total_bought}" if pos.total_bought else "-"
@@ -174,6 +218,7 @@ class PositionsView(ttk.Frame):
             name,
             state_text,
             self._cell(symbol, "price"),
+            self._cell(symbol, "change"),  # 등락률은 틱이 올 때 갱신된다
             avg,
             qty,
             pnl_cell,
@@ -182,6 +227,7 @@ class PositionsView(ttk.Frame):
             f"{params.line2:,.0f}",
             f"{params.line3:,.0f}",
             f"{line_range:.1%}",
+            _base_label(base_date, trade_date),
             memo,
             "📈",
             "✎",
@@ -200,6 +246,10 @@ class PositionsView(ttk.Frame):
         if not self.tree.exists(symbol) or symbol in _SPECIAL:
             return
         self.tree.set(symbol, "price", f"{price:,.0f}")
+        # 등락률: 감시 시작 후 첫 체결가 대비. 코어가 이미 기록하는 값이라 추가 조회가 없다.
+        opened = self._day_open.setdefault(symbol, price)
+        if opened:
+            self.tree.set(symbol, "change", f"{(price - opened) / opened:+.2%}")
         if symbol in self._closed:  # 종료: 수익률·색상 고정
             return
         avg = self._avg.get(symbol, 0)
@@ -210,17 +260,26 @@ class PositionsView(ttk.Frame):
         tag = "profit" if pnl > 0 else ("loss" if pnl < 0 else "")
         self.tree.item(symbol, tags=(tag,) if tag else ())
 
+    def set_day_open(self, symbol: str, price: float) -> None:
+        """복원 시 코어가 알려주는 당일 첫 체결가 (재시작해도 등락률이 이어지도록)."""
+        if price:
+            self._day_open[symbol] = price
+
     def remove(self, symbol: str) -> None:
         if self.tree.exists(symbol):
             self.tree.delete(symbol)
         self._avg.pop(symbol, None)
         self._closed.discard(symbol)
+        self._day_open.pop(symbol, None)
+        self._blocked.pop(symbol, None)
 
     def clear(self) -> None:
         """매매일 전환 시 전체 비우기."""
         self.tree.delete(*self.tree.get_children())
         self._avg.clear()
         self._closed.clear()
+        self._day_open.clear()  # 매매일이 바뀌면 등락률 기준도 새로 잡는다
+        self._blocked.clear()
         self._ensure_add_row()
 
     def selected(self) -> str | None:
@@ -330,12 +389,27 @@ class PositionsView(ttk.Frame):
         return self.tree.set(symbol, column) if self.tree.exists(symbol) else "-"
 
     def _popup_menu(self, event) -> None:
+        """우클릭 메뉴. 이미 선택된 여러 행 위에서 누르면 그 선택을 유지한다."""
         row = self.tree.identify_row(event.y)
-        if row and row not in _SPECIAL:
-            self._menu_target = row
+        if not row or row in _SPECIAL:
+            return
+        selection = [s for s in self.tree.selection() if s not in _SPECIAL]
+        if row not in selection:  # 선택 밖을 눌렀으면 그 행만 대상으로
             self.tree.selection_set(row)
-            self._menu.post(event.x_root, event.y_root)
+            selection = [row]
+        self._menu_targets = selection
 
-    def _call(self, handler: Callable[[str], None]) -> None:
-        if self._menu_target and self.tree.exists(self._menu_target):
-            handler(self._menu_target)
+        multi = len(selection) > 1
+        for label in self._single_only:
+            self._menu.entryconfigure(
+                label, state="disabled" if multi else "normal", label=label
+            )
+        self._menu.post(event.x_root, event.y_root)
+
+    def _call(self, handler: Callable[[str], None], single: bool = False) -> None:
+        """선택된 종목마다 handler 실행. single 항목은 한 종목일 때만 동작한다."""
+        targets = [s for s in self._menu_targets if self.tree.exists(s)]
+        if not targets or (single and len(targets) > 1):
+            return
+        for symbol in targets:
+            handler(symbol)

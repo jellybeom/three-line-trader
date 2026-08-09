@@ -29,6 +29,7 @@ class PositionUpdate:
     memo: str = ""
     tags: str = ""  # 종목 선정 근거 (편집 창 프리필용)
     base_date: str = ""  # 기준봉 날짜
+    day_open: float = 0.0  # 감시 중 첫 체결가 (재시작해도 등락률이 이어지도록)
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,17 @@ class LookupSymbol:
 @dataclass(frozen=True)
 class ManualSell:
     """수동 전량 청산 (시장가) — 소량 보유 등 사용자 판단 개입. 감시 중에도 허용."""
+
+    symbol: str
+
+
+@dataclass(frozen=True)
+class CarryPosition:
+    """다음 매매일로 **포지션만** 이월 — 상태·평단가·잔량/총량만 덮어쓴다.
+
+    다음 매매일에 이미 등록해 둔 종목의 3선·메모는 그날 판단이므로 건드리지 않는다.
+    대상 날짜에 종목이 없으면 이월하지 않는다(어느 설정을 쓸지 알 수 없기 때문).
+    """
 
     symbol: str
 
