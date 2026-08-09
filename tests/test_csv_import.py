@@ -185,3 +185,74 @@ def test_목록에_없는_태그도_그대로_저장된다(tmp_path):
         "종목코드,종목명,태그\n005930,삼성전자,#눌림목\n", encoding="utf-8-sig"
     )
     assert parse_watchlist_csv(str(path))[0][4] == "눌림목"
+
+
+# ── 따옴표 없는 태그 복구 (2026-08-09) ────────────────────────
+# CSV 는 쉼표가 열 구분자라 태그를 따옴표로 감싸지 않으면 칸이 쪼개지고 뒤가 밀린다.
+
+
+def _one(tmp_path, text):
+    path = tmp_path / "w.csv"
+    path.write_text(text, encoding="utf-8-sig")
+    return parse_watchlist_csv(str(path))[0]
+
+
+def test_따옴표_없이_쉼표로_이어_써도_태그가_복구된다(tmp_path):
+    row = _one(
+        tmp_path,
+        "종목코드,종목명,태그,기준봉\n"
+        "005930,삼성전자,#KOSPI상승장,#테마주,2026-08-05\n",
+    )
+    assert row[4] == "KOSPI상승장,테마주"
+    assert row[5] == "2026-08-05"  # 기준봉이 밀리지 않는다
+
+
+def test_샵_없이_써도_뒤_칸이_날짜면_태그로_본다(tmp_path):
+    row = _one(
+        tmp_path,
+        "종목코드,종목명,태그,기준봉\n"
+        "005930,삼성전자,KOSPI상승장,테마주,2026-08-05\n",
+    )
+    assert row[4] == "KOSPI상승장,테마주" and row[5] == "2026-08-05"
+
+
+def test_태그가_셋_이상이어도_복구된다(tmp_path):
+    row = _one(
+        tmp_path,
+        "종목코드,종목명,태그,기준봉\n" "005930,삼성전자,#A,#B,#C,2026-08-05\n",
+    )
+    assert row[4] == "A,B,C" and row[5] == "2026-08-05"
+
+
+def test_메모의_쉼표는_태그로_합치지_않는다(tmp_path):
+    """복구 로직이 다른 열의 쉼표를 잘못 건드리면 안 된다."""
+    row = _one(
+        tmp_path,
+        "종목코드,종목명,메모,태그,기준봉\n"
+        '005930,삼성전자,"급등, 거래대금",#테마주,2026-08-05\n',
+    )
+    assert row[2] == "급등, 거래대금"
+    assert row[4] == "테마주" and row[5] == "2026-08-05"
+
+
+def test_따옴표를_쓴_기존_형식도_그대로_동작한다(tmp_path):
+    row = _one(
+        tmp_path,
+        "종목코드,종목명,태그,기준봉\n"
+        '005930,삼성전자,"#KOSPI상승장, #테마주",2026-08-05\n',
+    )
+    assert row[4] == "KOSPI상승장,테마주" and row[5] == "2026-08-05"
+
+
+def test_영웅문_전체_형식에서도_복구된다(tmp_path):
+    path = tmp_path / "w.csv"
+    path.write_text(
+        "분,신,종목명,현재가,등락률,L일봉H,거래대금,메모,종목코드,1선,2선,3선,태그,기준봉\n"
+        '증,,GRT,"3,730",-2.1,3810 3870 3610 3730,"1,089",메모 내용,\'900290,'
+        "3355,3215,3105,#KOSPI상승장,#테마주,2026-08-05\n",
+        encoding="utf-8-sig",
+    )
+    row = parse_watchlist_csv(str(path))[0]
+    assert row[0] == "900290" and row[2] == "메모 내용"
+    assert row[3] == (3355.0, 3215.0, 3105.0)
+    assert row[4] == "KOSPI상승장,테마주" and row[5] == "2026-08-05"

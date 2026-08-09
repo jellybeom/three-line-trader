@@ -49,6 +49,9 @@ _CODE_PATTERN = re.compile(r"^['\u2019]*A?([0-9][0-9A-Z]{5})$", re.IGNORECASE)
 _NUMERIC_CELL = re.compile(r"^[\d,.+\-%\s]*$")
 
 
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def _parse_tags(cell: str) -> str:
     """태그 셀 정규화 — 쉼표·공백·`#` 어느 조합으로 적어도 같은 결과가 되게 한다.
 
@@ -96,6 +99,28 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
     def cell(row: list, idx: int | None) -> str:
         return row[idx].strip().strip('"') if idx is not None and len(row) > idx else ""
 
+    def repair_tag_split(row: list) -> list:
+        """따옴표 없이 쉼표로 이어 쓴 태그를 한 칸으로 되돌린다.
+
+        CSV 는 쉼표가 열 구분자라 `#상승장,#테마주` 를 따옴표로 감싸지 않으면 두 칸으로
+        쪼개지고 뒤따르는 열이 밀린다. 쪼개진 조각이 모두 `#` 로 시작할 때만 합쳐,
+        메모에 쉼표가 들어간 경우를 잘못 건드리지 않는다.
+        """
+        extra = len(row) - len(header)
+        if extra <= 0 or tag_idx is None:
+            return row
+        pieces = [p.strip() for p in row[tag_idx : tag_idx + 1 + extra]]
+        rest = row[tag_idx + 1 + extra :]
+        # `#` 로 시작하면 확실한 태그. 없더라도 뒤 칸이 제자리를 찾으면(기준봉이 날짜
+        # 형식이면) 태그가 쪼개진 것으로 본다 — 메모의 쉼표를 잘못 합치지 않기 위한 조건.
+        looks_tagged = all(p.startswith("#") for p in pieces if p)
+        if not looks_tagged:
+            expect_date = base_idx is not None and base_idx > tag_idx
+            candidate = rest[base_idx - tag_idx - 1] if expect_date and rest else ""
+            if not _DATE_PATTERN.match(candidate.strip()):
+                return row  # 태그가 아닌 값이 섞여 있으면 손대지 않는다
+        return row[:tag_idx] + [",".join(pieces)] + rest
+
     def parse_lines(row: list, idxs: tuple) -> tuple | None:
         try:
             values = tuple(float(cell(row, i).replace(",", "")) for i in idxs)
@@ -123,6 +148,7 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
                 continue
             seen.add(code)
             lines = parse_lines(row, line_idxs) if has_lines else None
+            row = repair_tag_split(row)
             result.append(
                 (
                     code,
