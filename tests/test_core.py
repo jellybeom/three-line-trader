@@ -705,6 +705,58 @@ def test_일괄_등록은_종목별_알림을_보내지_않는다(core):
     assert [r for r in core._store.recent_events(core._date) if r[2] == "등록"]
 
 
+def test_정상_등록은_Discord_로_알리지_않는다(core):
+    """편성 결과는 08:55 개장 브리핑으로 갈음한다."""
+    bot = _RecordingBot()
+    core._bot = bot
+    core._notify_level = "전체"
+    rows = (
+        {
+            "symbol": "005930",
+            "name": "삼성전자",
+            "tags": "테마주",
+            "base_date": "2026-08-05",
+            "memo": "",
+            "qty": 10,
+        },
+    )
+
+    asyncio.run(core._handle_command(bus.RegistrationNotice(rows, (), 2, 1)))
+    asyncio.run(core._flush_notices())
+    assert bot.sent == []
+
+    # 화면 로그·DB 에는 결과가 남는다
+    assert [r for r in core._store.recent_events(core._date) if "CSV 불러오기" in r[3]]
+
+
+def test_등록_실패가_있으면_즉시_알린다(core):
+    """사용자가 고쳐야 하는 문제라 브리핑까지 기다리면 늦다."""
+    bot = _RecordingBot()
+    core._bot = bot
+    core._notify_level = "전체"
+    rows = (
+        {
+            "symbol": "005930",
+            "name": "삼성전자",
+            "tags": "",
+            "base_date": "",
+            "memo": "",
+            "qty": 10,
+        },
+    )
+
+    asyncio.run(
+        core._handle_command(
+            bus.RegistrationNotice(
+                rows, ("해성디에스(195870) 1선 > 2선 > 3선 위반",), 0, 0
+            )
+        )
+    )
+    asyncio.run(core._flush_notices())
+    assert len(bot.sent) == 1
+    assert "해성디에스" in bot.sent[0]["fields"][0]["value"]
+
+
 def test_CSV_등록_알림은_한_번만_발송된다(core):
     """예전에는 결과 embed 와 건수 알림이 따로 나가 두 번 왔다."""
     sent = []
@@ -733,7 +785,7 @@ def test_CSV_등록_알림은_한_번만_발송된다(core):
                         "qty": 10,
                     },
                 ),
-                (),
+                ("실패 1건",),
                 2,
                 1,
             )

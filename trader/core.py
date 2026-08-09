@@ -411,7 +411,9 @@ class Core:
                 if warns:
                     summary += f" · 실패 {len(warns)}종목"
                 self._log("시스템", "등록", summary, notify=False)
-                if self._bot is not None:
+                # 평시에는 알리지 않는다 — 편성 결과는 08:55 개장 브리핑으로 갈음한다.
+                # 다만 '등록 실패' 는 사용자가 고쳐야 하는 문제라 즉시 알린다.
+                if warns and self._bot is not None:
                     await self._send_embed(
                         build_registration_embed(
                             self._date, list(rows), list(warns), staged, skipped

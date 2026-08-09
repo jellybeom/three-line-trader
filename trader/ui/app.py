@@ -114,11 +114,14 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
         # `#` 로 시작하면 확실한 태그. 없더라도 뒤 칸이 제자리를 찾으면(기준봉이 날짜
         # 형식이면) 태그가 쪼개진 것으로 본다 — 메모의 쉼표를 잘못 합치지 않기 위한 조건.
         looks_tagged = all(p.startswith("#") for p in pieces if p)
-        if not looks_tagged:
+        if not looks_tagged and rest:
+            # 태그 뒤에 다른 열이 있으면, 그 열이 제자리를 찾을 때만 합친다
+            # (메모의 쉼표를 태그로 잘못 합치지 않기 위한 조건).
             expect_date = base_idx is not None and base_idx > tag_idx
-            candidate = rest[base_idx - tag_idx - 1] if expect_date and rest else ""
+            candidate = rest[base_idx - tag_idx - 1] if expect_date else ""
             if not _DATE_PATTERN.match(candidate.strip()):
-                return row  # 태그가 아닌 값이 섞여 있으면 손대지 않는다
+                return row
+        # rest 가 비었다면 태그가 마지막 열 — 뒤로 밀릴 값이 없으니 그대로 합친다
         return row[:tag_idx] + [",".join(pieces)] + rest
 
     def parse_lines(row: list, idxs: tuple) -> tuple | None:
