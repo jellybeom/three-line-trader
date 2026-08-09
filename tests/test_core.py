@@ -849,3 +849,30 @@ def test_관심종목_조회는_태그와_메모를_보여준다(core):
         "하이닉스" in filtered["description"]
         and "삼성전자" not in filtered["description"]
     )
+
+
+def test_이월해도_태그와_기준봉이_따라간다(core):
+    """빠뜨리면 이월된 날 청산된 매매가 태그 집계에서 통째로 누락된다."""
+    core._running = False
+    asyncio.run(
+        core._handle_command(
+            bus.Register(
+                "005930",
+                "삼성전자",
+                P,
+                Position(
+                    state=State.BUY1, avg_price=9_900, total_bought=20, remaining=20
+                ),
+                tags="테마주,KOSPI상승장",
+                base_date="2026-08-07",
+            )
+        )
+    )
+    asyncio.run(core._handle_command(bus.CarryOver("005930")))
+
+    # 다음 영업일 리스트에 그대로 남아야 한다
+    nxt = [d for d in core._store.recent_trade_dates(5) if d != core._date][0]
+    _, _, pos, _, tags, base_date = core._store.load_all(nxt)["005930"]
+    assert tags == "테마주,KOSPI상승장"
+    assert base_date == "2026-08-07"
+    assert pos.remaining == 20  # 포지션도 함께 넘어간다

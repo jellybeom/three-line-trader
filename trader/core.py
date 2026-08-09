@@ -372,6 +372,8 @@ class Core:
                 target = date.fromisoformat(self._date) + timedelta(days=1)
                 while target.weekday() >= 5:  # 주말 건너뛰고 다음 영업일
                     target += timedelta(days=1)
+                # 태그·기준봉은 종목 선정 근거라 이월해도 그대로 따라가야 한다.
+                # 빠뜨리면 이월된 날의 매매가 태그 집계에서 통째로 누락된다.
                 self._store.register_symbol(
                     target.isoformat(),
                     s,
@@ -379,6 +381,8 @@ class Core:
                     e["params"],
                     e["pos"],
                     memo=e.get("memo", ""),
+                    tags=e.get("tags", ""),
+                    base_date=e.get("base_date", ""),
                 )
                 self._log(
                     s,
