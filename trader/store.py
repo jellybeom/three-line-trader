@@ -73,6 +73,21 @@ CREATE TABLE IF NOT EXISTS events (       -- append-only 이력
 );
 CREATE INDEX IF NOT EXISTS idx_events_symbol_ts ON events(symbol, ts);
 
+-- 매매일지: 코멘트와 복기 차트 경로. 매매 데이터(손익·MFE/MAE·태그)는 이미
+-- symbols·positions·events 에 있으므로 여기에는 **사람이 쓴 것과 파일 경로만** 둔다.
+-- 글자 수 제한은 두지 않는다 (TEXT 는 사실상 무제한이고, 차트 PNG 한 장이 텍스트
+-- 수십 건보다 크다).
+CREATE TABLE IF NOT EXISTS journal (
+    trade_date TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    good       TEXT NOT NULL DEFAULT '',   -- 잘한 점
+    bad        TEXT NOT NULL DEFAULT '',   -- 아쉬운 점
+    daily_path  TEXT NOT NULL DEFAULT '',  -- 보관된 일봉 차트 경로
+    minute_path TEXT NOT NULL DEFAULT '',  -- 보관된 3분봉 차트 경로
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (trade_date, symbol)
+);
+
 CREATE TABLE IF NOT EXISTS settings (   -- 전역 설정 (자금 배분, 투자 모드 등)
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -97,7 +112,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 10  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 11  # 스키마 변경 시 1 증가.
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
 # 여기 없는 버전 차이는 데이터 구조가 바뀐 것이므로 종전대로 명확한 에러로 안내한다.
@@ -109,6 +124,18 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE symbols ADD COLUMN base_date TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE positions ADD COLUMN day_open REAL",
         "ALTER TABLE positions ADD COLUMN day_close REAL",
+    ),
+    11: (  # 매매일지 2단계: 코멘트와 차트 보관 경로
+        """CREATE TABLE IF NOT EXISTS journal (
+            trade_date TEXT NOT NULL,
+            symbol     TEXT NOT NULL,
+            good       TEXT NOT NULL DEFAULT '',
+            bad        TEXT NOT NULL DEFAULT '',
+            daily_path  TEXT NOT NULL DEFAULT '',
+            minute_path TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (trade_date, symbol)
+        )""",
     ),
 }
 
@@ -396,6 +423,73 @@ class Store:
             ).fetchall()
         ]
         return symbol_rows, fills
+
+    # ── 매매일지 ────────────────────────────────────────────────
+
+    def save_journal(
+        self,
+        trade_date: str,
+        symbol: str,
+        good: str = "",
+        bad: str = "",
+        daily_path: str = "",
+        minute_path: str = "",
+    ) -> None:
+        """일지 저장. 빈 문자열로 넘긴 항목은 기존 값을 지우지 않는다.
+
+        차트 경로는 종료 시 자동으로, 코멘트는 나중에 사람이 쓰므로 서로 다른 시점에
+        같은 행을 갱신하게 된다.
+        """
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO journal (trade_date, symbol, good, bad,
+                                        daily_path, minute_path, updated_at)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(trade_date, symbol) DO UPDATE SET
+                     good=CASE WHEN excluded.good='' THEN journal.good ELSE excluded.good END,
+                     bad=CASE WHEN excluded.bad='' THEN journal.bad ELSE excluded.bad END,
+                     daily_path=CASE WHEN excluded.daily_path='' THEN journal.daily_path
+                                     ELSE excluded.daily_path END,
+                     minute_path=CASE WHEN excluded.minute_path='' THEN journal.minute_path
+                                      ELSE excluded.minute_path END,
+                     updated_at=excluded.updated_at""",
+                (trade_date, symbol, good, bad, daily_path, minute_path, _now()),
+            )
+
+    def load_journal(self, trade_date: str, symbol: str) -> dict:
+        row = self._conn.execute(
+            "SELECT * FROM journal WHERE trade_date=? AND symbol=?",
+            (trade_date, symbol),
+        ).fetchone()
+        return dict(row) if row else {}
+
+    def journal_entries(self, since: str = "", until: str = "") -> list[dict]:
+        """일지 대상 목록 — 매매가 있었던 종목과 그 코멘트 작성 여부.
+
+        '무엇을 아직 안 썼는지' 를 알려주는 것이 목적이라 매매 요약도 함께 붙인다.
+        """
+        where = ["p.total_bought > 0"]
+        params: list[str] = []
+        if since:
+            where.append("s.trade_date >= ?")
+            params.append(since)
+        if until:
+            where.append("s.trade_date <= ?")
+            params.append(until)
+        rows = self._conn.execute(
+            f"""SELECT s.trade_date, s.symbol, s.name, s.tags, s.base_date, s.memo,
+                       p.state, p.avg_price, p.total_bought, p.realized_pnl, p.fees,
+                       p.high_price, p.low_price, p.day_open, p.day_close,
+                       COALESCE(j.good, '') good, COALESCE(j.bad, '') bad,
+                       COALESCE(j.daily_path, '') daily_path,
+                       COALESCE(j.minute_path, '') minute_path
+                FROM symbols s JOIN positions p USING(trade_date, symbol)
+                LEFT JOIN journal j ON j.trade_date = s.trade_date AND j.symbol = s.symbol
+                WHERE {' AND '.join(where)}
+                ORDER BY s.trade_date DESC, s.symbol""",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def recent_trade_dates(self, limit: int = 10) -> list[str]:
         """기록이 있는 매매일 (최근 순)."""

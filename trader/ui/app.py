@@ -459,6 +459,7 @@ class App(tk.Tk):
         self.events = EventsView(
             paned,
             on_daily_summary=lambda: self._bus.commands.put(bus.RequestDailySummary()),
+            on_journal=self._open_journal,
         )
         paned.add(self.positions, weight=5)
         paned.add(self.events, weight=2)
@@ -813,6 +814,27 @@ class App(tk.Tk):
             return
         self._bus.commands.put(cmd)
 
+    def _open_journal(self, select: tuple[str, str] | None = None) -> None:
+        """매매일지 창 — 목록은 코어에서 받아 채운다 (JournalEntries 이벤트)."""
+        self._journal_select = select
+        self._bus.commands.put(bus.RequestJournal())
+
+    def _show_journal(self, entries: tuple) -> None:
+        from trader.ui.journal_dialog import JournalDialog
+
+        if not entries:
+            messagebox.showinfo("매매일지", "아직 기록할 매매가 없습니다.")
+            return
+        JournalDialog(
+            self,
+            [dict(e) for e in entries],
+            on_save=self._save_journal,
+            select=getattr(self, "_journal_select", None),
+        )
+
+    def _save_journal(self, trade_date: str, symbol: str, good: str, bad: str) -> None:
+        self._bus.commands.put(bus.SaveJournal(trade_date, symbol, good, bad))
+
     def _open_chart(self, symbol: str) -> None:
         if symbol in self._staged:
             messagebox.showinfo("안내", "3선 미입력 종목은 차트를 만들 수 없습니다.")
@@ -963,6 +985,8 @@ class App(tk.Tk):
                 self._notify_combo.set(lv)
             case bus.Blocked(symbol=s, active=on, reason=why):
                 self.positions.set_blocked(s, on, why)
+            case bus.JournalEntries(entries=entries):
+                self._show_journal(entries)
             case bus.ChartReady(symbol=s, name=n, daily_path=dp, minute_path=mp):
                 self._show_chart(s, n, dp, mp)
             case bus.DiscordStatus(connected=ok, detail=detail):

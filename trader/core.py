@@ -466,6 +466,12 @@ class Core:
                     )
             case bus.Notice(kind=kind, text=text, symbol=sym):
                 self._log(sym, kind, text)
+            case bus.RequestJournal(since=since):
+                entries = self._store.journal_entries(since=since)
+                self._bus.events.put(bus.JournalEntries(tuple(entries)))
+            case bus.SaveJournal(trade_date=td, symbol=sym, good=good, bad=bad):
+                self._store.save_journal(td, sym, good=good, bad=bad)
+                self._log(sym, "일지", f"{td} 일지 저장", notify=False)
             case bus.RequestDailySummary():
                 await self.send_daily_summary()
             case bus.ChartRequest(symbol=s, to_discord=to_discord):
@@ -1531,6 +1537,8 @@ class Core:
             )
         if to_discord and self._bot is not None:
             await self._send_chart_images(symbol, (daily_path, minute_path))
+        if to_discord:  # 종료 자동 차트 — 일지 폴더에 보관하고 경로를 남긴다
+            self._archive_charts(symbol, daily_path, minute_path)
 
     def _build_charts(
         self, symbol: str, fills_raw: list[tuple[str, str, float]]
@@ -1609,6 +1617,41 @@ class Core:
             font=font,
         )
         return daily_path, minute_path, kospi_error
+
+    def _archive_charts(self, symbol: str, daily_path: str, minute_path: str) -> None:
+        """복기 차트를 일지 폴더로 복사한다.
+
+        `data/journal/2026-08/2026-08-10/043260-성호전자-익절-daily.png` 처럼
+        **월·일자 폴더 + 결과가 들어간 파일명**이라, 탐색기에서 정렬만 해도 손절 매매가
+        모인다. DB 에는 경로만 남겨 이미지와 기록을 함께 다룰 수 있게 한다.
+        """
+        import re
+        import shutil
+
+        e = self._entries.get(symbol)
+        if e is None:
+            return
+        pos = e["pos"]
+        net = pos.realized_pnl - pos.fees
+        result = "익절" if net > 0 else ("손절" if net < 0 else "본전")
+        safe_name = re.sub(r'[\\/:*?"<>|]', "", e["name"])  # 파일명에 못 쓰는 문자 제거
+        folder = Path(self._db_dir) / "journal" / self._date[:7] / self._date
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            saved = []
+            for src_path, kind in ((daily_path, "daily"), (minute_path, "minute")):
+                if not src_path or not Path(src_path).exists():
+                    saved.append("")
+                    continue
+                dest = folder / f"{symbol}-{safe_name}-{result}-{kind}.png"
+                shutil.copyfile(src_path, dest)
+                saved.append(str(dest))
+        except OSError as err:  # 보관 실패가 매매·알림을 막지 않게
+            self._log(symbol, "경고", f"차트 보관 실패: {err}", notify=False)
+            return
+        self._store.save_journal(
+            self._date, symbol, daily_path=saved[0], minute_path=saved[1]
+        )
 
     async def _send_chart_images(self, symbol: str, paths: tuple[str, ...]) -> None:
         name = self._entries[symbol]["name"] if symbol in self._entries else symbol
@@ -1818,6 +1861,21 @@ class Core:
         self._flush_day_lows(force=True)  # 요약 직전에 최신 근접도를 확정 저장
         account = await self.refresh_account()
         embed = build_daily_summary_embed(self._date, symbols, fills, deposit, account)
+        # 일지 미작성 안내 — 늦어도 주말에는 쓰기로 한 약속을 상기시킨다
+        pending = [
+            e for e in self._store.journal_entries() if not (e["good"] or e["bad"])
+        ]
+        if pending:
+            recent = ", ".join(
+                f"{e['name']}({e['trade_date'][5:]})" for e in pending[:3]
+            )
+            embed.setdefault("fields", []).append(
+                {
+                    "name": f"✍ 일지 미작성 {len(pending)}건",
+                    "value": recent + (" 외" if len(pending) > 3 else ""),
+                    "inline": False,
+                }
+            )
         holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
         self._log(
             "시스템",
@@ -1837,6 +1895,18 @@ class Core:
         if not base_date:
             return None
         return self._calendar.days_between(base_date, trade_date or self._date)
+
+    async def index_rate(self) -> float | None:
+        """KOSPI 당일 등락률 (전일 종가 대비). 조회 실패 시 None."""
+        if self._broker is None:
+            return None
+        try:
+            bars = await asyncio.to_thread(self._broker.index_daily)
+        except BrokerError:
+            return None
+        if len(bars) < 2 or not bars[-2][4]:
+            return None
+        return (bars[-1][4] - bars[-2][4]) / bars[-2][4]
 
     async def refresh_calendar(self) -> None:
         """거래일 달력 갱신 — 하루 한 번이면 충분하다 (지수 일봉 1회 조회).

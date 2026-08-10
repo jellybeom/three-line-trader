@@ -169,6 +169,8 @@ class SimCore:
                     )
                 case bus.Notice(kind=kind, text=text, symbol=sym):
                     self._log(sym, kind, text)
+                case bus.RequestJournal() | bus.SaveJournal():
+                    pass  # 시뮬레이터는 일지를 다루지 않는다
                 case bus.RequestDailySummary():
                     _, fills = self._store.daily_report(self._date)
                     self._log(

@@ -16,7 +16,7 @@ _COLUMNS = ("ts", "symbol", "name", "kind", "text")
 
 
 class EventsView(ttk.Frame):
-    def __init__(self, master, on_daily_summary=None):
+    def __init__(self, master, on_daily_summary=None, on_journal=None):
         super().__init__(master)
 
         body = ttk.Frame(self)
@@ -45,6 +45,9 @@ class EventsView(ttk.Frame):
         self._menu = tk.Menu(self, tearoff=0)
         self._menu.add_command(label="로그 지우기 (화면만)", command=self._clear)
         self._menu.add_command(label="CSV 내보내기", command=self._export)
+        if on_journal:
+            self._menu.add_separator()
+            self._menu.add_command(label="매매일지 열기", command=on_journal)
         if on_daily_summary:
             self._menu.add_separator()
             self._menu.add_command(

@@ -205,6 +205,55 @@ def _base_date_counts(symbols: list[dict], trade_date: str) -> list[tuple[str, i
     return sorted(counts.items(), key=lambda x: int(x[0].lstrip("D") or 0))
 
 
+def benchmark(symbols: list[dict]) -> dict:
+    """벤치마크 — 내가 산 종목 vs 관심종목 전체가 그날 어땠는지.
+
+    성과가 실력인지 시장 덕인지 가늠하는 재료다. 감시 중 받은 **첫 체결가 대비
+    마지막 체결가**로 계산하므로 추가 조회가 없다.
+    """
+
+    def rate(s: dict) -> float | None:
+        opened, closed = s.get("day_open") or 0, s.get("day_close") or 0
+        return (closed - opened) / opened if opened and closed else None
+
+    all_rates = [r for s in symbols if (r := rate(s)) is not None]
+    traded_rates = [
+        r for s in symbols if s.get("total_bought") and (r := rate(s)) is not None
+    ]
+    result: dict[str, float | int] = {
+        "watch_count": len(all_rates),
+        "traded_count": len(traded_rates),
+    }
+    if all_rates:
+        result["watch_avg"] = sum(all_rates) / len(all_rates)
+    if traded_rates:
+        result["traded_avg"] = sum(traded_rates) / len(traded_rates)
+    return result
+
+
+def build_benchmark_field(
+    symbols: list[dict], index_rate: float | None = None
+) -> dict | None:
+    """일일 요약에 붙일 '시장 대비' 필드."""
+    bench = benchmark(symbols)
+    lines = []
+    if "traded_avg" in bench:
+        lines.append(
+            f"내 종목 **{bench['traded_avg']:+.2%}** ({bench['traded_count']}종목)"
+        )
+    # 관심종목 평균은 '내가 산 것 말고도 있을 때' 만 비교 가치가 있다.
+    # 산 종목이 전부면 두 숫자가 같아 대조가 되지 않는다.
+    if "watch_avg" in bench and bench["watch_count"] > bench["traded_count"]:
+        lines.append(
+            f"관심종목 평균 {bench['watch_avg']:+.2%} ({bench['watch_count']}종목)"
+        )
+    if index_rate is not None:
+        lines.append(f"KOSPI {index_rate:+.2%}")
+    if len(lines) < 2:  # 비교 대상이 없으면 의미가 없다
+        return None
+    return {"name": "📐 시장 대비", "value": " · ".join(lines), "inline": False}
+
+
 def build_briefing_embed(
     trade_date: str,
     symbols: list[dict],
@@ -459,6 +508,7 @@ def build_daily_summary_embed(
     fills: list[dict],
     deposit: float | None = None,
     account: dict | None = None,
+    index_rate: float | None = None,
 ) -> dict:
     """일일 요약 Discord embed — 왼쪽 색 띠와 항목 분리로 한눈에 읽히게 만든다.
 
@@ -532,6 +582,9 @@ def build_daily_summary_embed(
         )
 
     if field := build_proximity_field(symbols):  # 미진입 종목의 1선 근접도
+        fields.append(field)
+
+    if field := build_benchmark_field(symbols, index_rate):
         fields.append(field)
 
     if (

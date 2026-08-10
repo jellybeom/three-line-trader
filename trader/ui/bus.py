@@ -70,6 +70,13 @@ class Blocked:
 
 
 @dataclass(frozen=True)
+class JournalEntries:
+    """일지 대상 매매 목록 (최근 순)."""
+
+    entries: tuple
+
+
+@dataclass(frozen=True)
 class ChartReady:
     """복기 차트 PNG 생성 완료 — UI 가 창으로 표시한다."""
 
@@ -280,6 +287,23 @@ class Notice:
     kind: str  # 등록 / 경고 / 에러 ...
     text: str
     symbol: str = "시스템"
+
+
+@dataclass(frozen=True)
+class RequestJournal:
+    """일지 창에 채울 매매 목록 요청. 결과는 JournalEntries 이벤트로 온다."""
+
+    since: str = ""  # 비우면 최근 기록 전체
+
+
+@dataclass(frozen=True)
+class SaveJournal:
+    """일지 저장 (잘한 점 / 아쉬운 점)."""
+
+    trade_date: str
+    symbol: str
+    good: str
+    bad: str
 
 
 @dataclass(frozen=True)
