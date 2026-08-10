@@ -899,11 +899,12 @@ class App(tk.Tk):
                 tags=tags,
                 base_date=base_date,
                 day_open=day_open,
+                base_days=base_days,
             ):
                 self._staged.pop(s, None)  # 3선 입력 완료 → 대기 해제
                 self._registry[s] = (n, prm, p, memo, tags, base_date)
                 self.positions.set_day_open(s, day_open)
-                self.positions.upsert(s, n, p, prm, memo, base_date, self._current_date)
+                self.positions.upsert(s, n, p, prm, memo, base_days)
                 self._update_summary()
                 self._update_pnl()
             case bus.Tick(symbol=s, price=p):

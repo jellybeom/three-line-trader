@@ -13,11 +13,11 @@
 from __future__ import annotations
 
 import tkinter as tk
-from datetime import date
 from tkinter import messagebox, ttk
 from typing import Callable
 
 from trader.state_machine import Params, Position, State
+from trader.trading_calendar import format_days
 
 _COLUMNS = (
     "code",
@@ -52,7 +52,7 @@ _HEADINGS = (
     "1선",
     "2선",
     "3선",
-    "1↔3선",
+    "1선↔3선",
     "기준봉",
     "메모",
     "",
@@ -65,15 +65,14 @@ _SPECIAL = {_ADD_ROW, _CSV_ROW}
 _BASE_HEADINGS = dict(zip(_COLUMNS, _HEADINGS))
 
 
-def _base_label(base_date: str, trade_date: str) -> str:
-    """기준봉으로부터 며칠째인지 — 'D+2'. 날짜가 없거나 이상하면 빈칸."""
-    if not (base_date and trade_date):
-        return ""
-    try:
-        days = (date.fromisoformat(trade_date) - date.fromisoformat(base_date)).days
-    except ValueError:
-        return ""
-    return f"D{days:+d}" if days else "D0"
+# 가격을 나타내는 열 — 오른쪽 정렬하되 셀 끝에 바싹 붙지 않게 여백을 준다
+_PRICE_COLUMNS = ("price", "avg", "realized", "line1", "line2", "line3")
+_CELL_PAD = "  "  # Treeview 는 셀 안쪽 여백을 지원하지 않아 공백으로 대신한다
+
+
+def _pad(text: str) -> str:
+    """오른쪽 정렬 셀의 끝 여백."""
+    return f"{text}{_CELL_PAD}" if text else text
 
 
 class PositionsView(ttk.Frame):
@@ -117,14 +116,15 @@ class PositionsView(ttk.Frame):
             elif col == "code":
                 self.tree.column(col, width=76, anchor="center", stretch=False)
             elif col in ("range", "change"):
-                self.tree.column(col, width=64, anchor="e")
+                self.tree.column(col, width=68, anchor="center")
             elif col == "base":  # 기준봉 D+n — 짧은 값이라 좁게
                 self.tree.column(col, width=52, anchor="center")
             elif col == "memo":
                 self.tree.column(col, width=110, anchor="center")
             else:
                 width = 150 if col == "state" else (100 if col == "name" else 90)
-                anchor = "center" if col in ("name", "state") else "e"
+                # 가격 열만 오른쪽 정렬(자릿수 비교가 쉬움), 나머지는 가운데 정렬
+                anchor = "e" if col in _PRICE_COLUMNS else "center"
                 self.tree.column(col, width=width, anchor=anchor)
 
         self.tree.tag_configure(
@@ -186,8 +186,7 @@ class PositionsView(ttk.Frame):
         pos: Position,
         params: Params,
         memo: str = "",
-        base_date: str = "",
-        trade_date: str = "",
+        base_days: int | None = None,
     ) -> None:
         self._avg[symbol] = pos.avg_price
         qty = f"{pos.remaining}/{pos.total_bought}" if pos.total_bought else "-"
@@ -219,15 +218,15 @@ class PositionsView(ttk.Frame):
             state_text,
             self._cell(symbol, "price"),
             self._cell(symbol, "change"),  # 등락률은 틱이 올 때 갱신된다
-            avg,
+            _pad(avg),
             qty,
             pnl_cell,
-            realized,
-            f"{params.line1:,.0f}",
-            f"{params.line2:,.0f}",
-            f"{params.line3:,.0f}",
+            _pad(realized),
+            _pad(f"{params.line1:,.0f}"),
+            _pad(f"{params.line2:,.0f}"),
+            _pad(f"{params.line3:,.0f}"),
             f"{line_range:.1%}",
-            _base_label(base_date, trade_date),
+            format_days(base_days),
             memo,
             "📈",
             "✎",
@@ -245,7 +244,7 @@ class PositionsView(ttk.Frame):
     def tick(self, symbol: str, price: float) -> None:
         if not self.tree.exists(symbol) or symbol in _SPECIAL:
             return
-        self.tree.set(symbol, "price", f"{price:,.0f}")
+        self.tree.set(symbol, "price", _pad(f"{price:,.0f}"))
         # 등락률: 감시 시작 후 첫 체결가 대비. 코어가 이미 기록하는 값이라 추가 조회가 없다.
         opened = self._day_open.setdefault(symbol, price)
         if opened:

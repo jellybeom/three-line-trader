@@ -30,6 +30,7 @@ class PositionUpdate:
     tags: str = ""  # 종목 선정 근거 (편집 창 프리필용)
     base_date: str = ""  # 기준봉 날짜
     day_open: float = 0.0  # 감시 중 첫 체결가 (재시작해도 등락률이 이어지도록)
+    base_days: int | None = None  # 기준봉으로부터 경과한 거래일 수 (공휴일 제외)
 
 
 @dataclass(frozen=True)

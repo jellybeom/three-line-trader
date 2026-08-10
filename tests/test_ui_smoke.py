@@ -363,6 +363,70 @@ def _fill(app, symbols):
     app.update()
 
 
+def test_가격_열은_오른쪽_정렬에_여백을_둔다(app):
+    """셀 끝에 바싹 붙으면 읽기 불편하다 (Treeview 는 셀 여백을 지원하지 않는다)."""
+    from trader.state_machine import Params, Position
+    from trader.ui import bus
+
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=200_000, buy2_amount=200_000
+    )
+    app._dispatch(bus.TradeDate("2026-08-10"))
+    app._dispatch(
+        bus.PositionUpdate(
+            "005930",
+            "삼성전자",
+            Position(
+                state=State.BUY1,
+                avg_price=9_900,
+                total_bought=20,
+                remaining=20,
+                realized_pnl=12_345,
+            ),
+            params,
+        )
+    )
+    app._dispatch(bus.Tick("005930", 10_290))
+    app.update()
+
+    tree = app.positions.tree
+    for col in ("price", "avg", "realized", "line1", "line2", "line3"):
+        assert str(tree.column(col)["anchor"]) == "e", col
+        assert tree.set("005930", col).endswith("  "), col
+
+
+def test_가격이_아닌_열은_가운데_정렬(app):
+    from trader.state_machine import Params, Position
+    from trader.ui import bus
+
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=200_000, buy2_amount=200_000
+    )
+    app._dispatch(bus.PositionUpdate("005930", "삼성전자", Position(), params))
+    app.update()
+
+    tree = app.positions.tree
+    for col in (
+        "code",
+        "name",
+        "state",
+        "change",
+        "qty",
+        "pnl",
+        "range",
+        "base",
+        "memo",
+    ):
+        assert str(tree.column(col)["anchor"]) == "center", col
+
+
+def test_열_제목(app):
+    tree = app.positions.tree
+    assert tree.heading("range")["text"] == "1선↔3선"
+    assert tree.heading("change")["text"] == "등락률"
+    assert tree.heading("base")["text"] == "기준봉"
+
+
 def test_등락률_열은_첫_체결가_대비로_계산된다(app):
     from trader.ui import bus
 
@@ -373,10 +437,28 @@ def test_등락률_열은_첫_체결가_대비로_계산된다(app):
     assert app.positions.tree.set("005930", "change") == "+5.00%"
 
 
-def test_기준봉_열은_경과일을_보여준다(app):
-    _fill(app, [("005930", "삼성전자", "2026-08-05"), ("000660", "하이닉스", "")])
+def test_기준봉_열은_코어가_계산한_거래일을_보여준다(app):
+    """공휴일 반영은 코어(거래일 달력)가 하고, 화면은 받은 값을 표시만 한다."""
+    from trader.state_machine import Params, Position
+    from trader.ui import bus
+
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=200_000, buy2_amount=200_000
+    )
+    app._dispatch(bus.TradeDate("2026-08-18"))
+    app._dispatch(
+        bus.PositionUpdate(
+            "005930", "삼성전자", Position(), params, "", "", "2026-08-14", 0, 1
+        )
+    )
+    app._dispatch(
+        bus.PositionUpdate(
+            "000660", "하이닉스", Position(), params, "", "", "", 0, None
+        )
+    )
+    app.update()
     tree = app.positions.tree
-    assert tree.set("005930", "base") == "D+5"
+    assert tree.set("005930", "base") == "D+1"
     assert tree.set("000660", "base") == ""  # 기준봉이 없으면 빈칸
 
 

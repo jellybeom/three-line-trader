@@ -999,3 +999,53 @@ def test_감시_중에는_포지션_이월도_막힌다(core):
     )
     asyncio.run(core._handle_command(bus.CarryPosition("005930")))
     assert "005930" not in core._store.load_all(core._next_trade_date())
+
+
+# ── 거래일 달력 (2026-08-10) ──────────────────────────────────
+
+
+def test_거래일_달력으로_기준봉_경과일을_센다(core):
+    """공휴일이 끼면 주말만 빼는 계산과 달라진다."""
+    core._calendar.replace(["2026-08-13", "2026-08-14", "2026-08-18", "2026-08-19"])
+    core._date = "2026-08-18"
+    assert core.base_days("2026-08-14") == 1  # 8/17 대체휴일 제외
+    assert core.base_days("2026-08-13") == 2
+    assert core.base_days("") is None
+
+
+def test_달력은_지수_일봉에서_받아_저장된다(core):
+    """재시작 후 키움 연결 전에도 D+n 이 맞게 보이도록 저장해 둔다."""
+
+    class Broker(StubBroker):
+        def index_daily(self, code="001", count=180):
+            return [
+                ("20260813", 1, 1, 1, 1, 0, 0),
+                ("20260814", 1, 1, 1, 1, 0, 0),
+                ("20260818", 1, 1, 1, 1, 0, 0),
+            ]
+
+    core._broker = Broker()
+    asyncio.run(core.refresh_calendar())
+    assert core._calendar.days == ["2026-08-13", "2026-08-14", "2026-08-18"]
+    assert (
+        core._store.get_setting("trading_days", "")
+        == "2026-08-13,2026-08-14,2026-08-18"
+    )
+
+    fresh = Core(bus.Bus(), db_dir=str(core._db_dir))
+    fresh._store = core._store
+    fresh._load_calendar()
+    assert len(fresh._calendar) == 3  # 연결 없이도 복원된다
+
+
+def test_달력_조회_실패는_매매에_영향을_주지_않는다(core):
+    from trader.broker import BrokerError
+
+    class Broker(StubBroker):
+        def index_daily(self, code="001", count=180):
+            raise BrokerError("지수 조회 실패")
+
+    core._broker = Broker()
+    asyncio.run(core.refresh_calendar())  # 예외가 새어 나오지 않는다
+    assert len(core._calendar) == 0
+    assert core.base_days("2026-08-07", "2026-08-10") == 1  # 주말 기준 근사로 동작

@@ -51,6 +51,7 @@ from trader.state_machine import (
     mark_pending,
 )
 from trader.store import Store
+from trader.trading_calendar import TradingCalendar
 from trader.ui import bus
 from trader.watcher import Tick, Watcher
 
@@ -253,6 +254,10 @@ class Core:
         self._account: dict[str, float] = {}  # 계좌 요약 (매입·평가·손익·추정자산)
         self._account_at = 0.0
         self._day_low_at = 0.0
+        # 거래일 달력 — 기준봉 D+n 을 공휴일까지 반영해 세기 위해 쓴다.
+        # 키움 지수 일봉의 날짜 목록이 곧 실제 거래일이다.
+        self._calendar = TradingCalendar()
+        self._calendar_at = ""  # 마지막으로 갱신한 날짜
         self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
         self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
@@ -332,6 +337,7 @@ class Core:
         self._order_fail.clear()
         self._order_blocked.clear()
         self._pending.clear()
+        self._load_calendar()
         self._load_date(self._date)
         self._emit_date_loaded()  # TradeDate 이벤트가 UI 목록을 비우고 다시 채운다
         self._replay_logs()
@@ -701,6 +707,7 @@ class Core:
         )
         await self._sync_watcher_symbols()
         self._watcher_task = asyncio.create_task(self._watcher.run())
+        await self.refresh_calendar()  # 실패해도 근사로 동작한다
 
     async def _disconnect(self, reason: str) -> None:
         self._running = False
@@ -1825,6 +1832,36 @@ class Core:
 
     # ── 상태 로드 / 발행 ────────────────────────────────────────
 
+    def base_days(self, base_date: str, trade_date: str = "") -> int | None:
+        """기준봉으로부터 몇 번째 거래일인지 (공휴일 제외)."""
+        if not base_date:
+            return None
+        return self._calendar.days_between(base_date, trade_date or self._date)
+
+    async def refresh_calendar(self) -> None:
+        """거래일 달력 갱신 — 하루 한 번이면 충분하다 (지수 일봉 1회 조회).
+
+        조회에 실패해도 주말 기준 근사로 동작하므로 매매에는 영향이 없다.
+        """
+        today = date.today().isoformat()
+        if self._broker is None or self._calendar_at == today:
+            return
+        try:
+            bars = await asyncio.to_thread(self._broker.index_daily)
+        except BrokerError:
+            return
+        days = [f"{b[0][:4]}-{b[0][4:6]}-{b[0][6:8]}" for b in bars if len(b[0]) >= 8]
+        if days:
+            self._calendar.replace(days)
+            self._calendar_at = today
+            self._store.set_setting("trading_days", ",".join(days))  # 재시작 대비
+
+    def _load_calendar(self) -> None:
+        """저장해 둔 거래일 목록 복원 (연결 전에도 D+n 이 맞게 보이도록)."""
+        saved = self._store.get_setting("trading_days", "")
+        if saved:
+            self._calendar.replace(saved.split(","))
+
     def _next_trade_date(self) -> str:
         """다음 영업일 (주말 건너뜀)."""
         target = date.fromisoformat(self._date) + timedelta(days=1)
@@ -1890,6 +1927,7 @@ class Core:
                 e.get("tags", ""),
                 e.get("base_date", ""),
                 e.get("day_open") or 0.0,
+                self.base_days(e.get("base_date", "")),
             )
         )
 
