@@ -22,6 +22,9 @@ __all__ = ["JournalDialog", "entry_label", "summarize", "transition_path"]
 
 _ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 
+_TEXT_LINES = 4  # 잘한 점 · 아쉬운 점 입력칸 줄 수 (둘은 항상 같아야 한다)
+_CHART_MIN_PX = 280  # 배치 전이라 실제 높이를 모를 때 쓸 최소 표시 높이
+
 
 def summarize(entry: dict) -> list[tuple[str, str]]:
     """일지 상단에 보여줄 매매 요약 (라벨, 값) 목록."""
@@ -106,28 +109,38 @@ class JournalDialog(tk.Toplevel):
         pane.add(right, weight=3)
 
         self._summary = ttk.Frame(right)
-        self._summary.pack(fill="x", pady=(0, 6))
+        self._summary.pack(side="top", fill="x", pady=(0, 6))
 
-        self._charts = ttk.Notebook(right)
-        self._charts.pack(fill="both", expand=True)
-
-        form = ttk.Frame(right)
-        form.pack(fill="x", pady=(8, 0))
-        ttk.Label(form, text="잘한 점").grid(row=0, column=0, sticky="nw")
-        self._good = tk.Text(form, height=4, wrap="word")
-        self._good.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 4))
-        ttk.Label(form, text="아쉬운 점").grid(row=1, column=0, sticky="nw")
-        self._bad = tk.Text(form, height=4, wrap="word")
-        self._bad.grid(row=1, column=1, sticky="ew", padx=(8, 0))
-        form.columnconfigure(1, weight=1)
-
+        # **입력칸과 저장 버튼을 아래쪽에 먼저 배치한다.** pack 은 순서대로 자리를 나눠주는데,
+        # 차트(expand=True)를 먼저 넣으면 창보다 내용이 커질 때 뒤에 오는 위젯이 화면 밖으로
+        # 밀려난다 — 실제로 요약 줄이 늘어나자 저장 버튼이 통째로 사라졌다(2026-08-11).
+        # side="bottom" 으로 먼저 잡아두면 차트는 '남는 만큼' 만 쓰므로 절대 밀리지 않는다.
         bar = ttk.Frame(right)
-        bar.pack(fill="x", pady=(6, 0))
+        bar.pack(side="bottom", fill="x", pady=(6, 0))
         self._status = ttk.Label(bar, text="", foreground="#9e9e9e")
         self._status.pack(side="left")
         ttk.Button(bar, text="저장", command=self._save).pack(side="right")
 
+        form = ttk.Frame(right)
+        form.pack(side="bottom", fill="x", pady=(8, 0))
+        ttk.Label(form, text="잘한 점").grid(row=0, column=0, sticky="nw", pady=(0, 4))
+        self._good = tk.Text(form, height=_TEXT_LINES, wrap="word")
+        self._good.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 4))
+        ttk.Label(form, text="아쉬운 점").grid(
+            row=1, column=0, sticky="nw", pady=(0, 4)
+        )
+        self._bad = tk.Text(form, height=_TEXT_LINES, wrap="word")
+        self._bad.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(0, 4))
+        form.columnconfigure(1, weight=1)
+        # uniform 을 같게 주면 두 칸의 높이가 항상 같아진다 (한쪽만 눌리지 않는다)
+        for row in (0, 1):
+            form.rowconfigure(row, weight=1, uniform="comment")
+
+        self._charts = ttk.Notebook(right)
+        self._charts.pack(side="top", fill="both", expand=True)
+
         self._fill_list()
+        self.update_idletasks()  # 차트 축소 배율을 실제 배치 크기로 계산하기 위해
         if select:
             self._select_symbol(*select)
         elif entries:
@@ -188,7 +201,10 @@ class JournalDialog(tk.Toplevel):
                     padx=20, pady=20
                 )
                 continue
-            factor = -(-photo.height() // max(1, self.winfo_screenheight() - 500))
+            # 노트북에 실제로 남은 높이에 맞춘다. 화면 높이로 어림하면 창이 작을 때
+            # 그림이 넘쳐 아래쪽 위젯을 밀어낸다.
+            area = max(self._charts.winfo_height() - 40, _CHART_MIN_PX)
+            factor = -(-photo.height() // area)
             if factor > 1:
                 photo = photo.subsample(factor, factor)
             self._photos.append(photo)

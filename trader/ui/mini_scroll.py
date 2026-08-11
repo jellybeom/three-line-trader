@@ -22,7 +22,10 @@ from __future__ import annotations
 import tkinter as tk
 
 _WIDTH = 4  # 막대 폭 (px)
-_MARGIN = 2  # 위젯 오른쪽 끝에서 띄우는 여백
+# 대상 위젯의 **테두리 안쪽**에 들어가도록 띄우는 여백. 오버레이는 대상 위에 얹히므로
+# 여백이 없으면 위젯의 테두리를 덮어 프레임 선이 끊겨 보인다(2026-08-11 피드백).
+_MARGIN_X = 3  # 오른쪽 테두리에서 띄우는 여백
+_MARGIN_Y = 3  # 위·아래 테두리에서 띄우는 여백
 _HIDE_MS = 1200  # 마지막 움직임 뒤 사라지기까지
 _TROUGH = "#e8e8e8"
 _THUMB = "#9e9e9e"
@@ -73,14 +76,18 @@ class MiniScroll(tk.Canvas):
     def _show(self) -> None:
         if self._visible:
             return
-        # 대상 위젯의 오른쪽 끝에 겹쳐 띄운다. relheight=1 로 높이를 맞춘다.
+        # 대상 위젯의 오른쪽 끝에 겹쳐 띄운다.
+        # Tk 의 place 는 relheight 와 height 를 **더한다** — relheight=1.0 에 음수 height 를
+        # 주면 "대상 높이에서 그만큼 뺀" 크기가 된다. 이걸로 테두리를 비켜 간다.
         self.place(
             in_=self._target,
             relx=1.0,
             rely=0.0,
             relheight=1.0,
+            height=-2 * _MARGIN_Y,
             anchor="ne",
-            x=-_MARGIN,
+            x=-_MARGIN_X,
+            y=_MARGIN_Y,
             width=self._width,
         )
         # 주의: Canvas.lift 는 tag_raise(도형 순서 바꾸기)로 덮여 있어 인자 없이 부르면

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -260,11 +261,16 @@ def marker_size(ax) -> float:
 
 
 def _anchor_half(ax, size: float) -> int:
-    """화살표 폭이 좌우 몇 봉을 덮는지 — 기준점을 찾을 범위."""
+    """화살표가 좌우 몇 봉을 덮는지 — 기준점을 찾을 범위.
+
+    **반드시 올림이어야 한다.** 내림하면 화살표 폭이 1.2봉일 때 half=1 이 되어,
+    실제로는 옆 봉을 덮는데 기준점 계산에서는 그 봉을 빼먹는다. 하락 추세에서
+    옆 봉의 저가가 더 낮으면 화살표가 그 캔들 위에 그대로 얹힌다(2026-08-11 실측).
+    """
     per_bar = _pt_per_bar(ax)
     if per_bar <= 0:
         return 0
-    return min(4, int(size / per_bar / 2))
+    return min(4, math.ceil(size / per_bar / 2))
 
 
 def _marker_anchor(bars: list[Bar], idx: int, buy: bool, half: int) -> float:

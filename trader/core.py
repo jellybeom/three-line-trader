@@ -23,7 +23,9 @@ import time
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
-from trader.broker import Broker, BrokerError, extract_fill
+from trader.broker import Broker, BrokerError
+from trader.broker import Fill as OrderFill
+from trader.broker import extract_fill
 from trader.kiwoom import load_auth
 from trader.notifier import (
     build_alert_embed,
@@ -60,6 +62,8 @@ _PENDING_WARN_SEC = 90  # 체결통보 미도착 경고 기준 (아직 정상 �
 # 개장 직후에는 시장가 주문도 수 분 뒤에 체결될 수 있다(2026-07-30 실측: 09:00:04 접수 →
 # 09:02:16 체결). 이 시간을 짧게 잡으면 살아 있는 주문을 죽은 것으로 오판해 중복 주문이 된다.
 _PENDING_RECOVER_SEC = 420  # 7분
+_PENDING_PROBE_SEC = 20  # 이 시간이 지나면 REST(ka10076)로 체결 여부를 직접 확인
+_PENDING_PROBE_EVERY_SEC = 15  # REST 재확인 간격 (조회 자체가 실패할 수도 있다)
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
@@ -1031,6 +1035,13 @@ class Core:
                 "시스템", "경고", f"체결통보 해석 실패 (필드 확인 필요): {values}"
             )
             return
+        await self._apply_fill(fill)
+
+    async def _apply_fill(self, fill: OrderFill) -> None:
+        """체결 반영 — WebSocket 통보와 REST 확인(_probe_fill)이 함께 쓰는 단일 경로.
+
+        두 경로가 각자 상태를 고치면 어긋나므로 반드시 여기 하나로 모은다.
+        """
         info = self._pending.get(fill.order_no)
         if info is None:
             late = self._recovered.pop(fill.order_no, None)
@@ -1201,6 +1212,8 @@ class Core:
         now = time.monotonic()
         for order_no, info in list(self._pending.items()):
             age = now - info["ts"]
+            if age > _PENDING_PROBE_SEC and await self._probe_fill(order_no, info, now):
+                continue  # REST 로 체결이 확인돼 처리됐다
             if not info["warned"] and age > _PENDING_WARN_SEC:
                 info["warned"] = True
                 self._log(
@@ -1213,6 +1226,56 @@ class Core:
             if age > _PENDING_RECOVER_SEC and not info.get("recovering"):
                 info["recovering"] = True
                 await self._recover_pending(order_no, info)
+
+    async def _probe_fill(self, order_no: str, info: dict, now: float) -> bool:
+        """체결통보가 늦으면 **REST(ka10076)로 직접 확인**한다. 처리했으면 True.
+
+        WebSocket 체결통보는 개장 직후 몇 분씩 늦는다(2026-08-11 실측: 09:00:50 접수 →
+        09:02:55 통보, 125초). 그동안 그 종목은 pending 이라 손절·익절 판정이 통째로
+        멈춰 있다 — 가격이 급변해도 손을 못 쓰는 공백이다.
+
+        기다리기만 하던 것을 **확인**으로 바꾼다. 웹소켓과 REST 중 먼저 도착하는 쪽을
+        쓰므로 공백이 최대 20초로 줄고, 통보가 아예 유실돼도 7분을 기다리지 않는다.
+
+        조회 실패는 조용히 넘어간다 — 기존 경고·강제 복구 경로가 그대로 살아 있으므로
+        이 확인은 '더 빨리 알아내는 수단' 이지 없으면 안 되는 관문이 아니다.
+        """
+        if self._broker is None or not hasattr(self._broker, "filled_orders"):
+            return False
+        if now - info.get("probed_at", 0.0) < _PENDING_PROBE_EVERY_SEC:
+            return False
+        info["probed_at"] = now
+        symbol = info["symbol"]
+        try:
+            fills = await asyncio.to_thread(self._broker.filled_orders, symbol)
+        except BrokerError:
+            return False  # 다음 주기에 다시 시도한다
+        matched = [f for f in fills if f["order_no"] == order_no]
+        if not matched:
+            return False
+        qty = sum(f["qty"] for f in matched)
+        amount = sum(f["qty"] * f["price"] for f in matched)
+        if qty <= 0:
+            return False
+        price = amount / qty
+        self._log(
+            symbol,
+            "경고",
+            f"주문 {order_no} 체결통보가 늦어 계좌로 확인 — "
+            f"체결 {qty}주 @ {price:,.0f} (접수 {now - info['ts']:.0f}초 경과)",
+            notify=False,
+        )
+        await self._apply_fill(
+            OrderFill(
+                order_no=order_no,
+                symbol=symbol,
+                status="체결",
+                filled_qty=qty,
+                fill_price=price,
+                unfilled_qty=0,
+            )
+        )
+        return True
 
     async def _recover_pending(self, order_no: str, info: dict) -> None:
         """체결 대기 잠김 해제 — 계좌 실보유를 근거로 잔량을 맞추고 판정을 되살린다.

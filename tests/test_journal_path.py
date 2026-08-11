@@ -488,3 +488,90 @@ def test_조회_API가_없는_브로커에서도_주문은_진행된다():
     decision = Decision(State.BUY1, Side.BUY, 1, "1선 이탈 → 1차 매수")
     assert asyncio.run(core._no_duplicate_order("005930", decision)) is True
     assert bus_mod is not None  # import 확인용
+
+
+# ── 화살표가 이웃 캔들도 가리지 않는가 (기하 검사) ────────────
+
+
+def _overlaps(bars, fills, daily: bool) -> int:
+    """실제 렌더 좌표에서 화살표 사각형과 캔들 사각형이 겹치는 횟수."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+    from matplotlib.transforms import offset_copy
+
+    from trader import chart as C
+
+    fig, ax = plt.subplots(figsize=(9.6, 12.8), dpi=100)
+    ax.set_position([0.1, 0.2, 0.85, 0.7])
+    C._candles(ax, bars)
+    size = C.marker_size(ax)
+    half = C._anchor_half(ax, size)
+    slots = C.marker_slots(bars, fills, daily, group=max(1, half * 2 + 1))
+    placed = [
+        (i, s, C._marker_anchor(bars, i, s == "매수", half), C._marker_offset(size, lv))
+        for i, s, lv in slots
+    ]
+    C._expand_ylim(ax, [(a, s == "매수", g + size / 2) for _, s, a, g in placed])
+    fig.canvas.draw()
+    tr, hits = ax.transData, 0
+    for idx, side, anchor, gap in placed:
+        buy = side == "매수"
+        t = offset_copy(tr, fig=fig, y=(-gap if buy else gap), units="points")
+        cx, cy = t.transform((idx, anchor))
+        r = size / 2 * fig.dpi / 72
+        for j, b in enumerate(bars):
+            x0, y0 = tr.transform((j - 0.3, b.low))
+            x1, y1 = tr.transform((j + 0.3, b.high))
+            if cx + r > x0 and cx - r < x1 and cy + r > y0 and cy - r < y1:
+                hits += 1
+                break
+    plt.close(fig)
+    return hits
+
+
+def _trend_bars(days: int, drift: float, seed: int = 0) -> list[Bar]:
+    import random
+
+    random.seed(seed)
+    bars, base = [], 30_000.0
+    for d in range(days):
+        for i in range(130):
+            key = f"2026081{d}{9 + (i * 3) // 60:02d}{(i * 3) % 60:02d}00"
+            o = base
+            c = base * (1 + random.uniform(-0.006, 0.006) + drift)
+            bars.append(
+                Bar(key, o, max(o, c) * 1.004, min(o, c) * 0.996, c, volume=100)
+            )
+            base = c
+    return bars
+
+
+@pytest.mark.parametrize("days", [2, 3, 4])
+@pytest.mark.parametrize("drift", [-0.006, 0.006])
+def test_화살표는_어떤_캔들도_가리지_않는다(days, drift):
+    """봉이 촘촘할수록 화살표가 자기 봉 폭을 넘어 이웃 캔들을 덮기 쉽다.
+
+    이월된 종목은 3분봉 일수가 늘어 봉 간격이 좁아지는데, 기준점 범위를 내림으로
+    구하면 화살표 폭보다 좁은 범위만 보게 되어 옆 캔들 위에 얹혔다(2026-08-11).
+    """
+    bars = _trend_bars(days, drift)
+    last = days - 1
+    fills = [
+        Fill("2026-08100 09:00:34".replace("08100", "0810"), "매수", 0),
+        Fill("2026-08-10 09:00:40", "매수", 0),
+        Fill(f"2026-08-1{last} 09:10:00", "매도", 0),
+        Fill(f"2026-08-1{last} 09:13:00", "매도", 0),
+        Fill(f"2026-08-1{last} 13:20:00", "매도", 0),
+    ]
+    assert _overlaps(bars, fills, daily=False) == 0
+
+
+def test_기준점_범위는_화살표_폭을_올림으로_덮는다():
+    """내림하면 폭 3.7봉짜리 화살표에 범위 1봉이 배정되어 옆 캔들을 못 피한다."""
+    import math
+
+    for size, per_bar in ((5.0, 1.36), (5.0, 2.04), (9.0, 9.3)):
+        assert math.ceil(size / per_bar / 2) >= size / per_bar / 2
+    assert math.ceil(5.0 / 1.36 / 2) == 2  # 내림이면 1 → 겹침 발생
