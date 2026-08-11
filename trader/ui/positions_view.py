@@ -18,6 +18,7 @@ from typing import Callable
 
 from trader.state_machine import Params, Position, State
 from trader.trading_calendar import format_days
+from trader.ui.mini_scroll import MiniScroll
 
 _COLUMNS = (
     "code",
@@ -135,10 +136,9 @@ class PositionsView(ttk.Frame):
         self.tree.tag_configure("addrow", foreground="#1565c0")
         self.tree.tag_configure("staged", foreground="#f9a825")  # 3선 미입력 대기
 
-        scroll = ttk.Scrollbar(self, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        # 스크롤바는 자리를 차지하지 않는 오버레이로 (종목명·상태 열이 그만큼 넓어진다)
+        self._scroll = MiniScroll(self.tree)
 
         self._menu_targets: list[str] = []
         self._menu = tk.Menu(self, tearoff=0)

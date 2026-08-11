@@ -1,0 +1,490 @@
+"""2026-08-11 변경분 회귀 테스트.
+
+- 상태 경로 표기 (대기 생략, 1차 흡수, 종료 사유 명시)
+- 매매 사이클 묶기 (이월 중복 제거, 리셋 후 분리)
+- 차트 화살표 배치 (캔들 밖, 쌓기)
+- 키움 조회 API 파싱 (ka10075 / ka10076 / ka10072)
+- 15:35 이후 자동화 없음
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+
+import pytest
+
+from trader.chart import Bar, Fill, marker_slots
+from trader.journal import close_label, cycle_timeline, transition_path
+from trader.state_machine import Decision, Params, Position, Side, State
+from trader.store import Store
+from trader.trading_calendar import TradingCalendar
+
+# ── 상태 경로 ─────────────────────────────────────────────────
+
+
+def _t(to_state: str, reason: str, **extra) -> dict:
+    return {"to_state": to_state, "reason": reason, **extra}
+
+
+def test_경로에_대기는_적지_않는다():
+    """모든 매매가 대기에서 시작하므로 정보가 없다."""
+    path = transition_path([_t("1차 매수", "1선 이탈 → 1차 매수")])
+    assert path == "1차 매수"
+    assert "대기" not in path
+
+
+def test_2차_매수가_1차_매수를_흡수한다():
+    """2차는 1차 뒤에만 오므로 1차를 적지 않아도 읽힌다."""
+    assert (
+        transition_path(
+            [
+                _t("1차 매수", "1선 이탈 → 1차 매수"),
+                _t("2차 매수", "2선 이탈 → 2차 매수"),
+                _t("종료", "3선 이탈 → 전량 손절"),
+            ]
+        )
+        == "2차 매수 → 손절"
+    )
+
+
+def test_갭_동시매수도_같은_모양이_된다():
+    """2선 이하 갭으로 1·2차를 한 번에 사도 결과 표기는 '2차 매수' 로 같다."""
+    assert (
+        transition_path([_t("2차 매수", "2선 이하 갭 → 1·2차 동시 매수")]) == "2차 매수"
+    )
+
+
+def test_종료라고_적지_않고_끝난_이유를_적는다():
+    """'종료' 만으로는 7% 익절인지 본절로 밀린 것인지 알 수 없다."""
+    tp7 = transition_path(
+        [
+            _t("1차 매수", "1선 이탈 → 1차 매수"),
+            _t("1차 매수 + 3% 익절", "1차 평단 +3% 도달 → 1차 익절"),
+            _t("1차 매수 + 5% 익절", "1차 평단 +5% 도달 → 2차 익절"),
+            _t("종료", "1차 평단 +7% 도달 → 전량 청산"),
+        ]
+    )
+    breakeven = transition_path(
+        [
+            _t("1차 매수", "1선 이탈 → 1차 매수"),
+            _t("1차 매수 + 3% 익절", "1차 평단 +3% 도달 → 1차 익절"),
+            _t("종료", "본절 이탈 → 잔량 전량 청산"),
+        ]
+    )
+    assert tp7 == "1차 매수 → 3% 익절 → 5% 익절 → 7% 익절"
+    assert breakeven == "1차 매수 → 3% 익절 → 본절 이탈"
+    assert "종료" not in tp7 and "종료" not in breakeven
+
+
+@pytest.mark.parametrize(
+    "reason,label",
+    [
+        ("1차 평단 +7% 도달 → 전량 청산", "7% 익절"),
+        ("2차 평단 +7% 도달 → 전량 청산", "7% 익절"),
+        # 본절·수동은 '전량 청산' 을 품고 있어 익절로 오인되기 쉽다 (검사 순서가 중요)
+        ("본절 이탈 → 잔량 전량 청산", "본절 이탈"),
+        ("사용자 판단 → 수동 전량 청산", "수동 청산"),
+        ("3선 이탈 → 전량 손절", "손절"),
+        ("3선 이탈(갭) → 2차 매수 생략, 전량 손절", "손절"),
+        ("3선 이하 갭 시가 → 진입 금지, 당일 종료", "진입 금지"),
+    ],
+)
+def test_종료_사유_라벨(reason, label):
+    assert close_label(reason) == label
+
+
+def test_익절률을_바꾸면_라벨도_따라간다():
+    """익절률은 설정값(tp_rates)이라 숫자를 하드코딩하면 안 된다."""
+    assert close_label("1차 평단 +10% 도달 → 전량 청산") == "10% 익절"
+
+
+def test_1차_매수_직후_손절도_존재한다():
+    """1선 매수 후 한 틱이 2선·3선을 함께 관통하는 갭 하락 (state_machine 266행)."""
+    assert (
+        transition_path(
+            [
+                _t("1차 매수", "1선 이탈 → 1차 매수"),
+                _t("종료", "3선 이탈(갭) → 2차 매수 생략, 전량 손절"),
+            ]
+        )
+        == "1차 매수 → 손절"
+    )
+
+
+def test_수량_0_익절_전이는_경로에_한_번만_나온다():
+    assert (
+        transition_path(
+            [
+                _t("1차 매수", "1선 이탈 → 1차 매수"),
+                _t("1차 매수 + 3% 익절", "1차 평단 +3% 도달 → 1차 익절"),
+                _t(
+                    "1차 매수 + 3% 익절",
+                    "1차 평단 +3% 도달 → 1차 익절 (매도 수량 0 → 상태만 전이)",
+                ),
+                _t("종료", "본절 이탈 → 잔량 전량 청산"),
+            ]
+        )
+        == "1차 매수 → 3% 익절 → 본절 이탈"
+    )
+
+
+def test_빈_전이는_빈_문자열():
+    assert transition_path([]) == ""
+
+
+def test_시점은_기준봉_대비_거래일로_센다():
+    calendar = TradingCalendar(
+        ["2026-08-05", "2026-08-06", "2026-08-07", "2026-08-10", "2026-08-11"]
+    )
+    line = cycle_timeline(
+        [
+            _t("1차 매수", "1선 이탈", side="매수", trade_date="2026-08-07"),
+            _t(
+                "종료",
+                "본절 이탈 → 잔량 전량 청산",
+                side="매도",
+                trade_date="2026-08-11",
+            ),
+        ],
+        base_date="2026-08-05",
+        calendar=calendar,
+    )
+    assert "진입 2026-08-07 (D+2)" in line  # 8/8~8/9 는 주말이라 거래일이 아니다
+    assert "청산 2026-08-11 (D+4)" in line
+
+
+# ── 매매 사이클 ───────────────────────────────────────────────
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = Store(str(tmp_path / "t.db"))
+    yield s
+    s.close()
+
+
+def _register(store, date, pos):
+    store.register_symbol(
+        date,
+        "005930",
+        "삼성전자",
+        Params(10_000, 9_500, 9_000, 100_000, 100_000),
+        pos,
+        base_date="2026-08-05",
+    )
+
+
+def _carried_cycle(store):
+    """8/07 진입 → 8/10 이월 → 8/11 익절 후 본절 청산."""
+    _register(store, "2026-08-07", Position())
+    store.save_transition(
+        "2026-08-07",
+        "005930",
+        State.WAITING,
+        Position(State.BUY1, 9_900, 10, 10),
+        Decision(State.BUY1, Side.BUY, 10, "1선 이탈 → 1차 매수"),
+        9_900,
+    )
+    for date in ("2026-08-10", "2026-08-11"):
+        _register(store, date, Position(State.BUY1, 9_900, 10, 10))
+    store.save_transition(
+        "2026-08-11",
+        "005930",
+        State.BUY1,
+        Position(State.BUY1_TP1, 9_900, 10, 6),
+        Decision(State.BUY1_TP1, Side.SELL, 4, "1차 평단 +3% 도달 → 1차 익절"),
+        10_200,
+    )
+    store.save_transition(
+        "2026-08-11",
+        "005930",
+        State.BUY1_TP1,
+        Position(State.CLOSED, 9_900, 10, 0, realized_pnl=3_000),
+        Decision(State.CLOSED, Side.SELL, 6, "본절 이탈 → 잔량 전량 청산"),
+        9_900,
+    )
+
+
+def test_이월된_매매는_일지에_한_건으로_묶인다(store):
+    """매매일마다 행이 생기지만 사람에게는 '한 번의 매매' 다."""
+    _carried_cycle(store)
+    entries = store.journal_entries()
+    assert len(entries) == 1
+    assert entries[0]["trade_date"] == "2026-08-11"  # 최종 손익이 있는 마지막 행
+    assert entries[0]["realized_pnl"] == 3_000
+
+
+def test_사이클은_날짜를_넘어_이어진다(store):
+    """이월 종목은 진입이 며칠 전이라 당일 기록만 보면 앞부분이 통째로 없다."""
+    _carried_cycle(store)
+    cycle = store.symbol_cycle("005930")
+    assert transition_path(cycle) == "1차 매수 → 3% 익절 → 본절 이탈"
+    fills = store.symbol_fills("005930")
+    assert [f["trade_date"] for f in fills] == [
+        "2026-08-07",
+        "2026-08-11",
+        "2026-08-11",
+    ]
+    assert fills[0]["side"] == "매수"  # 진입 화살표의 근거
+
+
+def test_리셋_후_재진입은_새_사이클이_된다(store):
+    _carried_cycle(store)
+    _register(store, "2026-08-12", Position(State.BUY1, 9_800, 5, 5))
+    store.save_transition(
+        "2026-08-12",
+        "005930",
+        State.WAITING,
+        Position(State.BUY1, 9_800, 5, 5),
+        Decision(State.BUY1, Side.BUY, 5, "1선 이탈 → 1차 매수"),
+        9_800,
+    )
+    assert [e["trade_date"] for e in store.journal_entries()] == [
+        "2026-08-12",
+        "2026-08-11",
+    ]
+    assert [f["trade_date"] for f in store.symbol_fills("005930")] == ["2026-08-12"]
+
+
+def test_이월_전에_쓴_코멘트를_잃지_않는다(store):
+    _carried_cycle(store)
+    store.save_journal("2026-08-07", "005930", good="진입 타이밍이 좋았다")
+    entry = store.journal_entries()[0]
+    assert entry["trade_date"] == "2026-08-11"
+    assert entry["good"] == "진입 타이밍이 좋았다"
+
+
+# ── 차트 화살표 ───────────────────────────────────────────────
+
+
+def _minute_bars(n: int = 20) -> list[Bar]:
+    return [
+        Bar(f"202608100{9 + i // 20}{(i * 3) % 60:02d}00", 100, 110, 90, 105)
+        for i in range(n)
+    ]
+
+
+def test_같은_봉의_같은_방향은_층으로_쌓인다():
+    bars = _minute_bars()
+    fills = [
+        Fill("2026-08-10 09:00:10", "매수", 100),
+        Fill("2026-08-10 09:00:20", "매수", 101),
+        Fill("2026-08-10 09:03:00", "매도", 108),
+    ]
+    slots = marker_slots(bars, fills, daily=False)
+    assert slots == [(0, "매수", 0), (0, "매수", 1), (1, "매도", 0)]
+
+
+def test_방향이_다르면_각자_0층부터():
+    """매수는 캔들 아래, 매도는 위라 서로 겹치지 않는다."""
+    bars = _minute_bars()
+    fills = [
+        Fill("2026-08-10 09:00:10", "매수", 100),
+        Fill("2026-08-10 09:00:20", "매도", 108),
+    ]
+    assert marker_slots(bars, fills, daily=False) == [
+        (0, "매수", 0),
+        (0, "매도", 0),
+    ]
+
+
+def test_봉이_촘촘하면_이웃_봉도_같은_칸으로_쌓는다():
+    """3분봉은 화살표 폭이 봉 간격보다 넓어, 이웃 봉이면 가로로 겹쳐 개수를 셀 수 없다."""
+    bars = _minute_bars()
+    fills = [
+        Fill("2026-08-10 09:00:10", "매도", 108),
+        Fill("2026-08-10 09:03:10", "매도", 109),
+        Fill("2026-08-10 09:06:10", "매도", 110),
+    ]
+    assert marker_slots(bars, fills, daily=False, group=3) == [
+        (0, "매도", 0),
+        (1, "매도", 1),
+        (2, "매도", 2),
+    ]
+    # group=1 (일봉처럼 성길 때) 이면 같은 봉만 쌓는다
+    assert [lv for _, _, lv in marker_slots(bars, fills, daily=False, group=1)] == [
+        0,
+        0,
+        0,
+    ]
+
+
+def test_표시_구간_밖의_체결은_버린다():
+    bars = _minute_bars()
+    fills = [Fill("2026-08-05 09:00:10", "매수", 100)]  # 며칠 전
+    assert marker_slots(bars, fills, daily=False) == []
+
+
+def test_체결_순서대로_층이_올라간다():
+    """0층이 캔들에 가장 가깝다 — 차수를 적지 않아도 위치로 읽히도록."""
+    bars = _minute_bars()
+    fills = [
+        Fill("2026-08-10 09:00:50", "매도", 109),  # 나중 것을 먼저 넣어도
+        Fill("2026-08-10 09:00:10", "매도", 108),
+    ]
+    slots = marker_slots(bars, fills, daily=False)
+    assert [lv for _, _, lv in slots] == [0, 1]
+
+
+# ── 키움 조회 API 파싱 ────────────────────────────────────────
+
+
+class _StubBroker:
+    """문서 예시 응답만 돌려주는 가짜 — 파싱만 검증한다."""
+
+    _QUERY_RETRIES = 0
+
+    def __init__(self, responses: dict):
+        self._responses = responses
+        self.calls: list[tuple[str, dict]] = []
+
+    def _request(self, path, api_id, body, retries=0):
+        self.calls.append((api_id, body))
+        return self._responses[api_id]
+
+
+def _broker(responses: dict):
+    from trader.broker import Broker
+
+    b = Broker.__new__(Broker)
+    stub = _StubBroker(responses)
+    b._request = stub._request
+    b._QUERY_RETRIES = 0
+    b._calls = stub.calls
+    return b
+
+
+def test_미체결_파싱과_체결완료_행_제외():
+    b = _broker(
+        {
+            "ka10075": {
+                "oso": [
+                    {
+                        "ord_no": "0000069",
+                        "stk_cd": "005930",
+                        "stk_nm": "삼성전자",
+                        "ord_qty": "10",
+                        "oso_qty": "10",
+                        "io_tp_nm": "+매수",
+                        "ord_stt": "접수",
+                        "tm": "154113",
+                    },
+                    {  # 이미 다 체결된 행은 미체결이 아니다
+                        "ord_no": "0000070",
+                        "stk_cd": "005930",
+                        "oso_qty": "0",
+                        "io_tp_nm": "-매도",
+                    },
+                ]
+            }
+        }
+    )
+    orders = b.open_orders("005930")
+    assert len(orders) == 1
+    assert orders[0]["side"] == "매수" and orders[0]["unfilled"] == 10
+
+
+def test_체결_파싱은_A접두사와_부호를_처리한다():
+    b = _broker(
+        {
+            "ka10076": {
+                "cntr": [
+                    {
+                        "ord_no": "0000037",
+                        "stk_nm": "삼성전자",
+                        "io_tp_nm": "-매도",
+                        "cntr_pric": "158200",
+                        "cntr_qty": "1",
+                        "tdy_trde_cmsn": "310",
+                        "tdy_trde_tax": "284",
+                        "ord_stt": "체결",
+                        "ord_tm": "153815",
+                        "stk_cd": "A005930",
+                    }
+                ]
+            }
+        }
+    )
+    fill = b.filled_orders()[0]
+    assert fill["symbol"] == "005930"  # A 접두사 제거
+    assert fill["side"] == "매도" and fill["price"] == 158_200
+    assert fill["commission"] + fill["tax"] == 594
+
+
+def test_실현손익은_세후_순손익이다():
+    """문서 예시로 확인한 항등식: (체결가 − 매입단가)×수량 − 수수료 − 세금 = tdy_sel_pl."""
+    b = _broker(
+        {
+            "ka10072": {
+                "dt_stk_div_rlzt_pl": [
+                    {
+                        "stk_nm": "삼성전자",
+                        "cntr_qty": "1",
+                        "buy_uv": "97602.96",  # 소수 문자열 — int() 는 예외가 난다
+                        "cntr_pric": "158200",
+                        "tdy_sel_pl": "59813.04",
+                        "pl_rt": "+61.28",
+                        "stk_cd": "A005930",
+                        "tdy_trde_cmsn": "500",
+                        "tdy_trde_tax": "284",
+                    }
+                ]
+            }
+        }
+    )
+    row = b.realized_pnl("2026-08-11")[0]
+    assert row["symbol"] == "005930"
+    gross = (row["sell_price"] - row["buy_price"]) * row["qty"]
+    assert round(gross - row["commission"] - row["tax"], 2) == row["pnl"]
+    assert round(row["pnl"] / (row["buy_price"] * row["qty"]), 4) == row["rate"]
+
+
+def test_실현손익은_하루씩_조회한다():
+    """응답에 일자 필드가 없어 여러 날이 섞이면 구분할 수 없다."""
+    b = _broker({"ka10072": {"dt_stk_div_rlzt_pl": []}})
+    b.realized_pnl("2026-08-11")
+    assert b._calls[0][1]["strt_dt"] == "20260811"  # 하이픈 제거
+
+
+# ── 15:35 이후 자동화 없음 ────────────────────────────────────
+
+
+def test_스케줄에_요약_이후_항목이_없다(tmp_path):
+    """15:35 일일 요약이 하루의 마지막 자동 작업이다."""
+    from trader.core import _load_schedule
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[schedule]\nenabled = true\nstart = "08:55"\nstop = "15:30"\n'
+        'summary = "15:35"\n',
+        encoding="utf-8",
+    )
+    schedule = _load_schedule(str(cfg))
+    assert set(schedule) == {"enabled", "start", "stop", "summary"}
+    assert max(v for v in schedule.values() if isinstance(v, dt.time)) == dt.time(
+        15, 35
+    )
+
+
+def test_시간외_리뷰_함수가_사라졌다():
+    """분봉 API 가 정규장 범위만 주므로 대상이 늘 0종목이었다."""
+    from trader import core as core_mod
+
+    assert not hasattr(core_mod.Core, "_review_after_hours")
+
+
+# ── 중복 주문 방지 ────────────────────────────────────────────
+
+
+def test_조회_API가_없는_브로커에서도_주문은_진행된다():
+    """시뮬레이터에는 open_orders 가 없다 — 없다고 매매가 멈추면 안 된다."""
+    from trader.core import Core
+    from trader.ui import bus as bus_mod
+
+    core = Core.__new__(Core)
+    core._broker = object()  # open_orders 없음
+    core._order_fail = {"005930": {"count": 1, "until": 0.0}}
+    decision = Decision(State.BUY1, Side.BUY, 1, "1선 이탈 → 1차 매수")
+    assert asyncio.run(core._no_duplicate_order("005930", decision)) is True
+    assert bus_mod is not None  # import 확인용

@@ -1,6 +1,6 @@
 """메인 윈도우 (FHD 최적화) — 화면 구성:
 
-  [툴바]      감시 시작/중지 · 손익 요약 · 상태
+  [툴바]      감시 시작/중지 · 매매일지 · 손익 요약 · 상태
   [설정]      한 줄 5그룹 (상시 표시):
               투자 모드 | 매매일(요일) | 키움 연결(주문가능금액) | Discord(알림 수준)
               | 자금 배분 및 익절 전략(적용 버튼 포함)
@@ -231,6 +231,11 @@ class App(tk.Tk):
             self._toolbar, text="감시 시작", command=self._toggle_run
         )
         self._toggle_btn.pack(side="left")
+        # 매매일지는 로그 우클릭으로도 열 수 있지만, 하루에 한 번은 반드시 여는 화면이라
+        # 툴바에도 둔다 (우클릭은 '그 종목의 일지', 이 버튼은 '전체 목록' 으로 역할이 다르다).
+        ttk.Button(self._toolbar, text="매매일지", command=self._open_journal).pack(
+            side="left", padx=(6, 0)
+        )
         self._status = ttk.Label(self._toolbar, text="정지됨", foreground="#9e9e9e")
         self._status.pack(side="right")
         pnl_box = ttk.Frame(self._toolbar)

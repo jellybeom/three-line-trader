@@ -205,7 +205,6 @@ def test_요약은_재시작해도_다시_보내지_않는다(tmp_path, monkeypa
             "start": dt.time(8, 55),
             "stop": dt.time(15, 30),
             "summary": dt.time(15, 35),
-            "summary2": dt.time(20, 5),
         }
         c.send_daily_summary = lambda: _record(sent)
         return c

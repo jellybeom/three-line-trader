@@ -34,6 +34,9 @@ _TR_BUY = "kt10000"
 _TR_SELL = "kt10001"
 _TR_DEPOSIT = "kt00001"
 _TR_HOLDINGS = "kt00018"
+_TR_OPEN_ORDERS = "ka10075"  # 미체결요청 — 중복 주문 방지
+_TR_FILLS = "ka10076"  # 체결요청 — 당일 체결 내역 (증권사 실측 수수료·세금)
+_TR_REALIZED = "ka10072"  # 일자별종목별실현손익요청 — 손익 대조
 _TR_STOCK_INFO = "ka10001"
 _TR_DAILY_CHART = "ka10081"  # 주식 일봉차트
 _TR_MINUTE_CHART = "ka10080"  # 주식 분봉차트
@@ -451,6 +454,125 @@ class Broker:
                     break
             result[symbol] = (qty, min(sellable, qty))
         return result
+
+    # ── 체결·미체결·실현손익 조회 (대조용) ─────────────────────
+    # 셋 다 **읽기 전용**이다. 여기서 얻은 값으로 포지션을 고치지 않는다 —
+    # 프로그램이 아는 것과 증권사가 아는 것이 다르면 사람이 봐야 할 일이지,
+    # 자동으로 맞추면 어느 쪽이 맞는지 모르는 채로 덮어쓰게 된다.
+
+    def open_orders(self, symbol: str = "") -> list[dict]:
+        """미체결 주문 (ka10075). symbol 을 주면 그 종목만.
+
+        전부 시장가로 매매하므로 평시에는 늘 비어 있다. **비어 있지 않다는 것 자체가
+        신호다** — 주문이 아직 처리 중이거나, 프로그램이 모르는 주문이 계좌에 남아 있다는
+        뜻이다. 중복 주문을 막는 근거로 쓴다.
+        """
+        data = self._request(
+            _PATH_ACCOUNT,
+            _TR_OPEN_ORDERS,
+            {
+                "all_stk_tp": "1" if symbol else "0",
+                "trde_tp": "0",  # 매도·매수 전체
+                "stk_cd": symbol,
+                "stex_tp": "0",  # 통합 (KRX + NXT)
+            },
+            retries=self._QUERY_RETRIES,
+        )
+        rows = []
+        for row in data.get("oso", []) or []:
+            unfilled = int(float(row.get("oso_qty") or 0))
+            if unfilled <= 0:
+                continue
+            rows.append(
+                {
+                    "order_no": str(row.get("ord_no") or ""),
+                    "symbol": str(row.get("stk_cd") or "").lstrip("A"),
+                    "name": row.get("stk_nm") or "",
+                    # io_tp_nm 은 '+매수' / '-매도' 처럼 부호가 붙어 온다
+                    "side": "매수" if "매수" in (row.get("io_tp_nm") or "") else "매도",
+                    "qty": int(float(row.get("ord_qty") or 0)),
+                    "unfilled": unfilled,
+                    "status": row.get("ord_stt") or "",
+                    "time": row.get("tm") or "",
+                }
+            )
+        return rows
+
+    def filled_orders(self, symbol: str = "") -> list[dict]:
+        """당일 체결 내역 (ka10076) — 실제 체결가·수수료·세금.
+
+        ⚠️ 응답에 **날짜 필드가 없다** (ord_tm 은 HHMMSS 뿐). 당일 조회 전용이며
+        이월 종목의 과거 체결 복원에는 쓸 수 없다 — 그건 realized_pnl(ka10072) 몫이다.
+        """
+        data = self._request(
+            _PATH_ACCOUNT,
+            _TR_FILLS,
+            {
+                "stk_cd": symbol,
+                "qry_tp": "1" if symbol else "0",
+                "sell_tp": "0",  # 매도·매수 전체
+                "ord_no": "",
+                "stex_tp": "0",
+            },
+            retries=self._QUERY_RETRIES,
+        )
+        rows = []
+        for row in data.get("cntr", []) or []:
+            filled = int(float(row.get("cntr_qty") or 0))
+            if filled <= 0:
+                continue  # 접수만 되고 체결이 없는 행
+            rows.append(
+                {
+                    "order_no": str(row.get("ord_no") or ""),
+                    "symbol": str(row.get("stk_cd") or "").lstrip("A"),
+                    "name": row.get("stk_nm") or "",
+                    "side": "매수" if "매수" in (row.get("io_tp_nm") or "") else "매도",
+                    "qty": filled,
+                    "price": abs(float(row.get("cntr_pric") or 0)),
+                    "commission": abs(float(row.get("tdy_trde_cmsn") or 0)),
+                    "tax": abs(float(row.get("tdy_trde_tax") or 0)),
+                    "status": row.get("ord_stt") or "",
+                    "time": row.get("ord_tm") or "",
+                }
+            )
+        return rows
+
+    def realized_pnl(self, trade_date: str, symbol: str = "") -> list[dict]:
+        """일자별 종목별 실현손익 (ka10072). trade_date 는 YYYYMMDD.
+
+        ⚠️ 응답에 **일자 필드가 없어** 여러 날이 섞여 와도 구분할 수 없다. 그래서
+        하루씩만 조회한다 (strt_dt 를 '그날' 로 지정).
+        ⚠️ stk_cd 에 'A' 접두사가 붙는다 (`A005930`). 다른 TR 과 달라 반드시 벗겨야 한다.
+        ⚠️ 매입단가·손익이 **소수 문자열**("97602.96")이라 int() 파싱은 예외가 난다.
+
+        문서 예시로 확인한 계산식: tdy_sel_pl = (체결가 − 매입단가) × 수량 − 수수료 − 세금.
+        즉 **세후 순손익**이고, pl_rt 는 매입금액 대비 수익률이다.
+        """
+        data = self._request(
+            _PATH_ACCOUNT,
+            _TR_REALIZED,
+            {"stk_cd": symbol, "strt_dt": trade_date.replace("-", "")},
+            retries=self._QUERY_RETRIES,
+        )
+        rows = []
+        for row in data.get("dt_stk_div_rlzt_pl", []) or []:
+            code = str(row.get("stk_cd") or "").lstrip("A")
+            if not code:
+                continue
+            rows.append(
+                {
+                    "symbol": code,
+                    "name": row.get("stk_nm") or "",
+                    "qty": int(float(row.get("cntr_qty") or 0)),
+                    "buy_price": float(row.get("buy_uv") or 0),
+                    "sell_price": abs(float(row.get("cntr_pric") or 0)),
+                    "pnl": float(row.get("tdy_sel_pl") or 0),  # 세후 순손익
+                    "rate": float(str(row.get("pl_rt") or 0).replace("+", "")) / 100,
+                    "commission": abs(float(row.get("tdy_trde_cmsn") or 0)),
+                    "tax": abs(float(row.get("tdy_trde_tax") or 0)),
+                }
+            )
+        return rows
 
     # ── 종목 정보 ───────────────────────────────────────────────
 

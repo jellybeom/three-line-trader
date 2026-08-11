@@ -67,5 +67,4 @@ auto_connect = false
 enabled = false
 start = "08:55"    # 감시 자동 시작
 stop = "15:30"     # 감시 자동 중지
-summary = "15:35"  # 일일 요약 Discord 발송
-summary2 = "20:05"  # 시간외(NXT) 거래가 있던 종목의 3분봉 재전송
+summary = "15:35"  # 일일 요약 Discord 발송 (자동화는 여기서 끝난다)

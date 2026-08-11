@@ -51,6 +51,7 @@ from trader.state_machine import (
     mark_pending,
 )
 from trader.store import Store
+from trader.journal import cycle_timeline, transition_path
 from trader.trading_calendar import TradingCalendar
 from trader.ui import bus
 from trader.watcher import Tick, Watcher
@@ -140,6 +141,10 @@ def _load_schedule(config_path: str) -> dict:
 
     휴장일 목록은 두지 않는다. 휴장일에는 체결 틱 자체가 없어 감시가 켜져도
     아무 일도 일어나지 않으므로, 요일만 확인하면 충분하다.
+
+    **자동화는 일일 요약(15:35)에서 끝난다.** 예전에는 20:05 에 시간외(NXT) 리뷰가
+    있었지만, ① 분봉 API(ka10080)가 정규장 범위만 돌려줘 대상이 늘 0종목이었고
+    ② 사용자가 요약을 받은 뒤 프로그램을 끄기 때문에 실행될 일이 없었다(2026-08-11).
     """
     import tomllib
     from pathlib import Path
@@ -149,7 +154,6 @@ def _load_schedule(config_path: str) -> dict:
         "start": dtime(8, 55),
         "stop": dtime(15, 30),
         "summary": dtime(15, 35),
-        "summary2": dtime(20, 5),
     }
     path = Path(config_path)
     if not path.exists():
@@ -157,7 +161,7 @@ def _load_schedule(config_path: str) -> dict:
     section = tomllib.loads(path.read_text(encoding="utf-8")).get("schedule", {})
     result = dict(default)
     result["enabled"] = bool(section.get("enabled", False))
-    for key in ("start", "stop", "summary", "summary2"):
+    for key in ("start", "stop", "summary"):
         raw = section.get(key)
         if not raw:
             continue
@@ -467,7 +471,10 @@ class Core:
             case bus.Notice(kind=kind, text=text, symbol=sym):
                 self._log(sym, kind, text)
             case bus.RequestJournal(since=since):
-                entries = self._store.journal_entries(since=since)
+                entries = [
+                    self._enrich_journal(e)
+                    for e in self._store.journal_entries(since=since)
+                ]
                 self._bus.events.put(bus.JournalEntries(tuple(entries)))
             case bus.SaveJournal(trade_date=td, symbol=sym, good=good, bad=bad):
                 self._store.save_journal(td, sym, good=good, bad=bad)
@@ -865,6 +872,8 @@ class Core:
             return
         if not self._order_allowed(symbol):
             return
+        if not await self._no_duplicate_order(symbol, d):
+            return
 
         try:
             order_fn = self._broker.buy if d.side is Side.BUY else self._broker.sell
@@ -1101,6 +1110,52 @@ class Core:
             and self._bot is not None
         ):
             asyncio.create_task(self._chart_task(symbol, to_discord=True))
+
+    async def _no_duplicate_order(self, symbol: str, d: Decision) -> bool:
+        """직전 주문이 실패했던 종목만, 주문 직전에 미체결(ka10075)을 확인한다.
+
+        가장 위험한 시나리오는 **'응답만 유실되고 주문은 접수된' 경우**다. 이때
+        프로그램은 실패로 알고 재시도하는데 계좌에는 주문이 이미 살아 있어 같은 물량을
+        두 번 사게 된다. 지금까지는 쿨다운으로 '기다리기만' 했는데, 이제는 실제로
+        확인하고 넘어간다.
+
+        **평시에는 조회하지 않는다.** 시장가 주문은 판정 즉시 나가야 하는데 REST 조회
+        1회는 최소 0.25초(레이트 리밋)를 더한다. 실패 이력이 있는 종목에만 붙이면
+        정상 경로의 지연은 0 이다.
+
+        조회 자체가 실패하면 **주문을 허용한다** — 조회 실패로 매매를 멈추는 것이
+        중복 주문보다 흔하고 더 손해다. 이 검사는 안전망이지 관문이 아니다.
+        """
+        # 시뮬레이터·모의 브로커에는 조회 API 가 없다 — 없으면 검사를 건너뛴다
+        # (있다고 가정하고 부르면 AttributeError 로 매매가 통째로 멈춘다).
+        if (
+            self._broker is None
+            or symbol not in self._order_fail
+            or not hasattr(self._broker, "open_orders")
+        ):
+            return True
+        try:
+            open_orders = await asyncio.to_thread(self._broker.open_orders, symbol)
+        except BrokerError as err:
+            self._log(
+                symbol, "경고", f"미체결 확인 실패: {err} — 주문 진행", notify=False
+            )
+            return True
+        same_side = [o for o in open_orders if o["side"] == d.side.value]
+        if not same_side:
+            return True
+        total = sum(o["unfilled"] for o in same_side)
+        self._order_fail.setdefault(symbol, {"count": 0, "until": 0.0})["until"] = (
+            time.monotonic() + _ORDER_FAIL_COOLDOWN_SEC
+        )
+        self._log(
+            symbol,
+            "경고",
+            f"{d.side.value} 미체결 주문이 계좌에 남아 있습니다 "
+            f"({total}주 · 주문번호 {', '.join(o['order_no'] for o in same_side)}) — "
+            "중복 주문을 막기 위해 이번 주문은 보내지 않습니다",
+        )
+        return False
 
     def _order_allowed(self, symbol: str) -> bool:
         """주문 실패 직후 같은 종목이 매 틱 재주문하는 것을 막는다.
@@ -1509,9 +1564,11 @@ class Core:
         self._chart_busy.add(symbol)
         # SQLite 는 스레드 전용이므로 DB 접근(체결 내역)은 여기 코어 스레드에서 끝내고,
         # 워커 스레드에는 순수 데이터만 넘긴다.
-        _, fills_all = self._store.daily_report(self._date)
+        # 체결은 **매매 사이클 전체**에서 모은다 — 이월된 종목은 매수가 며칠 전이라
+        # 당일 기록만 보면 진입 화살표가 통째로 빠진다.
         fills = [
-            (f["ts"], f["side"], f["price"]) for f in fills_all if f["symbol"] == symbol
+            (f["ts"], f["side"], f["price"])
+            for f in self._store.symbol_fills(symbol, until=self._date)
         ]
         try:
             daily_path, minute_path, kospi_error = await asyncio.to_thread(
@@ -1661,6 +1718,8 @@ class Core:
             self._log(symbol, "경고", f"차트 전송 실패: {e}", notify=False)
 
     # ── 자동 스케줄 ─────────────────────────────────────────────
+    # 하루 일과: 08:55 감시 시작 → 15:30 감시 중지 → 15:35 일일 요약. 여기서 끝이다.
+    # 요약 이후에 도는 작업은 두지 않는다 (사용자가 프로그램을 끄는 시점이다).
 
     def _sched_last(self, key: str) -> str:
         """해당 스케줄 항목을 마지막으로 실행한 날짜 (DB 영속)."""
@@ -1701,14 +1760,6 @@ class Core:
             self._sched_mark("summary", today)
             await self.send_daily_summary()
 
-        if (
-            self._sched_last("summary2") != today
-            and t >= self._schedule["summary2"]
-            and self._date == today
-        ):
-            self._sched_mark("summary2", today)
-            await self._review_after_hours()
-
     async def _auto_start(self, today: str) -> None:
         """무인 운용: 필요한 연결까지 스스로 하고 감시를 시작한다."""
         if self._running:
@@ -1731,66 +1782,6 @@ class Core:
             "시스템", "감시", f"자동 스케줄 — 감시 시작 ({len(self._entries)}종목)"
         )
         await self.send_briefing()
-
-    async def _review_after_hours(self) -> None:
-        """20:05 시간외 리뷰 — 대체거래소(NXT) 거래가 실제로 있었던 종목만 3분봉 재전송.
-
-        NXT 상장 목록을 관리하는 대신, 분봉을 다시 조회해 15:30 이후 봉이 존재하는지로
-        판별한다 (데이터가 직접 알려주는 방식). 감시(WebSocket)와 무관한 REST 조회라
-        장 마감 후에도 동작한다.
-        """
-        if self._broker is None or self._bot is None:
-            self._log(
-                "시스템",
-                "설정",
-                "시간외 리뷰 생략 — 키움/Discord 연결 없음",
-                notify=False,
-            )
-            return
-        symbols, _ = self._store.daily_report(self._date)
-        traded = [s["symbol"] for s in symbols if s["total_bought"] > 0]
-        today = self._date.replace("-", "")
-        reviewed = 0
-        for symbol in traded:
-            if symbol not in self._entries:
-                continue
-            try:
-                rows = await asyncio.to_thread(self._broker.minute_chart, symbol)
-            except BrokerError as err:
-                self._log(symbol, "경고", f"시간외 확인 실패: {err}", notify=False)
-                continue
-            has_after_hours = any(
-                r[0][:8] == today and r[0][8:12] > "1530" for r in rows
-            )
-            if not has_after_hours:
-                continue
-            _, fills_all = self._store.daily_report(self._date)
-            fills = [
-                (f["ts"], f["side"], f["price"])
-                for f in fills_all
-                if f["symbol"] == symbol
-            ]
-            try:
-                _, minute_path, _ = await asyncio.to_thread(
-                    self._build_charts, symbol, fills
-                )
-            except Exception as e:  # noqa: BLE001
-                self._log(symbol, "에러", f"시간외 차트 생성 실패: {e}")
-                continue
-            name = self._entries[symbol]["name"]
-            try:
-                await self._bot.send_images(
-                    [minute_path], f"🌙 {name}({symbol}) 시간외(NXT) 포함 3분봉"
-                )
-                reviewed += 1
-            except Exception as e:  # noqa: BLE001
-                self._log(symbol, "경고", f"시간외 차트 전송 실패: {e}", notify=False)
-        self._log(
-            "시스템",
-            "요약",
-            f"시간외 리뷰 완료 — 재전송 {reviewed}종목 / 확인 {len(traded)}종목",
-            notify=False,
-        )
 
     def _watchlist_rows(self, trade_date: str = "") -> list[dict]:
         """관심종목 목록 (브리핑·조회 공용). 1차 예상 수량까지 계산해 붙인다."""
@@ -1846,6 +1837,61 @@ class Core:
                 deposit = None
         await self._send_embed(build_briefing_embed(self._date, rows, funds, deposit))
 
+    async def reconcile_broker(self) -> list[str]:
+        """프로그램이 계산한 손익·비용을 **증권사 실측값과 대조**한다 (읽기 전용).
+
+        - ka10076 체결요청: 실제 체결 건수와 수수료·세금 합계
+        - ka10072 일자별종목별실현손익: 세후 실현손익 (매도가 있어야 나온다)
+
+        차이가 나면 알려만 준다. 자동으로 맞추지 않는 이유는, 어느 쪽이 맞는지 모르는 채로
+        덮어쓰면 원인을 영영 못 찾기 때문이다. 수수료는 추정치(요율 × 금액)를 쓰고 있어
+        실측과 몇 원씩 어긋나는 것이 정상이므로, **의미 있는 차이만** 보고한다.
+
+        조회 실패는 조용히 넘어간다 — 요약 발송 자체를 막을 만한 일이 아니다.
+        """
+        if self._broker is None:
+            return []
+        lines: list[str] = []
+        symbols, fills = self._store.daily_report(self._date)
+        broker_fills = None
+        try:  # 시뮬레이터에는 조회 API 가 없다
+            if hasattr(self._broker, "filled_orders"):
+                broker_fills = await asyncio.to_thread(self._broker.filled_orders)
+        except BrokerError as err:
+            self._log("시스템", "경고", f"체결 대조 실패: {err}", notify=False)
+            broker_fills = None
+        if broker_fills is not None:
+            mine = {s["symbol"] for s in symbols}
+            # 이 프로그램이 다루는 종목만 본다 (직접 매매한 다른 종목이 섞일 수 있다)
+            relevant = [f for f in broker_fills if f["symbol"] in mine]
+            if len(relevant) != len(fills):
+                lines.append(
+                    f"체결 건수 프로그램 {len(fills)}건 · 증권사 {len(relevant)}건"
+                )
+            cost = sum(f["commission"] + f["tax"] for f in relevant)
+            estimated = sum(s["fees"] for s in symbols)
+            if cost and abs(cost - estimated) >= max(100.0, estimated * 0.05):
+                lines.append(f"거래비용 추정 {estimated:,.0f}원 · 실측 {cost:,.0f}원")
+
+        realized = None
+        try:
+            if hasattr(self._broker, "realized_pnl"):
+                realized = await asyncio.to_thread(
+                    self._broker.realized_pnl, self._date.replace("-", "")
+                )
+        except BrokerError as err:
+            self._log("시스템", "경고", f"실현손익 대조 실패: {err}", notify=False)
+            realized = None
+        if realized is not None:
+            broker_net = sum(r["pnl"] for r in realized)
+            my_net = sum(s["realized_pnl"] - s["fees"] for s in symbols)
+            if abs(broker_net - my_net) >= max(100.0, abs(my_net) * 0.02):
+                lines.append(
+                    f"세후 실현손익 프로그램 {my_net:+,.0f}원 · "
+                    f"증권사 {broker_net:+,.0f}원"
+                )
+        return lines
+
     async def send_daily_summary(self) -> None:
         """하루 매매 요약을 Discord 로 발송한다 (알림 수준과 무관하게 항상 발송)."""
         symbols, fills = self._store.daily_report(self._date)
@@ -1877,6 +1923,18 @@ class Core:
                 }
             )
         holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
+        # 증권사 실측 대조 — 차이가 있을 때만 한 줄 붙는다 (평소에는 아무것도 안 보인다)
+        if fills and (diffs := await self.reconcile_broker()):
+            embed.setdefault("fields", []).append(
+                {
+                    "name": "⚖️ 증권사 대조 — 확인 필요",
+                    "value": "\n".join(diffs),
+                    "inline": False,
+                }
+            )
+            self._log(
+                "시스템", "경고", "증권사 대조 차이: " + " / ".join(diffs), notify=False
+            )
         self._log(
             "시스템",
             "요약",
@@ -1925,6 +1983,23 @@ class Core:
             self._calendar.replace(days)
             self._calendar_at = today
             self._store.set_setting("trading_days", ",".join(days))  # 재시작 대비
+
+    def _enrich_journal(self, entry: dict) -> dict:
+        """일지 항목에 **상태 경로**와 **진입·청산 시점**을 덧붙인다.
+
+        둘 다 events 에서 그때그때 만든다 — 별도 컬럼으로 저장하면 이월·리셋으로
+        사이클이 달라졌을 때 낡은 값이 남는다.
+        """
+        cycle = self._store.symbol_cycle(
+            entry["symbol"], until=entry.get("trade_date", "")
+        )
+        return {
+            **entry,
+            "path": transition_path(cycle),
+            "timeline": cycle_timeline(
+                cycle, entry.get("base_date") or "", self._calendar
+            ),
+        }
 
     def _load_calendar(self) -> None:
         """저장해 둔 거래일 목록 복원 (연결 전에도 D+n 이 맞게 보이도록)."""

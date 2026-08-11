@@ -27,6 +27,14 @@ _MA_COLORS = {5: "#000000", 10: "#1565c0", 20: "#d32f2f", 60: "#2e7d32", 120: "#
 # 10% 이상 선은 캔들에서 멀리 떨어져 y축을 위로 늘리고 캔들을 아래로 눌러 제외했다.
 _STEP_PCTS = (0.03, 0.05, 0.07)
 
+# 체결 화살표 배치 — 모든 값은 **포인트(pt)** 단위다.
+# 데이터 좌표로 띄우면 y축 배율에 따라 간격이 들쭉날쭉해지고(가격이 비싼 종목일수록
+# 붙어 보인다) 여백 계산도 불가능하다. 축 크기와 무관한 pt 오프셋으로 띄운다.
+_MARKER_MAX_PT = 9.0  # 화살표 최대 크기 (일봉처럼 봉이 성길 때)
+_MARKER_MIN_PT = 5.0  # 최소 크기 — 이보다 작으면 모양을 알아볼 수 없다
+_MARKER_GAP_PT = 4.0  # 캔들 끝(고가/저가)에서 화살표 가장자리까지
+_MARKER_SPACE_PT = 3.0  # 쌓인 화살표 사이 간격
+
 
 @dataclass(frozen=True)
 class Bar:
@@ -197,33 +205,153 @@ def _hlines(ax, lines: tuple[float, float, float]) -> None:
         )
 
 
-def _fill_markers(ax, bars: list[Bar], fills: list[Fill], daily: bool) -> None:
-    """진입 ▲ / 청산 ▼ — 체결 시각이 속한 봉 위치에 표시한다."""
-    for f in fills:
+def _bar_index(bars: list[Bar], ts: str, daily: bool) -> int | None:
+    """체결 시각(YYYYMMDDHHMMSS)이 속한 봉의 위치. 표시 구간 밖이면 None."""
+    if daily:
+        day = ts[:8]
+        return next((i for i, b in enumerate(bars) if b.key[:8] == day), None)
+    for i, b in enumerate(bars):  # 봉 시작 시각 <= 체결 < 다음 봉 시작
+        if b.key <= ts and (i + 1 == len(bars) or ts < bars[i + 1].key):
+            return i
+    return None
+
+
+def marker_slots(
+    bars: list[Bar], fills: list[Fill], daily: bool, group: int = 1
+) -> list[tuple[int, str, int]]:
+    """(봉 index, 매수/매도, 층수) 목록 — 같은 방향이 겹치면 0,1,2… 로 쌓는다.
+
+    층수는 **발생 순서**다. 0층이 캔들에 가장 가깝고 바깥으로 갈수록 나중 체결이라,
+    차수를 글자로 적지 않아도 위치만으로 1차·2차를 읽을 수 있다.
+
+    group 은 '화살표 하나가 가로로 덮는 봉 수' 다. 3분봉처럼 봉이 촘촘하면 이웃 봉의
+    체결이라도 화살표끼리 가로로 겹쳐 개수를 셀 수 없으므로(3건이 2건처럼 보인다),
+    그 범위 안이면 같은 칸으로 보고 세로로 쌓는다. 1이면 같은 봉만 쌓는다.
+    """
+    slots: list[tuple[int, str, int]] = []
+    placed: dict[str, list[tuple[int, int]]] = {}  # 방향별 (봉 index, 층수)
+    for f in sorted(fills, key=lambda x: x.ts):
         ts = f.ts.replace("-", "").replace(":", "").replace(" ", "")  # YYYYMMDDHHMMSS
-        idx = None
-        if daily:
-            day = ts[:8]
-            idx = next((i for i, b in enumerate(bars) if b.key[:8] == day), None)
-        else:
-            for i, b in enumerate(bars):  # 봉 시작 시각 <= 체결 < 다음 봉 시작
-                if b.key <= ts and (i + 1 == len(bars) or ts < bars[i + 1].key):
-                    idx = i
-                    break
+        idx = _bar_index(bars, ts, daily)
         if idx is None:
             continue
-        # 마커는 **실제 체결 가격**에 찍는다. 봉 위/아래로 띄우면 진입·청산 가격이
-        # 비슷해도 화살표가 멀리 떨어져 큰 손익이 난 것처럼 보인다(2026-07-27 피드백).
-        marker, color = ("^", _UP) if f.side == "매수" else ("v", _DOWN)
-        ax.plot(
+        near = [lv for i, lv in placed.get(f.side, []) if abs(i - idx) < group]
+        level = max(near) + 1 if near else 0
+        placed.setdefault(f.side, []).append((idx, level))
+        slots.append((idx, f.side, level))
+    return slots
+
+
+def _pt_per_bar(ax) -> float:
+    """봉 하나가 차지하는 가로 폭 (pt)."""
+    lo, hi = ax.get_xlim()
+    width_pt = ax.get_position().width * ax.figure.get_figwidth() * 72.0
+    return width_pt / max(hi - lo, 1.0)
+
+
+def marker_size(ax) -> float:
+    """봉 간격에 맞춘 화살표 크기.
+
+    3분봉은 하루 130봉이라 고정 크기로 그리면 화살표가 **옆 캔들 위로** 삐져나온다.
+    다만 무한정 줄이면 모양을 알아볼 수 없으므로 최소 크기에서 멈추고, 남는 겹침은
+    기준점을 국소 극값으로 잡아(_marker_anchor) 해결한다.
+    """
+    return max(_MARKER_MIN_PT, min(_MARKER_MAX_PT, _pt_per_bar(ax)))
+
+
+def _anchor_half(ax, size: float) -> int:
+    """화살표 폭이 좌우 몇 봉을 덮는지 — 기준점을 찾을 범위."""
+    per_bar = _pt_per_bar(ax)
+    if per_bar <= 0:
+        return 0
+    return min(4, int(size / per_bar / 2))
+
+
+def _marker_anchor(bars: list[Bar], idx: int, buy: bool, half: int) -> float:
+    """화살표를 띄울 기준 가격 — 자기 봉이 아니라 **좌우 half 봉의 국소 극값**.
+
+    봉 간격이 화살표 폭보다 좁으면 자기 봉의 고가만 기준 삼아도 옆 캔들 꼬리를 덮는다.
+    이웃까지 포함한 극값을 쓰면 어떤 캔들도 가리지 않는다. half=0 이면 자기 봉 기준.
+    """
+    window = bars[max(0, idx - half) : min(len(bars), idx + half + 1)]
+    return min(b.low for b in window) if buy else max(b.high for b in window)
+
+
+def _marker_offset(size: float, level: int) -> float:
+    """기준 가격에서 level 층 화살표 **중심**까지의 거리 (pt)."""
+    return _MARKER_GAP_PT + size / 2 + (size + _MARKER_SPACE_PT) * level
+
+
+def _expand_ylim(ax, needs: list[tuple[float, bool, float]]) -> None:
+    """화살표가 잘리지 않도록 y 범위를 넓힌다.
+
+    needs 는 (기준가, 매수여부, 기준가에서 화살표 끝까지 필요한 pt) 목록이다.
+    여백은 pt 고정인데 범위를 넓히면 'pt 당 가격' 도 같이 커지므로 한 번의 덧셈으로는
+    답이 안 나온다. hi' ≥ a + R·S'/H 를 만족하는 S' 를 몇 번 반복해 수렴시킨다
+    (단조 증가라 3회면 충분하다).
+
+    필요 없는 쪽은 넓히지 않는다 — 화살표가 이미 차트 안쪽이면 괜히 캔들을 누를 이유가 없다.
+    """
+    if not needs:
+        return
+    height_pt = ax.get_position().height * ax.figure.get_figheight() * 72.0
+    lo, hi = ax.get_ylim()
+    if height_pt <= 0 or hi <= lo:
+        return
+    span, new_lo, new_hi = hi - lo, lo, hi
+    for _ in range(3):
+        new_hi = max([hi] + [a + r * span / height_pt for a, b, r in needs if not b])
+        new_lo = min([lo] + [a - r * span / height_pt for a, b, r in needs if b])
+        grown = new_hi - new_lo
+        if grown > (hi - lo) * 2.5:  # 과도한 확장 방지 — 캔들이 뭉개진다
+            break
+        span = grown
+    ax.set_ylim(new_lo, new_hi)
+
+
+def _fill_markers(ax, bars: list[Bar], fills: list[Fill], daily: bool) -> None:
+    """매수 ▲ 빨강(캔들 아래) / 매도 ▼ 파랑(캔들 위).
+
+    예전에는 **실제 체결 가격**에 찍었는데(2026-07-27), 매수 1회 + 익절 3회가 같은 날
+    나면 화살표가 캔들을 통째로 덮어 봉이 보이지 않았다(2026-08-11 피드백). 지금은
+    캔들의 고가·저가 바깥으로 빼고, 같은 봉에 같은 방향이 여럿이면 위아래로 쌓는다.
+    체결 가격은 잃지만 3선·계단 지표로 가격대를 읽을 수 있고, 몇 번째 매수·매도인지는
+    쌓인 순서(안쪽이 먼저)로 알 수 있다.
+    """
+    from matplotlib.transforms import offset_copy
+
+    size = marker_size(ax)
+    half = _anchor_half(ax, size)
+    slots = marker_slots(bars, fills, daily, group=max(1, half * 2 + 1))
+    if not slots:
+        return
+    placed = [
+        (
             idx,
-            f.price,
+            side,
+            _marker_anchor(bars, idx, side == "매수", half),
+            _marker_offset(size, level),
+        )
+        for idx, side, level in slots
+    ]
+    _expand_ylim(ax, [(a, s == "매수", gap + size / 2) for _, s, a, gap in placed])
+    for idx, side, anchor, gap in placed:
+        buy = side == "매수"
+        marker, color = ("^", _UP) if buy else ("v", _DOWN)
+        trans = offset_copy(
+            ax.transData, fig=ax.figure, y=(-gap if buy else gap), units="points"
+        )
+        ax.plot(
+            [idx],
+            [anchor],
             marker=marker,
-            color=color,
-            markersize=8,
-            markeredgecolor="white",
-            markeredgewidth=0.8,
-            zorder=6,
+            linestyle="none",
+            transform=trans,
+            markersize=size,
+            markerfacecolor="white",  # 속을 비워 캔들·격자와 톤을 맞춘다
+            markeredgecolor=color,
+            markeredgewidth=1.5 if size >= 7 else 1.0,
+            zorder=7,
         )
 
 

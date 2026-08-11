@@ -108,6 +108,44 @@ CREATE TABLE IF NOT EXISTS orders (
 """
 
 
+def _collapse_cycles(rows: list[dict]) -> list[dict]:
+    """(종목, 매매일 오름차순) 목록 → **매매 사이클당 한 건**, 최신 순.
+
+    이월된 포지션은 매매일마다 행이 하나씩 생긴다. 8/7 에 사서 8/11 에 판 종목은
+    5일치 행이 남는데, 일지에서는 '한 번의 매매' 이므로 한 줄이어야 한다
+    (안 그러면 같은 매매를 다섯 번 쓰게 된다).
+
+    이월은 포지션을 통째로 복사하므로 **사이클의 마지막 행에 최종 손익이 들어 있다**.
+    그 행만 남기되, 앞선 날에 써 둔 코멘트는 잃지 않도록 끌어온다.
+    직전 행이 '종료' 였다면 그다음은 새 사이클(리셋 후 재진입)이다.
+    """
+    kept: list[dict] = []
+    current: list[dict] = []
+
+    def flush() -> None:
+        if not current:
+            return
+        last = dict(current[-1])
+        for field in ("good", "bad", "daily_path", "minute_path"):
+            if not last.get(field):  # 이월 전 날짜에 남긴 것을 이어받는다
+                last[field] = next(
+                    (r[field] for r in reversed(current[:-1]) if r.get(field)), ""
+                )
+        kept.append(last)
+        current.clear()
+
+    for row in rows:
+        if current and (
+            current[-1]["symbol"] != row["symbol"]
+            or current[-1]["state"] == State.CLOSED.value
+        ):
+            flush()
+        current.append(row)
+    flush()
+    kept.sort(key=lambda r: (r["trade_date"], r["symbol"]), reverse=True)
+    return kept
+
+
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -424,6 +462,47 @@ class Store:
         ]
         return symbol_rows, fills
 
+    # ── 종목별 매매 사이클 ──────────────────────────────────────
+
+    def symbol_transitions(self, symbol: str, until: str = "") -> list[dict]:
+        """한 종목의 전이 이력 전체 (발생 순). until 이 있으면 그 매매일까지."""
+        where = ["symbol=?", "kind='전이'"]
+        params: list[str] = [symbol]
+        if until:
+            where.append("trade_date <= ?")
+            params.append(until)
+        rows = self._conn.execute(
+            f"""SELECT id, ts, trade_date, from_state, to_state, side, qty,
+                       price, trigger_price, reason
+                FROM events WHERE {" AND ".join(where)} ORDER BY id""",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def symbol_cycle(self, symbol: str, until: str = "") -> list[dict]:
+        """**마지막 매매 사이클** 의 전이만 (진입 ~ 종료).
+
+        이월된 포지션은 여러 매매일에 걸쳐 있어 하루치만 보면 앞부분이 잘린다
+        (진입이 3일 전이면 그날 기록에는 청산밖에 없다). 종료를 경계로 잘라
+        한 사이클을 통째로 돌려주면 상태 경로도 차트 마커도 온전해진다.
+
+        아직 보유 중이면 마지막 종료 이후의 진행분을 돌려준다. 종료가 하나도 없으면
+        전체가 곧 한 사이클이다.
+        """
+        rows = self.symbol_transitions(symbol, until)
+        cycle: list[dict] = []
+        for row in rows:
+            cycle.append(row)
+            if row["to_state"] == State.CLOSED.value:
+                if row is rows[-1]:  # 종료로 끝났다 — 이것이 마지막 사이클
+                    return cycle
+                cycle = []  # 다음 사이클(리셋 후 재진입)이 이어진다
+        return cycle
+
+    def symbol_fills(self, symbol: str, until: str = "") -> list[dict]:
+        """마지막 사이클의 **체결만** (주문이 동반된 전이). 차트 마커용."""
+        return [r for r in self.symbol_cycle(symbol, until) if r["side"]]
+
     # ── 매매일지 ────────────────────────────────────────────────
 
     def save_journal(
@@ -485,11 +564,11 @@ class Store:
                        COALESCE(j.minute_path, '') minute_path
                 FROM symbols s JOIN positions p USING(trade_date, symbol)
                 LEFT JOIN journal j ON j.trade_date = s.trade_date AND j.symbol = s.symbol
-                WHERE {' AND '.join(where)}
-                ORDER BY s.trade_date DESC, s.symbol""",
+                WHERE {" AND ".join(where)}
+                ORDER BY s.symbol, s.trade_date""",
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        return _collapse_cycles([dict(r) for r in rows])
 
     def recent_trade_dates(self, limit: int = 10) -> list[str]:
         """기록이 있는 매매일 (최근 순)."""

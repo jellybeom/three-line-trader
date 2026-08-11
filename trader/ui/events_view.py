@@ -11,6 +11,8 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from trader.ui.mini_scroll import MiniScroll
+
 _MAX_ROWS = 500
 _COLUMNS = ("ts", "symbol", "name", "kind", "text")
 
@@ -37,10 +39,9 @@ class EventsView(ttk.Frame):
                 anchor="w" if col == "text" else "center",
             )
 
-        scroll = ttk.Scrollbar(body, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        # 스크롤바는 자리를 차지하지 않는 오버레이로 (본문이 폭을 전부 쓴다)
+        self._scroll = MiniScroll(self.tree)
 
         self._menu = tk.Menu(self, tearoff=0)
         self._menu.add_command(label="로그 지우기 (화면만)", command=self._clear)

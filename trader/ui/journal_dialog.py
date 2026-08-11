@@ -16,6 +16,10 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
+from trader.journal import transition_path  # 재수출 — 창에서 경로 문자열을 쓴다
+
+__all__ = ["JournalDialog", "entry_label", "summarize", "transition_path"]
+
 _ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 
 
@@ -43,6 +47,10 @@ def summarize(entry: dict) -> list[tuple[str, str]]:
     opened, closed = entry.get("day_open") or 0, entry.get("day_close") or 0
     if opened and closed:
         rows.append(("당일 등락", f"{(closed - opened) / opened:+.2%}"))
+    if path := (entry.get("path") or ""):
+        rows.append(("상태 경로", path))
+    if timeline := (entry.get("timeline") or ""):
+        rows.append(("시점", timeline))
     if tags := (entry.get("tags") or ""):
         rows.append(("태그", " ".join(f"#{t}" for t in tags.split(",") if t)))
     if base := (entry.get("base_date") or ""):
