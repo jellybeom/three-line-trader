@@ -646,3 +646,159 @@ def test_빈_검색어는_전체를_돌려준다(rows):
     from trader.ui.journal_dialog import filter_entries
 
     assert len(filter_entries(rows, query="   ")) == len(rows)
+
+
+# ── 매매일지 창 조작 ──────────────────────────────────────────
+
+
+@pytest.fixture
+def dialog(rows):
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:  # 화면이 없는 환경
+        pytest.skip("no display")
+    root.withdraw()
+    from trader.ui.journal_dialog import JournalDialog
+
+    for row in rows:  # 창이 요구하는 필드를 채운다
+        row.setdefault("state", "종료")
+        row.setdefault("avg_price", 10_000)
+        row.setdefault("total_bought", 10)
+        row.setdefault("daily_path", "")
+        row.setdefault("minute_path", "")
+    dlg = JournalDialog(root, rows, lambda *a: None)
+    dlg.geometry("1100x740")
+    dlg.update()
+    dlg.update_idletasks()
+    dlg.update()
+    yield dlg
+    root.destroy()
+
+
+def _type(search, text: str) -> None:
+    """실제 타이핑을 흉내낸다 — 글자 삽입도 Tk 의 기본 동작에 맡긴다.
+
+    when="now" 로 보내야 바인딩이 그 자리에서 실행된다(기본값은 큐에 쌓였다가 나중에
+    처리돼 순서 검증이 무의미해진다). 직접 insert 하면 안 되는데, KeyPress 를 보내면
+    Tk 가 그 글자를 이미 넣기 때문이다 — 둘 다 하면 "a로a봇" 이 된다.
+    한글은 keysym 으로 보낼 수 없어 시험에는 종목코드(숫자)를 쓴다.
+    """
+    search.entry.focus_force()
+    search.update()
+    for char in text:
+        # KeyPress 로 글자가 들어가고, 목록 갱신은 KeyRelease 에 걸려 있다. 실제 타이핑은
+        # 둘이 짝을 이루므로 시험도 짝으로 보내야 한다.
+        search.entry.event_generate("<KeyPress>", keysym=char, when="now")
+        search.entry.event_generate("<KeyRelease>", keysym=char, when="now")
+    search.update()
+
+
+def test_안내문구는_창을_처음_열_때도_가운데_있다(dialog):
+    """배치 전에는 캔버스가 1×1 이라, 그때 그린 글자는 왼쪽 위 구석에 박힌다."""
+    view = dialog._views["일봉"]
+    x, y = view.canvas.coords("msg")
+    assert abs(x - view.canvas.winfo_width() / 2) < 2
+    assert abs(y - view.canvas.winfo_height() / 2) < 2
+
+
+def test_안내문구는_비어있어야_뜬다(dialog):
+    view = dialog._views["일봉"]
+    assert view.canvas.itemcget("msg", "text") == "보관된 차트가 없습니다"
+
+
+def test_검색칸의_안내문구는_겹치는_위젯이_아니다(dialog):
+    """Entry 위에 Label 을 얹으면 Windows 11 테마의 파란 밑줄을 가린다."""
+    kinds = [w.winfo_class() for w in dialog._search.winfo_children()]
+    assert kinds == ["TEntry", "TButton"]  # 겹쳐 놓은 Label 이 없다
+    assert dialog._search.get() == ""  # 안내 문구는 검색어로 세지 않는다
+
+
+def test_지우기_버튼은_입력이_있을_때만_보인다(dialog):
+    search = dialog._search
+    assert not search._clear.winfo_ismapped()
+    _type(search, "0560")  # 유진로봇(056080)
+    dialog.update()
+    assert search.get() == "0560"
+    assert search._clear.winfo_ismapped()
+    assert dialog._list.size() == 1
+
+
+def test_지우기_버튼이_검색을_초기화한다(dialog, rows):
+    search = dialog._search
+    _type(search, "0560")
+    dialog.update()
+    search.clear()
+    dialog.update()
+    assert search.get() == ""
+    assert dialog._list.size() == len(rows)
+
+
+class _FakeEvent:
+    """bind 로 등록된 처리기를 직접 부를 때 쓰는 최소한의 이벤트."""
+
+    def __init__(self, widget):
+        self.widget = widget
+
+
+def test_포커스가_떠나면_안내문구가_돌아온다(dialog):
+    """처리기를 직접 부른다 — 진짜 포커스 이벤트에 기대지 않는다.
+
+    focus_set() 은 **OS 가 그 창에 키보드 포커스를 줄 때만** <FocusIn> 을 일으킨다.
+    루트가 숨겨진 시험 환경에서는 창이 포커스를 못 받아 Windows 에서 처리기가 아예
+    실행되지 않았다(2026-08-12). 바인딩이 걸려 있는지와 처리기가 하는 일을 따로 확인하면
+    플랫폼과 무관하게 같은 결과가 나온다.
+    """
+    search = dialog._search
+    assert search.entry.bind("<FocusIn>")  # 실제 포커스에도 반응하도록 걸려 있다
+    assert search.entry.bind("<FocusOut>")
+
+    search._on_focus_in()
+    assert search.entry.get() == ""  # 포커스가 오면 안내 문구는 비켜준다
+    search._on_focus_out()
+    assert search.entry.get() == "종목명 또는 종목코드"
+    assert search.get() == ""  # 그래도 검색어는 비어 있다
+
+
+def test_탭이_잘한점에서_아쉬운점으로_보낸다(dialog):
+    """tk.Text 는 Tab 을 글자로 받아넣어 기본값으로는 칸 이동이 안 된다.
+
+    focus_get() 으로 확인하지 않는 이유는 위와 같다 — 시험 환경에서는 창이 OS 포커스를
+    못 받아 항상 None 이 나온다. 대신 **이동 대상**과 **탭 문자 차단**을 직접 본다.
+    """
+    from trader.ui.journal_dialog import _focus_next
+
+    assert dialog._good.bind("<Tab>")  # 바인딩이 걸려 있다
+    assert dialog._good.tk_focusNext() is dialog._bad  # 다음 칸이 '아쉬운 점' 이다
+    # "break" 를 돌려줘야 Text 의 기본 동작(탭 문자 삽입)이 막힌다
+    assert _focus_next(_FakeEvent(dialog._good)) == "break"
+    assert "\t" not in dialog._good.get("1.0", "end")
+
+
+def test_시프트_탭으로_되돌아온다(dialog):
+    from trader.ui.journal_dialog import _focus_prev
+
+    assert dialog._bad.bind("<Shift-Tab>")
+    assert dialog._bad.tk_focusPrev() is dialog._good
+    assert _focus_prev(_FakeEvent(dialog._bad)) == "break"
+
+
+def test_글자가_들어오기_전에_안내문구를_치운다(dialog):
+    """KeyRelease 에만 지우면 안내 문구 앞에 글자가 붙는다 ("05" + "종목명 또는 …")."""
+    search = dialog._search
+    assert search.entry.get() == "종목명 또는 종목코드"
+    search._on_key_press()  # 키를 누르는 순간
+    assert search.entry.get() == ""  # 글자가 들어갈 자리는 이미 비어 있다
+    search.entry.insert("end", "05")
+    search._on_key()
+    dialog.update()
+    assert search.get() == "05"
+
+
+def test_방향키만_눌러도_안내문구가_사라지지_않는다(dialog):
+    """글자가 안 들어왔는데 검색어로 잡히면 목록이 통째로 사라진다."""
+    search = dialog._search
+    search._on_key()  # 글자 없이 KeyRelease 만 온 상황
+    dialog.update()
+    assert search.get() == ""
+    assert dialog._list.size() == len(dialog._entries)

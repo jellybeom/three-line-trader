@@ -307,6 +307,42 @@ def test_기준봉을_고르고_지울_수_있다(app):
     assert dialog._vars["base_date"].get() == ""
 
 
+def test_창이_뜨자마자_고른_기준봉도_남는다(app):
+    """자동 채움 정리는 after_idle 로 미뤄져 있어, 그 전에 고른 날짜를 지울 수 있다.
+
+    _dialog() 는 생성 직후 update() 를 부르지만, 실제 사용자는 그보다 빨리 고를 수 있다
+    (플랫폼에 따라 idle 이 도는 시점이 다르다 — Windows 에서 발현, 2026-08-12).
+    """
+    from trader.ui import bus as bus_mod
+    from trader.ui.register_dialog import RegisterDialog
+
+    funds = bus_mod.Funds(
+        total=1_000_000, max_symbols=5, buy1_amount=100_000, buy2_amount=100_000
+    )
+    dialog = RegisterDialog(app, on_submit=lambda *_: None, funds=funds, edit=None)
+    if dialog._base_date is None:
+        pytest.skip("tkcalendar 미설치")
+    dialog._base_date.set_date("2026-08-05")  # update() 전에 = idle 이 아직 안 돌았다
+    app.update()
+    assert dialog._vars["base_date"].get() == "2026-08-05"
+    dialog.destroy()
+
+
+def test_기준봉으로_오늘을_골라도_지워지지_않는다(app):
+    """'자동으로 채워진 오늘' 과 '사용자가 고른 오늘' 을 구분해야 한다."""
+    import datetime as dt
+
+    dialog, _ = _dialog(app)
+    if dialog._base_date is None:
+        pytest.skip("tkcalendar 미설치")
+    today = dt.date.today().isoformat()
+    dialog._base_date.set_date(today)
+    dialog._base_date.event_generate("<<DateEntrySelected>>", when="now")
+    app.update()
+    app.update_idletasks()
+    assert dialog._vars["base_date"].get() == today
+
+
 def test_선택한_기준봉과_태그가_명령에_실린다(app):
     dialog, sent = _dialog(app)
     dialog._vars["symbol"].set("005930")

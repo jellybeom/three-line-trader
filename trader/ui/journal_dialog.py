@@ -69,20 +69,109 @@ def summarize(entry: dict) -> list[tuple[str, str]]:
     return rows
 
 
-def _add_placeholder(entry: ttk.Entry, var: tk.StringVar, text: str) -> None:
-    """비어 있을 때만 흐린 안내 문구를 보여준다 (ttk 에는 기본 기능이 없다)."""
-    label = ttk.Label(entry, text=text, foreground="#9e9e9e", background="white")
+def _bind_optional(widget, sequence: str, handler) -> None:
+    """플랫폼에 없는 키 이름이면 조용히 건너뛴다.
 
-    def refresh(*_args) -> None:
-        if var.get():
-            label.place_forget()
+    <ISO_Left_Tab> 은 X11 에만 있는 Shift+Tab 키심이다. Windows 에서 그대로 bind 하면
+    TclError("bad event type or keysym") 로 창 생성 자체가 실패한다(2026-08-12).
+    """
+    try:
+        widget.bind(sequence, handler)
+    except tk.TclError:
+        pass
+
+
+def _focus_next(event):
+    """Tab → 다음 위젯. "break" 를 돌려줘야 Text 에 탭 문자가 들어가지 않는다."""
+    event.widget.tk_focusNext().focus_set()
+    return "break"
+
+
+def _focus_prev(event):
+    event.widget.tk_focusPrev().focus_set()
+    return "break"
+
+
+class SearchEntry(ttk.Frame):
+    """안내 문구가 있는 검색 입력칸 + 지우기(✕) 버튼.
+
+    안내 문구를 **Entry 위에 Label 을 얹는 방식으로 만들지 않는다.** 얹으면 Windows 11
+    테마가 입력칸 아래에 그리는 파란 밑줄을 가려버린다(2026-08-12). 대신 고전적인
+    방식대로 **Entry 안에 흐린 글자를 직접 넣고** 포커스가 오면 지운다. 겹치는 위젯이
+    없으니 테마가 무엇이든 안전하다.
+
+    지우기 버튼도 입력칸 **바깥** 오른쪽에 둔다 — 같은 이유이고, 글자가 버튼에
+    가려지는 일도 없다.
+    """
+
+    def __init__(self, master, placeholder: str, on_change: Callable[[], None]):
+        super().__init__(master)
+        self._placeholder = placeholder
+        self._on_change = on_change
+        self._showing = False  # 지금 보이는 글자가 안내 문구인가
+
+        self.entry = ttk.Entry(self)
+        self.entry.pack(side="left", fill="x", expand=True)
+        self._clear = ttk.Button(self, text="✕", width=2, command=self.clear)
+        # 글자가 **들어가기 전에** 안내 문구를 치운다. FocusIn 에만 기대면, 포커스
+        # 이벤트 없이 입력이 들어올 때 안내 문구 앞에 글자가 붙어버린다
+        # ("로봇" + "종목명 또는 종목코드"). 키를 누르는 순간 지우면 순서가 보장된다.
+        self.entry.bind("<KeyPress>", self._on_key_press)
+        self.entry.bind("<KeyRelease>", self._on_key)
+        self.entry.bind("<FocusIn>", self._on_focus_in)
+        self.entry.bind("<FocusOut>", self._on_focus_out)
+        self.entry.bind("<Escape>", lambda _e: self.clear())
+        self._show_placeholder()
+
+    def get(self) -> str:
+        """실제 검색어. 안내 문구가 보이는 중이면 빈 문자열."""
+        return "" if self._showing else self.entry.get()
+
+    def clear(self) -> None:
+        self.entry.delete(0, "end")
+        self._sync_button()
+        self._on_change()
+        if self.focus_get() is not self.entry:
+            self._show_placeholder()
+
+    def _show_placeholder(self) -> None:
+        if self.entry.get():
+            return
+        self._showing = True
+        self.entry.insert(0, self._placeholder)
+        self.entry.configure(foreground="#9e9e9e")
+        self._sync_button()
+
+    def _hide_placeholder(self) -> None:
+        if not self._showing:
+            return
+        self._showing = False
+        self.entry.delete(0, "end")
+        self.entry.configure(foreground="")
+
+    def _on_focus_in(self, _event=None) -> None:
+        self._hide_placeholder()
+
+    def _on_focus_out(self, _event=None) -> None:
+        self._show_placeholder()
+
+    def _on_key_press(self, _event=None) -> None:
+        self._hide_placeholder()
+
+    def _on_key(self, _event=None) -> None:
+        if self._showing and self.entry.get() == self._placeholder:
+            return  # 방향키 등 — 글자는 안 들어왔으므로 안내 문구 그대로 둔다
+        self._showing = False  # 글자를 쳤으면 더 이상 안내 문구가 아니다
+        self.entry.configure(foreground="")
+        self._sync_button()
+        self._on_change()
+
+    def _sync_button(self) -> None:
+        """지울 것이 있을 때만 ✕ 를 보여준다 (빈 칸에 놓인 ✕ 는 눈만 어지럽다)."""
+        if self.get():
+            self._clear.pack(side="left", padx=(4, 0))
         else:
-            label.place(x=4, rely=0.5, anchor="w")
-
-    var.trace_add("write", refresh)
-    entry.bind("<FocusIn>", lambda _e: label.place_forget())
-    entry.bind("<FocusOut>", lambda _e: refresh())
-    refresh()
+            self._clear.pack_forget()
 
 
 def net_pnl(entry: dict) -> float:
@@ -158,11 +247,8 @@ class JournalDialog(tk.Toplevel):
 
         # 검색 — 종목명·코드 어느 쪽으로도 찾을 수 있다. 입력할 때마다 즉시 걸러진다
         # (목록이 수백 건이어도 문자열 비교뿐이라 체감 지연이 없다).
-        self._query = tk.StringVar()
-        self._query.trace_add("write", lambda *_: self._fill_list())
-        search = ttk.Entry(left, textvariable=self._query)
-        search.pack(fill="x", pady=(0, 4))
-        _add_placeholder(search, self._query, "종목명 또는 종목코드")
+        self._search = SearchEntry(left, "종목명 또는 종목코드", self._fill_list)
+        self._search.pack(fill="x", pady=(0, 4))
 
         self._result = tk.StringVar(value="전체")
         buttons = ttk.Frame(left)
@@ -214,6 +300,12 @@ class JournalDialog(tk.Toplevel):
         # uniform 을 같게 주면 두 칸의 높이가 항상 같아진다 (한쪽만 눌리지 않는다)
         for row in (0, 1):
             form.rowconfigure(row, weight=1, uniform="comment")
+        # tk.Text 는 Tab 을 글자로 받아 넣어버려 다음 칸으로 넘어가지 않는다.
+        # 코멘트에 탭 문자를 쓸 일은 없으므로 칸 이동으로 돌린다 (Shift+Tab 은 역방향).
+        for widget in (self._good, self._bad):
+            widget.bind("<Tab>", _focus_next)
+            widget.bind("<Shift-Tab>", _focus_prev)
+            _bind_optional(widget, "<ISO_Left_Tab>", _focus_prev)
 
         self._charts = ttk.Notebook(right)
         self._charts.pack(side="top", fill="both", expand=True)
@@ -235,7 +327,7 @@ class JournalDialog(tk.Toplevel):
         중에 화면이 깜빡이거나, 쓰던 코멘트가 날아가는 것을 막기 위해서다.
         """
         self._visible = filter_entries(
-            self._entries, self._query.get(), self._result.get()
+            self._entries, self._search.get(), self._result.get()
         )
         self._list.delete(0, "end")
         for entry in self._visible:

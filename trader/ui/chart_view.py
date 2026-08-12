@@ -56,6 +56,7 @@ class ChartView(ttk.Frame):
         self._center = (0.5, 0.5)  # 화면 한가운데에 오는 원본 상의 상대 좌표
         self._drag: tuple[int, int] | None = None
         self._redraw_job: str | None = None
+        self._message_text: str | None = None  # 안내 문구를 띄운 상태인지
 
         self.canvas.bind("<Configure>", self._on_resize)
         self.canvas.bind("<Button-1>", self._on_press)
@@ -75,6 +76,7 @@ class ChartView(ttk.Frame):
         """차트를 바꾼다. 경로가 없거나 열 수 없으면 안내 문구를 보여준다."""
         self._path = path
         self._source = None
+        self._message_text = None
         self._scale, self._center = 1.0, (0.5, 0.5)
         if not path or not Path(path).exists():
             self._message("보관된 차트가 없습니다")
@@ -99,6 +101,13 @@ class ChartView(ttk.Frame):
     # ── 표시 ───────────────────────────────────────────────────
 
     def _message(self, text: str) -> None:
+        """안내 문구를 한가운데 띄운다.
+
+        문구를 **기억해 둔다**. 창을 처음 열 때는 아직 배치 전이라 캔버스 크기가 1×1 이고,
+        그대로 그리면 문구가 왼쪽 위 구석에 박힌다. 크기가 정해지면 <Configure> 에서
+        같은 문구를 다시 그려 가운데로 옮긴다(2026-08-12).
+        """
+        self._message_text = text
         self.canvas.delete("all")
         self._photo = self._item = None
         width = max(self.canvas.winfo_width(), 1)
@@ -138,6 +147,9 @@ class ChartView(ttk.Frame):
         return min(width / src_w, height / src_h)
 
     def _redraw(self) -> None:
+        if self._message_text is not None:  # 문구를 새 크기에 맞춰 가운데로
+            self._message(self._message_text)
+            return
         if self._source is None:
             return
         view_w = max(self.canvas.winfo_width(), 1)
@@ -185,7 +197,11 @@ class ChartView(ttk.Frame):
     # ── 입력 ───────────────────────────────────────────────────
 
     def _on_resize(self, _event=None) -> None:
-        # 창 크기 조절 중에는 이벤트가 연달아 오므로, 잠깐 모았다가 한 번만 그린다
+        if self._message_text is not None:
+            self._message(self._message_text)  # 글자 한 줄이라 미룰 것 없이 바로
+            return
+        # 그림은 리샘플링 비용이 있다. 창 크기 조절 중에는 이벤트가 연달아 오므로
+        # 잠깐 모았다가 한 번만 그린다.
         if self._redraw_job is not None:
             try:
                 self.after_cancel(self._redraw_job)
