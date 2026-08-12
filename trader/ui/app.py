@@ -820,21 +820,39 @@ class App(tk.Tk):
         self._bus.commands.put(cmd)
 
     def _open_journal(self, select: tuple[str, str] | None = None) -> None:
-        """매매일지 창 — 목록은 코어에서 받아 채운다 (JournalEntries 이벤트)."""
-        self._journal_select = select
-        self._bus.commands.put(bus.RequestJournal())
+        """매매일지 창 — 목록은 코어에서 받아 채운다 (JournalEntries 이벤트).
 
-    def _show_journal(self, entries: tuple) -> None:
+        처음에는 **기본 기간만** 요청한다. 전체를 들고 오면 기록이 쌓일수록 창이 뜨는 데
+        오래 걸리고, 그 조회가 코어 스레드에서 돌아 매매 판정까지 밀린다(2026-08-12).
+        """
+        from trader.ui.journal_dialog import DEFAULT_PERIOD, period_range
+
+        self._journal_select = select
+        since, until = period_range(DEFAULT_PERIOD)
+        self._bus.commands.put(bus.RequestJournal(since, until))
+
+    def _request_journal_period(self, since: str, until: str) -> None:
+        self._bus.commands.put(bus.RequestJournal(since, until))
+
+    def _show_journal(self, entries: tuple, months: tuple = ()) -> None:
+        """일지 창을 띄우거나, 이미 열려 있으면 새 기간의 목록으로 갈아끼운다."""
         from trader.ui.journal_dialog import JournalDialog
 
+        dialog = getattr(self, "_journal_dialog", None)
+        if dialog is not None and dialog.winfo_exists():
+            dialog.set_entries([dict(e) for e in entries], months)
+            dialog.lift()
+            return
         if not entries:
             messagebox.showinfo("매매일지", "아직 기록할 매매가 없습니다.")
             return
-        JournalDialog(
+        self._journal_dialog = JournalDialog(
             self,
             [dict(e) for e in entries],
             on_save=self._save_journal,
             select=getattr(self, "_journal_select", None),
+            on_period=self._request_journal_period,
+            months=months,
         )
 
     def _save_journal(self, trade_date: str, symbol: str, good: str, bad: str) -> None:
@@ -972,8 +990,8 @@ class App(tk.Tk):
                 self._notify_combo.set(lv)
             case bus.Blocked(symbol=s, active=on, reason=why):
                 self.positions.set_blocked(s, on, why)
-            case bus.JournalEntries(entries=entries):
-                self._show_journal(entries)
+            case bus.JournalEntries(entries=entries, months=months):
+                self._show_journal(entries, months)
             case bus.ChartReady(symbol=s, name=n, daily_path=dp, minute_path=mp):
                 self._show_chart(s, n, dp, mp)
             case bus.DiscordStatus(connected=ok, detail=detail):

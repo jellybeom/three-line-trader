@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -30,6 +31,36 @@ __all__ = [
 _ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 
 _TEXT_LINES = 4  # 잘한 점 · 아쉬운 점 입력칸 줄 수 (둘은 항상 같아야 한다)
+
+# 기간 선택 — 상대 기간을 기본으로 두고, 특정 달은 목록에서 고른다.
+# 분기·주간처럼 절대 구간을 잘게 나누면 고르는 데 손이 더 가고, 실제로 그렇게 찾는 일은
+# 드물다(특정 날짜를 찾을 땐 종목명 검색이 빠르다).
+PERIOD_3M = "최근 3개월"
+PERIOD_1Y = "최근 1년"
+PERIOD_ALL = "전체"
+PERIODS = (PERIOD_3M, PERIOD_1Y, PERIOD_ALL)
+DEFAULT_PERIOD = PERIOD_3M  # 일지는 대개 최근 매매를 복기하러 연다
+
+
+def period_range(period: str, today: dt.date | None = None) -> tuple[str, str]:
+    """기간 선택 → (since, until). 빈 문자열은 '제한 없음'.
+
+    'YYYY-MM' 형태면 그 달 하루치로 잘라준다. 달의 마지막 날은 다음 달 1일에서
+    하루를 빼 구한다 — 월별 일수와 윤년을 따로 다루지 않아도 된다.
+    """
+    today = today or dt.date.today()
+    if period == PERIOD_3M:
+        return (today - dt.timedelta(days=92)).isoformat(), ""
+    if period == PERIOD_1Y:
+        return (today - dt.timedelta(days=365)).isoformat(), ""
+    if period == PERIOD_ALL:
+        return "", ""
+    try:
+        first = dt.date.fromisoformat(f"{period}-01")
+    except ValueError:
+        return "", ""
+    nxt = dt.date(first.year + first.month // 12, first.month % 12 + 1, 1)
+    return first.isoformat(), (nxt - dt.timedelta(days=1)).isoformat()
 
 
 def summarize(entry: dict) -> list[tuple[str, str]]:
@@ -235,6 +266,8 @@ class JournalDialog(tk.Toplevel):
         entries: list[dict],
         on_save: Callable[[str, str, str, str], None],
         select: tuple[str, str] | None = None,
+        on_period: Callable[[str, str], None] | None = None,
+        months: tuple = (),
     ):
         super().__init__(master)
         self.title("매매일지")
@@ -248,6 +281,7 @@ class JournalDialog(tk.Toplevel):
         self._entries = entries
         self._visible = entries  # 검색·필터를 통과해 지금 목록에 보이는 것
         self._on_save = on_save
+        self._on_period_change = on_period
         self._current: dict | None = None
         self._views: dict[str, ChartView] = {}
 
@@ -261,6 +295,18 @@ class JournalDialog(tk.Toplevel):
         # (목록이 수백 건이어도 문자열 비교뿐이라 체감 지연이 없다).
         self._search = SearchEntry(left, "종목명 또는 종목코드", self._fill_list)
         self._search.pack(fill="x", pady=(0, 4))
+
+        # 기간 — 상대 기간 셋과 '기록이 있는 달' 을 한 목록에 담는다. 고르면 DB 를
+        # 다시 읽는다(전체를 들고 와서 화면에서 거르면 기록이 쌓일수록 느려진다).
+        self._period = tk.StringVar(value=DEFAULT_PERIOD)
+        self._period_box = ttk.Combobox(
+            left,
+            textvariable=self._period,
+            state="readonly",
+            values=[*PERIODS, *months],
+        )
+        self._period_box.pack(fill="x", pady=(0, 4))
+        self._period_box.bind("<<ComboboxSelected>>", self._on_period)
 
         self._result = tk.StringVar(value="전체")
         # Toolbutton 은 글자를 왼쪽에 붙여 놓는다. 버튼 셋이 폭을 나눠 가지므로
@@ -334,6 +380,24 @@ class JournalDialog(tk.Toplevel):
 
     # ── 목록 ───────────────────────────────────────────────────
 
+    def _on_period(self, _event=None) -> None:
+        """기간이 바뀌면 DB 를 다시 읽어달라고 요청한다 (결과는 set_entries 로 온다)."""
+        self._period_box.selection_clear()
+        if self._on_period_change is not None:
+            self._on_period_change(*period_range(self._period.get()))
+
+    def set_entries(self, entries: list[dict], months: tuple = ()) -> None:
+        """새 기간의 목록으로 갈아끼운다. 검색어·손익 필터는 그대로 둔다."""
+        self._entries = entries
+        if months:  # 기록이 있는 달을 목록 뒤에 붙인다
+            self._period_box.configure(values=[*PERIODS, *months])
+        self._fill_list()
+        if self._visible:
+            self._list.selection_set(0)
+            self._show(self._visible[0])
+        else:
+            self._current = None
+
     def _setup_focus_order(self) -> None:
         """Tab 이 화면에 보이는 순서대로 돌게 한다.
 
@@ -342,6 +406,7 @@ class JournalDialog(tk.Toplevel):
         """
         self.focus_chain = [
             self._search.entry,
+            self._period_box,
             *self._filters,
             self._list,
             self._charts,

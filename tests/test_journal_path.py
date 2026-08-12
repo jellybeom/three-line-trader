@@ -763,6 +763,7 @@ def test_탭_순서가_화면에_보이는_대로다(dialog):
     """
     assert dialog.focus_chain == [
         dialog._search.entry,
+        dialog._period_box,
         *dialog._filters,
         dialog._list,
         dialog._charts,
@@ -818,3 +819,148 @@ def test_방향키만_눌러도_안내문구가_사라지지_않는다(dialog):
     dialog.update()
     assert search.get() == ""
     assert dialog._list.size() == len(dialog._entries)
+
+
+# ── 기간 선택 ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "period,expected",
+    [
+        ("최근 3개월", ("2026-05-12", "")),
+        ("최근 1년", ("2025-08-12", "")),
+        ("전체", ("", "")),
+        ("2026-08", ("2026-08-01", "2026-08-31")),
+        ("2025-12", ("2025-12-01", "2025-12-31")),
+        ("2024-02", ("2024-02-01", "2024-02-29")),  # 윤년
+        ("2026-02", ("2026-02-01", "2026-02-28")),
+    ],
+)
+def test_기간_선택이_날짜_범위로_바뀐다(period, expected):
+    import datetime as dt
+
+    from trader.ui.journal_dialog import period_range
+
+    assert period_range(period, dt.date(2026, 8, 12)) == expected
+
+
+def test_알_수_없는_기간은_전체로_본다():
+    """설정이 깨져도 목록이 비어 보이지 않도록."""
+    from trader.ui.journal_dialog import period_range
+
+    assert period_range("이상한값") == ("", "")
+
+
+def test_기간을_고르면_DB를_다시_읽는다(rows):
+    """전체를 들고 와서 화면에서 거르면 기록이 쌓일수록 느려진다."""
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    root.withdraw()
+    from trader.ui.journal_dialog import JournalDialog
+
+    for row in rows:
+        row.setdefault("state", "종료")
+        row.setdefault("avg_price", 10_000)
+        row.setdefault("total_bought", 10)
+        row.setdefault("daily_path", "")
+        row.setdefault("minute_path", "")
+    asked = []
+    dlg = JournalDialog(
+        root,
+        rows,
+        lambda *a: None,
+        on_period=lambda since, until: asked.append((since, until)),
+        months=("2026-08", "2026-07"),
+    )
+    dlg.update()
+    assert "2026-08" in dlg._period_box.cget("values")  # 기록이 있는 달이 목록에 있다
+
+    dlg._period.set("2026-08")
+    dlg._on_period()
+    assert asked == [("2026-08-01", "2026-08-31")]
+
+    dlg.set_entries([rows[0]], months=("2026-08",))  # 코어가 보낸 새 목록
+    dlg.update()
+    assert dlg._list.size() == 1
+    root.destroy()
+
+
+# ── 보유 중 최고·최저(MFE/MAE) ────────────────────────────────
+
+
+def test_보유만_해도_최고_최저가_갱신된다():
+    """전이 때만 옮기면 매수 후 청산이 없는 날은 체결가에 멈춰 '+0.0%' 가 찍힌다."""
+    from dataclasses import replace as _replace
+
+    from trader.core import Core
+
+    core = Core.__new__(Core)
+    core._entries = {
+        "355150": {
+            "name": "코스텍시스",
+            "pos": Position(
+                State.BUY1,
+                avg_price=22_150,
+                total_bought=9,
+                remaining=9,
+                high_price=22_150,
+                low_price=22_150,
+            ),
+            "high": 22_600.0,  # 장중에 오르내린 값
+            "low": 20_200.0,
+            "day_low": 20_200.0,
+            "day_open": 22_300.0,
+            "day_close": 20_300.0,
+        }
+    }
+    saved: list = []
+    core._store = type(
+        "S", (), {"save_position": lambda self, d, s, p: saved.append(p)}
+    )()
+    core._date, core._running, core._day_low_at = "2026-08-12", True, 0.0
+
+    core._flush_day_lows(force=True)
+
+    pos = core._entries["355150"]["pos"]
+    assert pos.high_price == 22_600
+    assert pos.low_price == 20_200
+    assert len(saved) == 1  # DB 에도 반영된다
+    assert _replace(pos, high_price=0).high_price == 0  # dataclass 그대로
+
+
+def test_변한_게_없으면_저장하지_않는다():
+    """값이 같은데 매분 쓰면 기록만 늘고 얻는 게 없다."""
+    from trader.core import Core
+
+    core = Core.__new__(Core)
+    core._entries = {
+        "355150": {
+            "pos": Position(
+                State.BUY1,
+                avg_price=22_150,
+                total_bought=9,
+                remaining=9,
+                high_price=22_600,
+                low_price=20_200,
+                day_low=20_200,
+                day_open=22_300,
+                day_close=20_300,
+            ),
+            "high": 22_600.0,
+            "low": 20_200.0,
+            "day_low": 20_200.0,
+            "day_open": 22_300.0,
+            "day_close": 20_300.0,
+        }
+    }
+    saved: list = []
+    core._store = type(
+        "S", (), {"save_position": lambda self, d, s, p: saved.append(p)}
+    )()
+    core._date, core._running, core._day_low_at = "2026-08-12", True, 0.0
+
+    core._flush_day_lows(force=True)
+    assert saved == []

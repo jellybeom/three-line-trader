@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import sqlite3
+import datetime as dt
 from datetime import datetime
 from pathlib import Path
 
@@ -106,6 +107,13 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at      TEXT NOT NULL
 );
 """
+
+
+_CYCLE_LOOKBACK_DAYS = 45  # 사이클 시작을 찾을 때 거슬러 올라갈 최대 일수
+
+
+def _shift_days(date: str, days: int) -> str:
+    return (dt.date.fromisoformat(date) + dt.timedelta(days=days)).isoformat()
 
 
 def _collapse_cycles(rows: list[dict]) -> list[dict]:
@@ -499,6 +507,54 @@ class Store:
                 cycle = []  # 다음 사이클(리셋 후 재진입)이 이어진다
         return cycle
 
+    def cycles_for(
+        self, keys: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], list[dict]]:
+        """(종목, 매매일) 여러 건의 마지막 사이클을 **한 번의 조회로** 모아 돌려준다.
+
+        항목마다 symbol_cycle() 을 부르면 같은 종목의 이력을 몇 번이고 다시 읽어
+        전체 비용이 기록 수의 제곱으로 커진다(2만 건에서 5초). 종목별로 한 번만 읽고
+        메모리에서 나누면 선형이 된다.
+        """
+        if not keys:
+            return {}
+        symbols = sorted({symbol for symbol, _ in keys})
+        marks = ",".join("?" * len(symbols))
+        # 사이클은 며칠을 넘기지 않는다(이월돼도 몇 거래일). 넉넉히 뒤로 한 달만 읽어
+        # 오래된 이력까지 훑지 않게 한다 — 종목당 이력이 길수록 이 차이가 커진다.
+        oldest = (
+            min(until for _, until in keys if until) if any(u for _, u in keys) else ""
+        )
+        params = list(symbols)
+        window = ""
+        if oldest:
+            window = " AND trade_date >= ?"
+            params.append(_shift_days(oldest, -_CYCLE_LOOKBACK_DAYS))
+        rows = self._conn.execute(
+            f"""SELECT id, ts, trade_date, from_state, to_state, side, qty,
+                       price, trigger_price, reason, symbol
+                FROM events WHERE kind='전이' AND symbol IN ({marks}){window}
+                ORDER BY id""",
+            params,
+        ).fetchall()
+        by_symbol: dict[str, list[dict]] = {}
+        for row in rows:
+            by_symbol.setdefault(row["symbol"], []).append(dict(row))
+
+        result: dict[tuple[str, str], list[dict]] = {}
+        for symbol, until in keys:
+            cycle: list[dict] = []
+            for row in by_symbol.get(symbol, []):
+                if until and row["trade_date"] > until:
+                    break
+                cycle.append(row)
+                if row["to_state"] == State.CLOSED.value:
+                    result[(symbol, until)] = cycle
+                    cycle = []
+            if cycle or (symbol, until) not in result:
+                result[(symbol, until)] = cycle
+        return result
+
     def symbol_fills(self, symbol: str, until: str = "") -> list[dict]:
         """마지막 사이클의 **체결만** (주문이 동반된 전이). 차트 마커용."""
         return [r for r in self.symbol_cycle(symbol, until) if r["side"]]
@@ -541,6 +597,13 @@ class Store:
             (trade_date, symbol),
         ).fetchone()
         return dict(row) if row else {}
+
+    def journal_months(self) -> list[str]:
+        """매매 기록이 있는 달 (YYYY-MM, 최근 순). 기간 선택 목록을 채우는 데 쓴다."""
+        rows = self._conn.execute("""SELECT DISTINCT substr(s.trade_date, 1, 7) ym
+               FROM symbols s JOIN positions p USING(trade_date, symbol)
+               WHERE p.total_bought > 0 ORDER BY ym DESC""").fetchall()
+        return [r["ym"] for r in rows]
 
     def journal_entries(self, since: str = "", until: str = "") -> list[dict]:
         """일지 대상 목록 — 매매가 있었던 종목과 그 코멘트 작성 여부.

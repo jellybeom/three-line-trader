@@ -474,12 +474,8 @@ class Core:
                     )
             case bus.Notice(kind=kind, text=text, symbol=sym):
                 self._log(sym, kind, text)
-            case bus.RequestJournal(since=since):
-                entries = [
-                    self._enrich_journal(e)
-                    for e in self._store.journal_entries(since=since)
-                ]
-                self._bus.events.put(bus.JournalEntries(tuple(entries)))
+            case bus.RequestJournal(since=since, until=until):
+                await self._send_journal(since, until)
             case bus.SaveJournal(trade_date=td, symbol=sym, good=good, bad=bad):
                 self._store.save_journal(td, sym, good=good, bad=bad)
                 self._log(sym, "일지", f"{td} 일지 저장", notify=False)
@@ -1556,11 +1552,16 @@ class Core:
         self._bot_task = asyncio.create_task(runner())
 
     def _flush_day_lows(self, force: bool = False) -> None:
-        """당일 최저가를 주기적으로 저장한다.
+        """틱으로 쌓인 값(당일 최저가, 보유 중 최고·최저)을 주기적으로 저장한다.
 
         진입하지 않은 종목은 상태 전이가 없어 저장될 기회가 없다. 재시작해도 근접도
         기록이 남도록 주기적으로 반영한다 (값이 바뀐 종목만 쓰므로 부담이 없다).
         force 는 감시 중지 후(요약 직전)에도 확정 저장하기 위한 것이다.
+
+        **MFE/MAE(high_price/low_price)도 여기서 함께 옮긴다.** 틱마다 e["high"]·
+        e["low"] 는 갱신되는데 pos 로 옮기는 곳이 전이 시점밖에 없어, 매수 후 청산 없이
+        보유만 하면 체결가에 멈춰 있었다 — 요약에 늘 "최고 +0.0% / 최저 +0.0%" 가
+        찍혔다(2026-08-12 코스텍시스에서 발견).
         """
         if not (force or self._running):
             return
@@ -1571,10 +1572,21 @@ class Core:
         for symbol, e in self._entries.items():
             low = e.get("day_low") or 0.0
             close = e.get("day_close") or 0.0
+            high_price = e.get("high") or 0.0
+            low_price = e.get("low") or 0.0
             pos = e["pos"]
-            if low and (pos.day_low != low or pos.day_close != close):
+            changed = low and (pos.day_low != low or pos.day_close != close)
+            mfe_changed = high_price and (
+                pos.high_price != high_price or pos.low_price != low_price
+            )
+            if changed or mfe_changed:
                 e["pos"] = replace(
-                    pos, day_low=low, day_open=e.get("day_open") or 0.0, day_close=close
+                    pos,
+                    day_low=low or pos.day_low,
+                    day_open=e.get("day_open") or 0.0,
+                    day_close=close or pos.day_close,
+                    high_price=high_price or pos.high_price,
+                    low_price=low_price or pos.low_price,
                 )
                 self._store.save_position(self._date, symbol, e["pos"])
 
@@ -2047,22 +2059,39 @@ class Core:
             self._calendar_at = today
             self._store.set_setting("trading_days", ",".join(days))  # 재시작 대비
 
-    def _enrich_journal(self, entry: dict) -> dict:
-        """일지 항목에 **상태 경로**와 **진입·청산 시점**을 덧붙인다.
+    async def _send_journal(self, since: str = "", until: str = "") -> str:
+        """일지 목록을 만들어 UI 로 보낸다. 기간은 **DB 단계에서** 자른다.
 
-        둘 다 events 에서 그때그때 만든다 — 별도 컬럼으로 저장하면 이월·리셋으로
-        사이클이 달라졌을 때 낡은 값이 남는다.
+        SQLite 연결은 이 스레드 전용이라(check_same_thread) 워커로 넘길 수 없다. 대신
+        비용 자체를 줄였다 — 기간을 DB 에서 자르고, 상태 경로는 종목별로 한 번만 읽는다
+        (예전에는 항목마다 다시 읽어 기록 수의 제곱으로 늘었다). 기본 기간에서는
+        수십 ms 라 체결 처리에 영향이 없다.
         """
-        cycle = self._store.symbol_cycle(
-            entry["symbol"], until=entry.get("trade_date", "")
+        entries, months = self._build_journal(since, until)
+        self._bus.events.put(
+            bus.JournalEntries(tuple(entries), tuple(months), f"{since}~{until}")
         )
-        return {
-            **entry,
-            "path": transition_path(cycle),
-            "timeline": cycle_timeline(
-                cycle, entry.get("base_date") or "", self._calendar
-            ),
-        }
+        return f"{since}~{until}"
+
+    def _build_journal(self, since: str, until: str) -> tuple[list[dict], list[str]]:
+        """일지 목록 + 기록이 있는 달."""
+        rows = self._store.journal_entries(since=since, until=until)
+        cycles = self._store.cycles_for(
+            [(e["symbol"], e.get("trade_date", "")) for e in rows]
+        )
+        entries = []
+        for entry in rows:
+            cycle = cycles.get((entry["symbol"], entry.get("trade_date", "")), [])
+            entries.append(
+                {
+                    **entry,
+                    "path": transition_path(cycle),
+                    "timeline": cycle_timeline(
+                        cycle, entry.get("base_date") or "", self._calendar
+                    ),
+                }
+            )
+        return entries, self._store.journal_months()
 
     def _load_calendar(self) -> None:
         """저장해 둔 거래일 목록 복원 (연결 전에도 D+n 이 맞게 보이도록)."""

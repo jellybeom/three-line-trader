@@ -74,6 +74,8 @@ class JournalEntries:
     """일지 대상 매매 목록 (최근 순)."""
 
     entries: tuple
+    months: tuple = ()  # 기록이 있는 달 (YYYY-MM, 최근 순) — 기간 선택 목록에 쓴다
+    period: str = ""  # 이 응답이 어떤 기간 선택에 대한 것인지 (창의 표시 상태 복원용)
 
 
 @dataclass(frozen=True)
@@ -291,9 +293,15 @@ class Notice:
 
 @dataclass(frozen=True)
 class RequestJournal:
-    """일지 창에 채울 매매 목록 요청. 결과는 JournalEntries 이벤트로 온다."""
+    """일지 창에 채울 매매 목록 요청. 결과는 JournalEntries 이벤트로 온다.
 
-    since: str = ""  # 비우면 최근 기록 전체
+    기간은 **DB 단계에서** 자른다. 전부 읽어와 화면에서 거르면 기록이 쌓일수록
+    조회·가공 비용이 그대로 늘고, 그 계산이 코어 스레드에서 돌아 장중에는 매매 판정이
+    밀린다(2026-08-12 측정: 2만 건에서 5초).
+    """
+
+    since: str = ""  # 비우면 처음부터
+    until: str = ""  # 비우면 오늘까지
 
 
 @dataclass(frozen=True)
