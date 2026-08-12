@@ -1109,3 +1109,35 @@ def test_승패가_없으면_승률을_적지_않는다():
 def test_창의_요약줄이_성적을_보여준다(period_dialog):
     text = period_dialog._count.cget("text")
     assert "건" in text and "승률" in text
+
+
+# ── 왼쪽 칸 폭 · 버튼 모양 ────────────────────────────────────
+
+
+def test_왼쪽_칸이_차트를_밀어내지_않는다(period_dialog):
+    """콤보 기본 폭(20자)과 요약줄 되먹임 때문에 왼쪽이 통째로 넓어진 적이 있다."""
+    period_dialog.geometry("1180x760")
+    period_dialog.update()
+    period_dialog.update_idletasks()
+    left = period_dialog._list.master
+    assert left.winfo_reqwidth() < 320  # 목록 칸은 좁게
+    assert period_dialog._charts.winfo_width() > left.winfo_width() * 2
+
+
+def test_요약줄_줄바꿈은_목록_폭을_따른다(period_dialog):
+    """왼쪽 칸을 기준으로 삼으면 라벨이 넓어지고 칸이 다시 넓어지는 되먹임이 생긴다."""
+    assert period_dialog._count.cget("wraplength") > 0
+    assert period_dialog._list.bind("<Configure>")
+
+
+def test_토글_버튼은_선택되지_않아도_테두리가_있다(period_dialog):
+    """ttk Toolbutton 은 테마에 따라 테두리를 안 그려 글자처럼 보인다."""
+    for button in [
+        period_dialog._month_button,
+        period_dialog._all_button,
+        *period_dialog._filters,
+    ]:
+        assert button.winfo_class() == "Radiobutton"  # 고전 Tk 위젯
+        assert int(button.cget("indicatoron")) == 0  # 동그라미 대신 버튼 모양
+        assert button.cget("relief") == "raised"
+        assert int(button.cget("borderwidth")) >= 1
