@@ -33,7 +33,6 @@ _ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 _TEXT_LINES = 4  # 잘한 점 · 아쉬운 점 입력칸 줄 수 (둘은 항상 같아야 한다)
 _IME_GAP = 10  # 한글 조합 창이 아래 위젯을 덮지 않도록 검색칸 밑에 두는 여백 (px)
 _BUTTON_MIN_PX = 56  # '월별'·'전체' 두 글자가 잘리지 않는 최소 폭
-_SELECTED_BG = "#cfe3ff"  # 눌린 토글 버튼의 배경
 _LIST_CHARS = 30  # 목록 칸 기본 폭(글자 수) — 나머지 공간은 전부 차트가 쓴다
 
 # 기간 선택 — '월별' 과 '전체' 둘 중 하나. 분기·주간처럼 잘게 나누면 고르는 데 손이
@@ -68,30 +67,6 @@ def year_choices(months: tuple, today: dt.date | None = None) -> list[str]:
     today = today or dt.date.today()
     latest = max([today.year, FIRST_YEAR] + [int(m[:4]) for m in months if len(m) >= 4])
     return [str(y) for y in range(FIRST_YEAR, latest + 1)]
-
-
-def toggle_button(parent, text: str, variable, command, **kwargs):
-    """눌린 상태가 눈에 보이는 토글 버튼 (라디오처럼 하나만 선택된다).
-
-    ttk 의 Toolbutton 스타일은 테마에 따라 **선택되지 않은 버튼의 테두리를 아예 그리지
-    않아**, 버튼인지 글자인지 구분이 안 된다(2026-08-12 Windows 11). 고전 Tk 위젯은
-    relief·borderwidth 를 어느 플랫폼에서나 그대로 그리므로 여기서는 이쪽을 쓴다.
-    """
-    return tk.Radiobutton(
-        parent,
-        text=text,
-        value=text,
-        variable=variable,
-        command=command,
-        indicatoron=False,  # 동그라미 대신 버튼 모양으로
-        relief="raised",  # 안 눌린 상태에서도 테두리가 보인다
-        borderwidth=1,
-        selectcolor=_SELECTED_BG,  # 눌리면 배경색이 바뀐다
-        cursor="hand2",
-        padx=6,
-        pady=3,
-        **kwargs,
-    )
 
 
 def _bind_optional(widget, sequence: str, handler) -> None:
@@ -382,8 +357,12 @@ class JournalDialog(tk.Toplevel):
             (4, 2, _BUTTON_MIN_PX),
         ):
             period_row.columnconfigure(column, weight=weight, minsize=minsize)
-        self._month_button = toggle_button(
-            period_row, PERIOD_MONTH, self._period_mode, self._on_period
+        self._month_button = ttk.Radiobutton(
+            period_row,
+            text=PERIOD_MONTH,
+            value=PERIOD_MONTH,
+            variable=self._period_mode,
+            command=self._on_period,
         )
         self._month_button.grid(row=0, column=0, sticky="ew")
         self._year_box = ttk.Combobox(
@@ -404,8 +383,12 @@ class JournalDialog(tk.Toplevel):
             values=list(MONTHS),
         )
         self._month_box.grid(row=0, column=2, sticky="ew")
-        self._all_button = toggle_button(
-            period_row, PERIOD_ALL, self._period_mode, self._on_period
+        self._all_button = ttk.Radiobutton(
+            period_row,
+            text=PERIOD_ALL,
+            value=PERIOD_ALL,
+            variable=self._period_mode,
+            command=self._on_period,
         )
         self._all_button.grid(row=0, column=4, sticky="ew")
         for box in (self._year_box, self._month_box):
@@ -417,8 +400,14 @@ class JournalDialog(tk.Toplevel):
         buttons.pack(fill="x", pady=(0, 4))
         self._filters = []
         for text in ("전체", "익절", "손절"):
-            button = toggle_button(buttons, text, self._result, self._fill_list)
-            button.pack(side="left", expand=True, fill="x")
+            button = ttk.Radiobutton(
+                buttons,
+                text=text,
+                value=text,
+                variable=self._result,
+                command=self._fill_list,
+            )
+            button.pack(side="left", expand=True, anchor="w")
             self._filters.append(button)
 
         # 목록 칸의 기본 폭은 이 값이 정한다 (weight=0 이라 늘어난 공간은 차트가 가져간다).

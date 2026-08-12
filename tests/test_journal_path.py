@@ -1130,14 +1130,12 @@ def test_요약줄_줄바꿈은_목록_폭을_따른다(period_dialog):
     assert period_dialog._list.bind("<Configure>")
 
 
-def test_토글_버튼은_선택되지_않아도_테두리가_있다(period_dialog):
-    """ttk Toolbutton 은 테마에 따라 테두리를 안 그려 글자처럼 보인다."""
+def test_선택_위젯은_프로그램의_다른_곳과_같은_모양이다(period_dialog):
+    """메인 창의 투자 모드도 기본 ttk.Radiobutton 이다 — 일지 창만 다르면 겉돈다."""
     for button in [
         period_dialog._month_button,
         period_dialog._all_button,
         *period_dialog._filters,
     ]:
-        assert button.winfo_class() == "Radiobutton"  # 고전 Tk 위젯
-        assert int(button.cget("indicatoron")) == 0  # 동그라미 대신 버튼 모양
-        assert button.cget("relief") == "raised"
-        assert int(button.cget("borderwidth")) >= 1
+        assert button.winfo_class() == "TRadiobutton"
+        assert button.cget("style") == ""  # 별도 스타일을 입히지 않는다
