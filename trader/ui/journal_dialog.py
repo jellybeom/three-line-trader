@@ -81,15 +81,20 @@ def _bind_optional(widget, sequence: str, handler) -> None:
         pass
 
 
-def _focus_next(event):
-    """Tab → 다음 위젯. "break" 를 돌려줘야 Text 에 탭 문자가 들어가지 않는다."""
-    event.widget.tk_focusNext().focus_set()
-    return "break"
+def _focus_to(target):
+    """Tab 처리기 — 지정한 위젯으로 보낸다.
 
+    "break" 를 돌려줘야 위젯의 기본 동작이 막힌다. 특히 tk.Text 는 Tab 을 **글자로**
+    받아넣고, Listbox·Notebook 도 저마다 다르게 반응한다. 기본 순서는 위젯을 만든
+    차례를 따르는데 화면 배치 순서와 달라(저장 버튼이 코멘트보다 먼저 생긴다), 눈에
+    보이는 대로 움직이도록 순서를 직접 정한다.
+    """
 
-def _focus_prev(event):
-    event.widget.tk_focusPrev().focus_set()
-    return "break"
+    def handler(_event=None):
+        target.focus_set()
+        return "break"
+
+    return handler
 
 
 class SearchEntry(ttk.Frame):
@@ -110,9 +115,15 @@ class SearchEntry(ttk.Frame):
         self._on_change = on_change
         self._showing = False  # 지금 보이는 글자가 안내 문구인가
 
+        # ✕ 를 **먼저** 오른쪽에 붙인 뒤 입력칸이 남는 자리를 채우게 한다.
+        # 순서를 바꾸면(입력칸 expand → 버튼) 버튼이 들어갈 자리가 남지 않아
+        # 폭 0 으로 찌그러져 화면에 보이지 않는다(2026-08-12).
+        self._clear = ttk.Button(
+            self, text="✕", width=2, command=self.clear, takefocus=False
+        )
+        self._clear.pack(side="right", padx=(4, 0))
         self.entry = ttk.Entry(self)
         self.entry.pack(side="left", fill="x", expand=True)
-        self._clear = ttk.Button(self, text="✕", width=2, command=self.clear)
         # 글자가 **들어가기 전에** 안내 문구를 치운다. FocusIn 에만 기대면, 포커스
         # 이벤트 없이 입력이 들어올 때 안내 문구 앞에 글자가 붙어버린다
         # ("로봇" + "종목명 또는 종목코드"). 키를 누르는 순간 지우면 순서가 보장된다.
@@ -167,11 +178,12 @@ class SearchEntry(ttk.Frame):
         self._on_change()
 
     def _sync_button(self) -> None:
-        """지울 것이 있을 때만 ✕ 를 보여준다 (빈 칸에 놓인 ✕ 는 눈만 어지럽다)."""
-        if self.get():
-            self._clear.pack(side="left", padx=(4, 0))
-        else:
-            self._clear.pack_forget()
+        """지울 것이 없으면 ✕ 를 눌리지 않게 한다.
+
+        숨기지 않고 흐리게만 둔다 — 숨겼다 보였다 하면 입력칸 폭이 그때마다 달라져
+        글자가 밀린다. 자리는 늘 잡아두고 상태만 바꾼다.
+        """
+        self._clear.state(["!disabled"] if self.get() else ["disabled"])
 
 
 def net_pnl(entry: dict) -> float:
@@ -251,17 +263,23 @@ class JournalDialog(tk.Toplevel):
         self._search.pack(fill="x", pady=(0, 4))
 
         self._result = tk.StringVar(value="전체")
+        # Toolbutton 은 글자를 왼쪽에 붙여 놓는다. 버튼 셋이 폭을 나눠 가지므로
+        # 그대로 두면 글자가 제각각 왼쪽에 몰려 보인다 — anchor 를 가운데로 바꾼다.
+        ttk.Style().configure("Filter.Toolbutton", anchor="center")
         buttons = ttk.Frame(left)
         buttons.pack(fill="x", pady=(0, 4))
+        self._filters = []
         for text in ("전체", "익절", "손절"):
-            ttk.Radiobutton(
+            button = ttk.Radiobutton(
                 buttons,
                 text=text,
                 value=text,
                 variable=self._result,
                 command=self._fill_list,
-                style="Toolbutton",  # 라디오점 대신 눌린 버튼 모양으로 보인다
-            ).pack(side="left", expand=True, fill="x")
+                style="Filter.Toolbutton",  # 라디오점 대신 눌린 버튼 모양으로 보인다
+            )
+            button.pack(side="left", expand=True, fill="x")
+            self._filters.append(button)
 
         self._list = tk.Listbox(left, width=34, exportselection=False)
         self._list.pack(fill="both", expand=True)
@@ -284,7 +302,8 @@ class JournalDialog(tk.Toplevel):
         bar.pack(side="bottom", fill="x", pady=(6, 0))
         self._status = ttk.Label(bar, text="", foreground="#9e9e9e")
         self._status.pack(side="left")
-        ttk.Button(bar, text="저장", command=self._save).pack(side="right")
+        self._save_button = ttk.Button(bar, text="저장", command=self._save)
+        self._save_button.pack(side="right")
 
         form = ttk.Frame(right)
         form.pack(side="bottom", fill="x", pady=(8, 0))
@@ -300,16 +319,11 @@ class JournalDialog(tk.Toplevel):
         # uniform 을 같게 주면 두 칸의 높이가 항상 같아진다 (한쪽만 눌리지 않는다)
         for row in (0, 1):
             form.rowconfigure(row, weight=1, uniform="comment")
-        # tk.Text 는 Tab 을 글자로 받아 넣어버려 다음 칸으로 넘어가지 않는다.
-        # 코멘트에 탭 문자를 쓸 일은 없으므로 칸 이동으로 돌린다 (Shift+Tab 은 역방향).
-        for widget in (self._good, self._bad):
-            widget.bind("<Tab>", _focus_next)
-            widget.bind("<Shift-Tab>", _focus_prev)
-            _bind_optional(widget, "<ISO_Left_Tab>", _focus_prev)
 
         self._charts = ttk.Notebook(right)
         self._charts.pack(side="top", fill="both", expand=True)
 
+        self._setup_focus_order()
         self._fill_list()
         self.update_idletasks()  # 차트 축소 배율을 실제 배치 크기로 계산하기 위해
         if select:
@@ -319,6 +333,28 @@ class JournalDialog(tk.Toplevel):
             self._show(entries[0])
 
     # ── 목록 ───────────────────────────────────────────────────
+
+    def _setup_focus_order(self) -> None:
+        """Tab 이 화면에 보이는 순서대로 돌게 한다.
+
+        검색 → 필터 → 목록 → 차트 → 잘한 점 → 아쉬운 점 → 저장 → (다시 검색).
+        마지막에서 처음으로 돌아오게 해 어디서 시작해도 모든 칸에 닿을 수 있다.
+        """
+        self.focus_chain = [
+            self._search.entry,
+            *self._filters,
+            self._list,
+            self._charts,
+            self._good,
+            self._bad,
+            self._save_button,
+        ]
+        chain = self.focus_chain
+        for i, widget in enumerate(chain):
+            widget.configure(takefocus=True)
+            widget.bind("<Tab>", _focus_to(chain[(i + 1) % len(chain)]))
+            widget.bind("<Shift-Tab>", _focus_to(chain[i - 1]))
+            _bind_optional(widget, "<ISO_Left_Tab>", _focus_to(chain[i - 1]))
 
     def _fill_list(self) -> None:
         """검색·필터를 적용해 목록을 다시 그린다.

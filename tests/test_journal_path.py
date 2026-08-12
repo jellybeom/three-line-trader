@@ -709,18 +709,20 @@ def test_안내문구는_비어있어야_뜬다(dialog):
 
 def test_검색칸의_안내문구는_겹치는_위젯이_아니다(dialog):
     """Entry 위에 Label 을 얹으면 Windows 11 테마의 파란 밑줄을 가린다."""
-    kinds = [w.winfo_class() for w in dialog._search.winfo_children()]
-    assert kinds == ["TEntry", "TButton"]  # 겹쳐 놓은 Label 이 없다
+    kinds = sorted(w.winfo_class() for w in dialog._search.winfo_children())
+    assert kinds == ["TButton", "TEntry"]  # 겹쳐 놓은 Label 이 없다
     assert dialog._search.get() == ""  # 안내 문구는 검색어로 세지 않는다
 
 
-def test_지우기_버튼은_입력이_있을_때만_보인다(dialog):
+def test_지우기_버튼은_늘_보이되_지울_때만_눌린다(dialog):
+    """숨겼다 보였다 하면 입력칸 폭이 달라져 글자가 밀린다 — 자리는 늘 잡아둔다."""
     search = dialog._search
-    assert not search._clear.winfo_ismapped()
+    assert search._clear.winfo_ismapped()  # 빈 칸에서도 자리는 있다
+    assert "disabled" in search._clear.state()
     _type(search, "0560")  # 유진로봇(056080)
     dialog.update()
     assert search.get() == "0560"
-    assert search._clear.winfo_ismapped()
+    assert "disabled" not in search._clear.state()
     assert dialog._list.size() == 1
 
 
@@ -732,13 +734,6 @@ def test_지우기_버튼이_검색을_초기화한다(dialog, rows):
     dialog.update()
     assert search.get() == ""
     assert dialog._list.size() == len(rows)
-
-
-class _FakeEvent:
-    """bind 로 등록된 처리기를 직접 부를 때 쓰는 최소한의 이벤트."""
-
-    def __init__(self, widget):
-        self.widget = widget
 
 
 def test_포커스가_떠나면_안내문구가_돌아온다(dialog):
@@ -760,27 +755,48 @@ def test_포커스가_떠나면_안내문구가_돌아온다(dialog):
     assert search.get() == ""  # 그래도 검색어는 비어 있다
 
 
-def test_탭이_잘한점에서_아쉬운점으로_보낸다(dialog):
-    """tk.Text 는 Tab 을 글자로 받아넣어 기본값으로는 칸 이동이 안 된다.
+def test_탭_순서가_화면에_보이는_대로다(dialog):
+    """기본 순서는 위젯을 만든 차례를 따라, 저장 버튼이 코멘트보다 먼저 온다.
 
-    focus_get() 으로 확인하지 않는 이유는 위와 같다 — 시험 환경에서는 창이 OS 포커스를
-    못 받아 항상 None 이 나온다. 대신 **이동 대상**과 **탭 문자 차단**을 직접 본다.
+    focus_get() 으로 확인하지 않는다 — 시험 환경에서는 창이 OS 포커스를 못 받아
+    항상 None 이 나온다(2026-08-12). 대신 창이 정한 순서와 바인딩 유무를 본다.
     """
-    from trader.ui.journal_dialog import _focus_next
+    assert dialog.focus_chain == [
+        dialog._search.entry,
+        *dialog._filters,
+        dialog._list,
+        dialog._charts,
+        dialog._good,
+        dialog._bad,
+        dialog._save_button,
+    ]
+    for widget in dialog.focus_chain:
+        assert widget.bind("<Tab>"), f"{widget} 에 Tab 바인딩이 없다"
+        assert widget.bind("<Shift-Tab>")
 
-    assert dialog._good.bind("<Tab>")  # 바인딩이 걸려 있다
-    assert dialog._good.tk_focusNext() is dialog._bad  # 다음 칸이 '아쉬운 점' 이다
-    # "break" 를 돌려줘야 Text 의 기본 동작(탭 문자 삽입)이 막힌다
-    assert _focus_next(_FakeEvent(dialog._good)) == "break"
+
+def test_마지막_칸에서_탭을_누르면_처음으로_돌아온다(dialog):
+    """어디서 시작해도 모든 칸에 닿을 수 있어야 한다."""
+    chain = dialog.focus_chain
+    assert chain[-1] is dialog._save_button
+    assert chain[(len(chain) - 1 + 1) % len(chain)] is chain[0]
+
+
+def test_탭_처리기는_보내고_기본동작을_막는다(dialog):
+    """tk.Text 는 Tab 을 글자로 받아넣는다 — "break" 를 돌려줘야 막힌다."""
+    from trader.ui.journal_dialog import _focus_to
+
+    moved = []
+    target = type("T", (), {"focus_set": lambda self: moved.append(True)})()
+    assert _focus_to(target)() == "break"
+    assert moved == [True]
     assert "\t" not in dialog._good.get("1.0", "end")
 
 
-def test_시프트_탭으로_되돌아온다(dialog):
-    from trader.ui.journal_dialog import _focus_prev
-
-    assert dialog._bad.bind("<Shift-Tab>")
-    assert dialog._bad.tk_focusPrev() is dialog._good
-    assert _focus_prev(_FakeEvent(dialog._bad)) == "break"
+def test_지우기_버튼은_탭_순서에서_빠진다(dialog):
+    """✕ 는 마우스로 누르는 보조 버튼이다 — 검색에서 필터로 바로 넘어가야 한다."""
+    assert dialog._search._clear.cget("takefocus") in (0, "0", False)
+    assert dialog._search._clear not in dialog.focus_chain
 
 
 def test_글자가_들어오기_전에_안내문구를_치운다(dialog):
