@@ -825,10 +825,13 @@ class App(tk.Tk):
         처음에는 **기본 기간만** 요청한다. 전체를 들고 오면 기록이 쌓일수록 창이 뜨는 데
         오래 걸리고, 그 조회가 코어 스레드에서 돌아 매매 판정까지 밀린다(2026-08-12).
         """
-        from trader.ui.journal_dialog import DEFAULT_PERIOD, period_range
+        import datetime as dt
+
+        from trader.ui.journal_dialog import period_range
 
         self._journal_select = select
-        since, until = period_range(DEFAULT_PERIOD)
+        today = dt.date.today()  # 창의 기본값과 같은 기간 (이번 달)
+        since, until = period_range(str(today.year), f"{today.month:02d}")
         self._bus.commands.put(bus.RequestJournal(since, until))
 
     def _request_journal_period(self, since: str, until: str) -> None:

@@ -763,7 +763,10 @@ def test_탭_순서가_화면에_보이는_대로다(dialog):
     """
     assert dialog.focus_chain == [
         dialog._search.entry,
-        dialog._period_box,
+        dialog._month_button,
+        dialog._year_box,
+        dialog._month_box,
+        dialog._all_button,
         *dialog._filters,
         dialog._list,
         dialog._charts,
@@ -825,34 +828,43 @@ def test_방향키만_눌러도_안내문구가_사라지지_않는다(dialog):
 
 
 @pytest.mark.parametrize(
-    "period,expected",
+    "year,month,expected",
     [
-        ("최근 3개월", ("2026-05-12", "")),
-        ("최근 1년", ("2025-08-12", "")),
-        ("전체", ("", "")),
-        ("2026-08", ("2026-08-01", "2026-08-31")),
-        ("2025-12", ("2025-12-01", "2025-12-31")),
-        ("2024-02", ("2024-02-01", "2024-02-29")),  # 윤년
-        ("2026-02", ("2026-02-01", "2026-02-28")),
+        ("2026", "08", ("2026-08-01", "2026-08-31")),
+        ("2025", "12", ("2025-12-01", "2025-12-31")),
+        ("2024", "02", ("2024-02-01", "2024-02-29")),  # 윤년
+        ("2026", "02", ("2026-02-01", "2026-02-28")),
+        ("2026", "01", ("2026-01-01", "2026-01-31")),
     ],
 )
-def test_기간_선택이_날짜_범위로_바뀐다(period, expected):
-    import datetime as dt
-
+def test_연월이_날짜_범위로_바뀐다(year, month, expected):
     from trader.ui.journal_dialog import period_range
 
-    assert period_range(period, dt.date(2026, 8, 12)) == expected
+    assert period_range(year, month) == expected
 
 
-def test_알_수_없는_기간은_전체로_본다():
+@pytest.mark.parametrize("year,month", [("", ""), ("2026", ""), ("", "08"), ("x", "y")])
+def test_연월이_없거나_이상하면_전체로_본다(year, month):
     """설정이 깨져도 목록이 비어 보이지 않도록."""
     from trader.ui.journal_dialog import period_range
 
-    assert period_range("이상한값") == ("", "")
+    assert period_range(year, month) == ("", "")
 
 
-def test_기간을_고르면_DB를_다시_읽는다(rows):
-    """전체를 들고 와서 화면에서 거르면 기록이 쌓일수록 느려진다."""
+def test_연도_목록은_기록이_있는_해와_최근_몇_해를_담는다():
+    import datetime as dt
+
+    from trader.ui.journal_dialog import year_choices
+
+    years = year_choices(("2019-03", "2020-11"), dt.date(2026, 8, 12))
+    assert years[0] == "2026"  # 최신 순
+    assert "2019" in years and "2020" in years  # 오래된 기록도 고를 수 있다
+    assert "2024" in years  # 기록이 없어도 최근 몇 해는 항상 있다
+    assert years == sorted(years, reverse=True)
+
+
+@pytest.fixture
+def period_dialog(rows):
     tk = pytest.importorskip("tkinter")
     try:
         root = tk.Tk()
@@ -867,7 +879,7 @@ def test_기간을_고르면_DB를_다시_읽는다(rows):
         row.setdefault("total_bought", 10)
         row.setdefault("daily_path", "")
         row.setdefault("minute_path", "")
-    asked = []
+    asked: list = []
     dlg = JournalDialog(
         root,
         rows,
@@ -875,17 +887,75 @@ def test_기간을_고르면_DB를_다시_읽는다(rows):
         on_period=lambda since, until: asked.append((since, until)),
         months=("2026-08", "2026-07"),
     )
+    dlg.asked = asked
     dlg.update()
-    assert "2026-08" in dlg._period_box.cget("values")  # 기록이 있는 달이 목록에 있다
-
-    dlg._period.set("2026-08")
-    dlg._on_period()
-    assert asked == [("2026-08-01", "2026-08-31")]
-
-    dlg.set_entries([rows[0]], months=("2026-08",))  # 코어가 보낸 새 목록
-    dlg.update()
-    assert dlg._list.size() == 1
+    yield dlg
     root.destroy()
+
+
+def test_기본은_이번_달이다(period_dialog):
+    import datetime as dt
+
+    from trader.ui.journal_dialog import PERIOD_MONTH
+
+    today = dt.date.today()
+    assert period_dialog._period_mode.get() == PERIOD_MONTH
+    assert period_dialog._year.get() == str(today.year)
+    assert period_dialog._month.get() == f"{today.month:02d}"
+
+
+def test_연월을_고르면_월별_조회로_바뀐다(period_dialog):
+    from trader.ui.journal_dialog import PERIOD_ALL, PERIOD_MONTH
+
+    period_dialog._period_mode.set(PERIOD_ALL)
+    period_dialog._year.set("2026")
+    period_dialog._month.set("08")
+    period_dialog._on_month_pick()
+    assert period_dialog._period_mode.get() == PERIOD_MONTH
+    assert period_dialog.asked[-1] == ("2026-08-01", "2026-08-31")
+
+
+def test_전체를_고르면_기간_제한이_없다(period_dialog):
+    from trader.ui.journal_dialog import PERIOD_ALL
+
+    period_dialog._period_mode.set(PERIOD_ALL)
+    period_dialog._on_period()
+    assert period_dialog.asked[-1] == ("", "")
+
+
+def test_전체_조회중에는_연월을_고를_수_없다(period_dialog):
+    """둘 중 하나만 고를 수 있어야 한다 — 전체인데 월이 켜져 있으면 헷갈린다."""
+    from trader.ui.journal_dialog import PERIOD_ALL, PERIOD_MONTH
+
+    period_dialog._period_mode.set(PERIOD_ALL)
+    period_dialog._on_period()
+    assert str(period_dialog._year_box.cget("state")) == "disabled"
+    assert str(period_dialog._month_box.cget("state")) == "disabled"
+
+    period_dialog._period_mode.set(PERIOD_MONTH)
+    period_dialog._on_period()
+    assert str(period_dialog._year_box.cget("state")) == "readonly"
+
+
+def test_기간_위젯은_한_줄에_있다(period_dialog):
+    """[월별] [연] [월] [전체] 가 같은 줄에 나란히 놓인다."""
+    row = period_dialog._month_button.master
+    assert period_dialog._year_box.master is row
+    assert period_dialog._month_box.master is row
+    assert period_dialog._all_button.master is row
+    widgets = [
+        period_dialog._month_button,
+        period_dialog._year_box,
+        period_dialog._month_box,
+        period_dialog._all_button,
+    ]
+    assert all(w.pack_info()["side"] == "left" for w in widgets)
+
+
+def test_새_목록을_받으면_연도_선택지가_갱신된다(period_dialog, rows):
+    period_dialog.set_entries([rows[0]], months=("2019-03",))
+    assert "2019" in period_dialog._year_box.cget("values")
+    assert period_dialog._list.size() == 1
 
 
 # ── 보유 중 최고·최저(MFE/MAE) ────────────────────────────────

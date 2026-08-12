@@ -31,73 +31,38 @@ __all__ = [
 _ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 
 _TEXT_LINES = 4  # 잘한 점 · 아쉬운 점 입력칸 줄 수 (둘은 항상 같아야 한다)
+_IME_GAP = 10  # 한글 조합 창이 아래 위젯을 덮지 않도록 검색칸 밑에 두는 여백 (px)
 
-# 기간 선택 — 상대 기간을 기본으로 두고, 특정 달은 목록에서 고른다.
-# 분기·주간처럼 절대 구간을 잘게 나누면 고르는 데 손이 더 가고, 실제로 그렇게 찾는 일은
-# 드물다(특정 날짜를 찾을 땐 종목명 검색이 빠르다).
-PERIOD_3M = "최근 3개월"
-PERIOD_1Y = "최근 1년"
+# 기간 선택 — '월별' 과 '전체' 둘 중 하나. 분기·주간처럼 잘게 나누면 고르는 데 손이
+# 더 가고, 특정 날짜를 찾을 땐 종목명 검색이 더 빠르다.
+PERIOD_MONTH = "월별"
 PERIOD_ALL = "전체"
-PERIODS = (PERIOD_3M, PERIOD_1Y, PERIOD_ALL)
-DEFAULT_PERIOD = PERIOD_3M  # 일지는 대개 최근 매매를 복기하러 연다
+MONTHS = tuple(f"{m:02d}" for m in range(1, 13))
+_YEAR_SPAN = 6  # 목록에 없는 해도 고를 수 있도록 최근 몇 해는 항상 넣는다
 
 
-def period_range(period: str, today: dt.date | None = None) -> tuple[str, str]:
-    """기간 선택 → (since, until). 빈 문자열은 '제한 없음'.
+def period_range(year: str, month: str) -> tuple[str, str]:
+    """(연, 월) → (since, until). 둘 중 하나라도 비면 제한 없음(= 전체).
 
-    'YYYY-MM' 형태면 그 달 하루치로 잘라준다. 달의 마지막 날은 다음 달 1일에서
-    하루를 빼 구한다 — 월별 일수와 윤년을 따로 다루지 않아도 된다.
+    달의 마지막 날은 다음 달 1일에서 하루를 빼 구한다 — 월별 일수와 윤년을 따로
+    다루지 않아도 된다.
     """
-    today = today or dt.date.today()
-    if period == PERIOD_3M:
-        return (today - dt.timedelta(days=92)).isoformat(), ""
-    if period == PERIOD_1Y:
-        return (today - dt.timedelta(days=365)).isoformat(), ""
-    if period == PERIOD_ALL:
+    if not (year and month):
         return "", ""
     try:
-        first = dt.date.fromisoformat(f"{period}-01")
+        first = dt.date(int(year), int(month), 1)
     except ValueError:
         return "", ""
     nxt = dt.date(first.year + first.month // 12, first.month % 12 + 1, 1)
     return first.isoformat(), (nxt - dt.timedelta(days=1)).isoformat()
 
 
-def summarize(entry: dict) -> list[tuple[str, str]]:
-    """일지 상단에 보여줄 매매 요약 (라벨, 값) 목록."""
-    avg = entry.get("avg_price") or 0
-    total = entry.get("total_bought") or 0
-    net = (entry.get("realized_pnl") or 0) - (entry.get("fees") or 0)
-    rows = [
-        ("매매일", entry.get("trade_date", "")),
-        ("종목", f"{entry.get('name', '')}({entry.get('symbol', '')})"),
-        ("상태", entry.get("state", "")),
-        ("평단 / 수량", f"{avg:,.0f} · {total}주" if avg else "-"),
-        (
-            "실현손익(세후)",
-            f"{net:+,.0f}원"
-            + (f" ({net / (avg * total):+.2%})" if avg and total else ""),
-        ),
-    ]
-    high, low = entry.get("high_price") or 0, entry.get("low_price") or 0
-    if avg and high:
-        rows.append(
-            ("최고 / 최저", f"{(high - avg) / avg:+.1%} / {(low - avg) / avg:+.1%}")
-        )
-    opened, closed = entry.get("day_open") or 0, entry.get("day_close") or 0
-    if opened and closed:
-        rows.append(("당일 등락", f"{(closed - opened) / opened:+.2%}"))
-    if path := (entry.get("path") or ""):
-        rows.append(("상태 경로", path))
-    if timeline := (entry.get("timeline") or ""):
-        rows.append(("시점", timeline))
-    if tags := (entry.get("tags") or ""):
-        rows.append(("태그", " ".join(f"#{t}" for t in tags.split(",") if t)))
-    if base := (entry.get("base_date") or ""):
-        rows.append(("기준봉", base))
-    if memo := (entry.get("memo") or ""):
-        rows.append(("메모", memo))
-    return rows
+def year_choices(months: tuple, today: dt.date | None = None) -> list[str]:
+    """고를 수 있는 연도 — 기록이 있는 해 + 최근 몇 해 (최신 순)."""
+    today = today or dt.date.today()
+    years = {m[:4] for m in months if len(m) >= 4}
+    years.update(str(today.year - i) for i in range(_YEAR_SPAN))
+    return sorted(years, reverse=True)
 
 
 def _bind_optional(widget, sequence: str, handler) -> None:
@@ -249,6 +214,43 @@ def filter_entries(
     return rows
 
 
+def summarize(entry: dict) -> list[tuple[str, str]]:
+    """일지 상단에 보여줄 매매 요약 (라벨, 값) 목록."""
+    avg = entry.get("avg_price") or 0
+    total = entry.get("total_bought") or 0
+    net = net_pnl(entry)
+    rows = [
+        ("매매일", entry.get("trade_date", "")),
+        ("종목", f"{entry.get('name', '')}({entry.get('symbol', '')})"),
+        ("상태", entry.get("state", "")),
+        ("평단 / 수량", f"{avg:,.0f} · {total}주" if avg else "-"),
+        (
+            "실현손익(세후)",
+            f"{net:+,.0f}원"
+            + (f" ({net / (avg * total):+.2%})" if avg and total else ""),
+        ),
+    ]
+    high, low = entry.get("high_price") or 0, entry.get("low_price") or 0
+    if avg and high:
+        rows.append(
+            ("최고 / 최저", f"{(high - avg) / avg:+.1%} / {(low - avg) / avg:+.1%}")
+        )
+    opened, closed = entry.get("day_open") or 0, entry.get("day_close") or 0
+    if opened and closed:
+        rows.append(("당일 등락", f"{(closed - opened) / opened:+.2%}"))
+    if path := (entry.get("path") or ""):
+        rows.append(("상태 경로", path))
+    if timeline := (entry.get("timeline") or ""):
+        rows.append(("시점", timeline))
+    if tags := (entry.get("tags") or ""):
+        rows.append(("태그", " ".join(f"#{t}" for t in tags.split(",") if t)))
+    if base := (entry.get("base_date") or ""):
+        rows.append(("기준봉", base))
+    if memo := (entry.get("memo") or ""):
+        rows.append(("메모", memo))
+    return rows
+
+
 def entry_label(entry: dict) -> str:
     """목록 한 줄 — 작성 여부가 한눈에 보이도록 앞에 표시를 둔다."""
     net = net_pnl(entry)
@@ -294,19 +296,59 @@ class JournalDialog(tk.Toplevel):
         # 검색 — 종목명·코드 어느 쪽으로도 찾을 수 있다. 입력할 때마다 즉시 걸러진다
         # (목록이 수백 건이어도 문자열 비교뿐이라 체감 지연이 없다).
         self._search = SearchEntry(left, "종목명 또는 종목코드", self._fill_list)
-        self._search.pack(fill="x", pady=(0, 4))
+        # 아래 여백을 넉넉히 둔다. 한글을 조합하는 동안 Windows 가 입력칸 바로 아래에
+        # **자기 조합 창을 띄우는데**(OS 가 그리는 창이라 Tk 로는 못 막는다), 간격이
+        # 좁으면 그 창이 다음 줄 위젯의 테두리를 덮는다(2026-08-12).
+        self._search.pack(fill="x", pady=(0, _IME_GAP))
 
-        # 기간 — 상대 기간 셋과 '기록이 있는 달' 을 한 목록에 담는다. 고르면 DB 를
-        # 다시 읽는다(전체를 들고 와서 화면에서 거르면 기록이 쌓일수록 느려진다).
-        self._period = tk.StringVar(value=DEFAULT_PERIOD)
-        self._period_box = ttk.Combobox(
-            left,
-            textvariable=self._period,
-            state="readonly",
-            values=[*PERIODS, *months],
+        # 기간 — 월별 조회와 전체 조회 중 하나. 한 줄에 [월별] [연] [월] [전체] 로 둔다.
+        # 고르면 DB 를 다시 읽는다(전체를 들고 와서 화면에서 거르면 기록이 쌓일수록 느려진다).
+        today = dt.date.today()
+        self._period_mode = tk.StringVar(value=PERIOD_MONTH)
+        self._year = tk.StringVar(value=str(today.year))
+        self._month = tk.StringVar(value=f"{today.month:02d}")
+
+        period_row = ttk.Frame(left)
+        period_row.pack(fill="x", pady=(0, 4))
+        self._month_button = ttk.Radiobutton(
+            period_row,
+            text=PERIOD_MONTH,
+            value=PERIOD_MONTH,
+            variable=self._period_mode,
+            command=self._on_period,
+            style="Filter.Toolbutton",
+            width=5,
         )
-        self._period_box.pack(fill="x", pady=(0, 4))
-        self._period_box.bind("<<ComboboxSelected>>", self._on_period)
+        self._month_button.pack(side="left")
+        self._year_box = ttk.Combobox(
+            period_row,
+            textvariable=self._year,
+            state="readonly",
+            width=6,
+            values=year_choices(months),
+        )
+        self._year_box.pack(side="left", padx=(4, 2))
+        self._month_box = ttk.Combobox(
+            period_row,
+            textvariable=self._month,
+            state="readonly",
+            width=4,
+            values=list(MONTHS),
+        )
+        self._month_box.pack(side="left")
+        self._all_button = ttk.Radiobutton(
+            period_row,
+            text=PERIOD_ALL,
+            value=PERIOD_ALL,
+            variable=self._period_mode,
+            command=self._on_period,
+            style="Filter.Toolbutton",
+            width=5,
+        )
+        self._all_button.pack(side="left", padx=(4, 0))
+        for box in (self._year_box, self._month_box):
+            # 연·월을 고르면 자동으로 월별 조회로 바뀐다 (모드를 따로 누를 필요가 없다)
+            box.bind("<<ComboboxSelected>>", self._on_month_pick)
 
         self._result = tk.StringVar(value="전체")
         # Toolbutton 은 글자를 왼쪽에 붙여 놓는다. 버튼 셋이 폭을 나눠 가지므로
@@ -380,17 +422,30 @@ class JournalDialog(tk.Toplevel):
 
     # ── 목록 ───────────────────────────────────────────────────
 
+    def _on_month_pick(self, _event=None) -> None:
+        """연·월을 고르면 월별 조회로 전환한다."""
+        self._period_mode.set(PERIOD_MONTH)
+        self._on_period()
+
     def _on_period(self, _event=None) -> None:
         """기간이 바뀌면 DB 를 다시 읽어달라고 요청한다 (결과는 set_entries 로 온다)."""
-        self._period_box.selection_clear()
-        if self._on_period_change is not None:
-            self._on_period_change(*period_range(self._period.get()))
+        monthly = self._period_mode.get() == PERIOD_MONTH
+        state = "readonly" if monthly else "disabled"
+        for box in (self._year_box, self._month_box):
+            box.configure(state=state)  # 전체 조회 중에는 연·월이 무의미하다
+            box.selection_clear()
+        if self._on_period_change is None:
+            return
+        if monthly:
+            self._on_period_change(*period_range(self._year.get(), self._month.get()))
+        else:
+            self._on_period_change("", "")
 
     def set_entries(self, entries: list[dict], months: tuple = ()) -> None:
         """새 기간의 목록으로 갈아끼운다. 검색어·손익 필터는 그대로 둔다."""
         self._entries = entries
-        if months:  # 기록이 있는 달을 목록 뒤에 붙인다
-            self._period_box.configure(values=[*PERIODS, *months])
+        if months:  # 기록이 있는 해를 연도 목록에 반영한다
+            self._year_box.configure(values=year_choices(months))
         self._fill_list()
         if self._visible:
             self._list.selection_set(0)
@@ -406,7 +461,10 @@ class JournalDialog(tk.Toplevel):
         """
         self.focus_chain = [
             self._search.entry,
-            self._period_box,
+            self._month_button,
+            self._year_box,
+            self._month_box,
+            self._all_button,
             *self._filters,
             self._list,
             self._charts,
