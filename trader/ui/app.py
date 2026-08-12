@@ -16,7 +16,6 @@ settings 테이블에 저장되어 재시작 시 복원된다.
 from __future__ import annotations
 
 import csv
-import os
 import queue
 import re
 import tkinter as tk
@@ -37,6 +36,7 @@ try:
         from tkcalendar import DateEntry  # 캘린더 드롭다운 (uv add tkcalendar)
 except ImportError:
     DateEntry = None
+from trader.ui.chart_view import ChartView
 from trader.ui.events_view import EventsView
 from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
@@ -851,42 +851,24 @@ class App(tk.Tk):
     def _show_chart(
         self, symbol: str, name: str, daily_path: str, minute_path: str
     ) -> None:
-        """생성된 PNG 를 탭 2개짜리 창으로 표시. 큰 이미지는 화면에 맞게 축소한다."""
+        """생성된 PNG 를 탭 2개짜리 창으로 표시 (휠 확대·드래그 이동)."""
         win = tk.Toplevel(self)
         win.title(f"{name}({symbol}) 복기 차트")
+        win.geometry("980x900")
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True)
-        win._photos = []  # PhotoImage 참조 유지 (없으면 즉시 사라짐)
 
-        max_h = self.winfo_screenheight() - 160
         for label, path in (("일봉", daily_path), ("3분봉", minute_path)):
-            frame = ttk.Frame(notebook)
-            notebook.add(frame, text=label)
-            try:
-                photo = tk.PhotoImage(file=path)
-            except tk.TclError as e:
-                ttk.Label(frame, text=f"이미지를 열 수 없습니다: {e}").pack(
-                    padx=20, pady=20
-                )
-                continue
-            factor = -(-photo.height() // max_h)  # 올림 나눗셈
-            if factor > 1:
-                photo = photo.subsample(factor, factor)
-            win._photos.append(photo)
-            label_widget = ttk.Label(frame, image=photo, cursor="hand2")
-            label_widget.pack()
-            label_widget.bind(  # 더블클릭 → 기본 이미지 뷰어로 원본 열기 (Windows)
-                "<Double-Button-1>",
-                lambda _e, p=path: (
-                    os.startfile(p) if hasattr(os, "startfile") else None
-                ),
-            )
+            view = ChartView(notebook, path)
+            notebook.add(view, text=label)
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", pady=4)
-        ttk.Label(bar, text="더블클릭: 원본 크기로 열기", foreground="#9e9e9e").pack(
-            side="left", padx=8
-        )
+        ttk.Label(
+            bar,
+            text="휠: 확대·축소 · 드래그: 이동 · 더블클릭: 원본 열기",
+            foreground="#9e9e9e",
+        ).pack(side="left", padx=8)
         ttk.Button(
             bar,
             text="Discord로 보내기",

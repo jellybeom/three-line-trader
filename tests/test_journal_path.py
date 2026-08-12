@@ -575,3 +575,74 @@ def test_기준점_범위는_화살표_폭을_올림으로_덮는다():
     for size, per_bar in ((5.0, 1.36), (5.0, 2.04), (9.0, 9.3)):
         assert math.ceil(size / per_bar / 2) >= size / per_bar / 2
     assert math.ceil(5.0 / 1.36 / 2) == 2  # 내림이면 1 → 겹침 발생
+
+
+# ── 매매일지 검색·필터 ────────────────────────────────────────
+
+
+def _entry(name: str, symbol: str, pnl: float, fees: float = 0.0) -> dict:
+    return {
+        "trade_date": "2026-08-11",
+        "name": name,
+        "symbol": symbol,
+        "realized_pnl": pnl,
+        "fees": fees,
+    }
+
+
+@pytest.fixture
+def rows() -> list[dict]:
+    return [
+        _entry("RF머트리얼즈", "327260", -1_750, 642),
+        _entry("유진로봇", "056080", 9_000, 543),
+        _entry("광전자", "017900", 8_900, 518),
+        _entry("코스텍시스", "064290", 500, 500),  # 수수료까지 빼면 본전
+    ]
+
+
+def test_종목명_일부로_검색된다(rows):
+    from trader.ui.journal_dialog import filter_entries
+
+    assert [e["name"] for e in filter_entries(rows, query="로봇")] == ["유진로봇"]
+
+
+def test_종목코드_일부로도_검색된다(rows):
+    """코드를 외우지 않아도 되고, 이름이 헷갈리면 코드로 찾을 수 있어야 한다."""
+    from trader.ui.journal_dialog import filter_entries
+
+    assert [e["name"] for e in filter_entries(rows, query="3272")] == ["RF머트리얼즈"]
+
+
+def test_검색은_대소문자를_가리지_않는다():
+    from trader.ui.journal_dialog import filter_entries
+
+    rows = [_entry("LS ELECTRIC", "010120", 100)]
+    assert len(filter_entries(rows, query="ls electric")) == 1
+
+
+def test_익절_손절은_세후로_나눈다(rows):
+    """수수료·세금까지 빼고도 남았는지가 실제로 번 것인지의 기준이다."""
+    from trader.ui.journal_dialog import filter_entries
+
+    assert [e["name"] for e in filter_entries(rows, result="익절")] == [
+        "유진로봇",
+        "광전자",
+    ]
+    assert [e["name"] for e in filter_entries(rows, result="손절")] == ["RF머트리얼즈"]
+    # 세후 0원(본전)은 익절도 손절도 아니다 — 전체에서만 보인다
+    assert len(filter_entries(rows, result="전체")) == 4
+
+
+def test_검색과_필터는_함께_적용된다(rows):
+    from trader.ui.journal_dialog import filter_entries
+
+    assert [e["name"] for e in filter_entries(rows, query="0", result="익절")] == [
+        "유진로봇",
+        "광전자",
+    ]
+
+
+def test_빈_검색어는_전체를_돌려준다(rows):
+    from trader.ui.journal_dialog import filter_entries
+
+    assert len(filter_entries(rows, query="   ")) == len(rows)
