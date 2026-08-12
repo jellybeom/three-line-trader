@@ -32,13 +32,14 @@ _ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 
 _TEXT_LINES = 4  # 잘한 점 · 아쉬운 점 입력칸 줄 수 (둘은 항상 같아야 한다)
 _IME_GAP = 10  # 한글 조합 창이 아래 위젯을 덮지 않도록 검색칸 밑에 두는 여백 (px)
+_BUTTON_MIN_PX = 56  # '월별'·'전체' 두 글자가 잘리지 않는 최소 폭
 
 # 기간 선택 — '월별' 과 '전체' 둘 중 하나. 분기·주간처럼 잘게 나누면 고르는 데 손이
 # 더 가고, 특정 날짜를 찾을 땐 종목명 검색이 더 빠르다.
 PERIOD_MONTH = "월별"
 PERIOD_ALL = "전체"
 MONTHS = tuple(f"{m:02d}" for m in range(1, 13))
-_YEAR_SPAN = 6  # 목록에 없는 해도 고를 수 있도록 최근 몇 해는 항상 넣는다
+FIRST_YEAR = 2026  # 이 프로그램으로 매매를 시작한 해 — 그 이전 기록은 있을 수 없다
 
 
 def period_range(year: str, month: str) -> tuple[str, str]:
@@ -58,11 +59,13 @@ def period_range(year: str, month: str) -> tuple[str, str]:
 
 
 def year_choices(months: tuple, today: dt.date | None = None) -> list[str]:
-    """고를 수 있는 연도 — 기록이 있는 해 + 최근 몇 해 (최신 순)."""
+    """고를 수 있는 연도 — 시작한 해부터 올해까지 **오름차순** (월 목록과 같은 방향).
+
+    빈 해도 목록에 남긴다. 중간이 비었다고 건너뛰면 목록이 들쭉날쭉해 오히려 찾기 어렵다.
+    """
     today = today or dt.date.today()
-    years = {m[:4] for m in months if len(m) >= 4}
-    years.update(str(today.year - i) for i in range(_YEAR_SPAN))
-    return sorted(years, reverse=True)
+    latest = max([today.year, FIRST_YEAR] + [int(m[:4]) for m in months if len(m) >= 4])
+    return [str(y) for y in range(FIRST_YEAR, latest + 1)]
 
 
 def _bind_optional(widget, sequence: str, handler) -> None:
@@ -251,6 +254,38 @@ def summarize(entry: dict) -> list[tuple[str, str]]:
     return rows
 
 
+def summarize_stats(entries: list[dict], total: int | None = None) -> str:
+    """목록 아래에 보여줄 성적 요약.
+
+    단순히 몇 건인지보다 **이겼는지 졌는지**가 먼저 궁금하다. 승률과 세후 합계까지
+    한 줄에 담아, 기간을 바꿔가며 성적을 비교할 수 있게 한다.
+
+    승률은 **익절 ÷ (익절 + 손절)** 이다. 세후 정확히 0원인 매매는 이긴 것도 진 것도
+    아니라 분모에서 뺀다 — 넣으면 승률이 실제보다 낮아 보인다. 보유 중이라 아직 손익이
+    확정되지 않은 건도 마찬가지로 빠진다.
+
+    total 을 주면 "12/30건" 처럼 걸러진 상태임을 함께 보여준다.
+    """
+    if not entries:
+        return "0건" if total in (None, 0) else f"0/{total}건"
+    closed = [e for e in entries if (e.get("state") or "") == "종료"]
+    wins = sum(1 for e in closed if net_pnl(e) > 0)
+    losses = sum(1 for e in closed if net_pnl(e) < 0)
+    count = (
+        f"{len(entries)}건"
+        if total in (None, len(entries))
+        else f"{len(entries)}/{total}건"
+    )
+    parts = [count]
+    if wins or losses:
+        parts.append(f"익절 {wins} · 손절 {losses}")
+        parts.append(f"승률 {wins / (wins + losses):.1%}")
+    if holding := len(entries) - len(closed):
+        parts.append(f"보유 중 {holding}")
+    parts.append(f"세후 {sum(net_pnl(e) for e in entries):+,.0f}원")
+    return " · ".join(parts)
+
+
 def entry_label(entry: dict) -> str:
     """목록 한 줄 — 작성 여부가 한눈에 보이도록 앞에 표시를 둔다."""
     net = net_pnl(entry)
@@ -310,6 +345,17 @@ class JournalDialog(tk.Toplevel):
 
         period_row = ttk.Frame(left)
         period_row.pack(fill="x", pady=(0, 4))
+        # grid 로 폭을 나눠 갖게 한다. pack 으로는 오른쪽에 빈 자리가 남는다.
+        # 3번 칸을 비워 '월별 묶음' 과 '전체' 사이를 벌린다.
+        # minsize 가 없으면 창을 좁혔을 때 버튼 글자가 '월별' → '월' 로 잘린다.
+        for column, weight, minsize in (
+            (0, 2, _BUTTON_MIN_PX),
+            (1, 4, 56),
+            (2, 3, 44),
+            (3, 1, 8),
+            (4, 2, _BUTTON_MIN_PX),
+        ):
+            period_row.columnconfigure(column, weight=weight, minsize=minsize)
         self._month_button = ttk.Radiobutton(
             period_row,
             text=PERIOD_MONTH,
@@ -317,25 +363,24 @@ class JournalDialog(tk.Toplevel):
             variable=self._period_mode,
             command=self._on_period,
             style="Filter.Toolbutton",
-            width=5,
         )
-        self._month_button.pack(side="left")
+        self._month_button.grid(row=0, column=0, sticky="ew")
         self._year_box = ttk.Combobox(
             period_row,
             textvariable=self._year,
             state="readonly",
-            width=6,
+            justify="center",  # 월 콤보와 같은 정렬 (숫자가 가운데 오면 읽기 편하다)
             values=year_choices(months),
         )
-        self._year_box.pack(side="left", padx=(4, 2))
+        self._year_box.grid(row=0, column=1, sticky="ew", padx=(4, 2))
         self._month_box = ttk.Combobox(
             period_row,
             textvariable=self._month,
             state="readonly",
-            width=4,
+            justify="center",
             values=list(MONTHS),
         )
-        self._month_box.pack(side="left")
+        self._month_box.grid(row=0, column=2, sticky="ew")
         self._all_button = ttk.Radiobutton(
             period_row,
             text=PERIOD_ALL,
@@ -343,9 +388,8 @@ class JournalDialog(tk.Toplevel):
             variable=self._period_mode,
             command=self._on_period,
             style="Filter.Toolbutton",
-            width=5,
         )
-        self._all_button.pack(side="left", padx=(4, 0))
+        self._all_button.grid(row=0, column=4, sticky="ew")
         for box in (self._year_box, self._month_box):
             # 연·월을 고르면 자동으로 월별 조회로 바뀐다 (모드를 따로 누를 필요가 없다)
             box.bind("<<ComboboxSelected>>", self._on_month_pick)
@@ -372,8 +416,13 @@ class JournalDialog(tk.Toplevel):
         self._list = tk.Listbox(left, width=34, exportselection=False)
         self._list.pack(fill="both", expand=True)
         self._list.bind("<<ListboxSelect>>", self._on_select)
-        self._count = ttk.Label(left, text="", foreground="#9e9e9e")
-        self._count.pack(anchor="w", pady=(2, 0))
+        # 성적 요약 — 목록 폭에 맞춰 줄바꿈한다 (칸을 좁히면 두 줄이 된다)
+        self._count = ttk.Label(left, text="", foreground="#616161", justify="left")
+        self._count.pack(anchor="w", fill="x", pady=(4, 0))
+        left.bind(
+            "<Configure>",
+            lambda e: self._count.configure(wraplength=max(e.width - 8, 100)),
+        )
         pane.add(left, weight=1)
 
         right = ttk.Frame(pane)
@@ -491,11 +540,7 @@ class JournalDialog(tk.Toplevel):
         self._list.delete(0, "end")
         for entry in self._visible:
             self._list.insert("end", entry_label(entry))
-        total = len(self._entries)
-        shown = len(self._visible)
-        self._count.configure(
-            text=f"{shown}건" if shown == total else f"{shown} / {total}건"
-        )
+        self._count.configure(text=summarize_stats(self._visible, len(self._entries)))
         if self._current in self._visible:  # 보고 있던 항목이 남아 있으면 선택 유지
             index = self._visible.index(self._current)
             self._list.selection_set(index)

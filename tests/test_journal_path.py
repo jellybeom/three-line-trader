@@ -851,16 +851,25 @@ def test_연월이_없거나_이상하면_전체로_본다(year, month):
     assert period_range(year, month) == ("", "")
 
 
-def test_연도_목록은_기록이_있는_해와_최근_몇_해를_담는다():
+def test_연도_목록은_시작한_해부터_오름차순이다():
+    """이 프로그램으로 매매를 시작한 해(2026) 이전 기록은 있을 수 없다."""
+    import datetime as dt
+
+    from trader.ui.journal_dialog import FIRST_YEAR, year_choices
+
+    assert year_choices((), dt.date(2026, 8, 12)) == ["2026"]
+    years = year_choices((), dt.date(2029, 1, 1))
+    assert years == ["2026", "2027", "2028", "2029"]  # 월 목록과 같은 방향
+    assert years[0] == str(FIRST_YEAR)
+
+
+def test_기록이_있는_해가_올해보다_뒤여도_담긴다():
+    """PC 시계가 어긋나 있어도 기록이 있는 해는 고를 수 있어야 한다."""
     import datetime as dt
 
     from trader.ui.journal_dialog import year_choices
 
-    years = year_choices(("2019-03", "2020-11"), dt.date(2026, 8, 12))
-    assert years[0] == "2026"  # 최신 순
-    assert "2019" in years and "2020" in years  # 오래된 기록도 고를 수 있다
-    assert "2024" in years  # 기록이 없어도 최근 몇 해는 항상 있다
-    assert years == sorted(years, reverse=True)
+    assert "2028" in year_choices(("2028-03",), dt.date(2026, 8, 12))
 
 
 @pytest.fixture
@@ -949,12 +958,19 @@ def test_기간_위젯은_한_줄에_있다(period_dialog):
         period_dialog._month_box,
         period_dialog._all_button,
     ]
-    assert all(w.pack_info()["side"] == "left" for w in widgets)
+    assert all(int(w.grid_info()["row"]) == 0 for w in widgets)  # 같은 줄
+    columns = [int(w.grid_info()["column"]) for w in widgets]
+    assert columns == sorted(columns)  # 왼쪽부터 순서대로
+    # 폭을 나눠 가져 오른쪽에 빈 자리가 남지 않는다
+    assert all(
+        "e" in w.grid_info()["sticky"] and "w" in w.grid_info()["sticky"]
+        for w in widgets
+    )
 
 
 def test_새_목록을_받으면_연도_선택지가_갱신된다(period_dialog, rows):
-    period_dialog.set_entries([rows[0]], months=("2019-03",))
-    assert "2019" in period_dialog._year_box.cget("values")
+    period_dialog.set_entries([rows[0]], months=("2030-03",))
+    assert "2030" in period_dialog._year_box.cget("values")
     assert period_dialog._list.size() == 1
 
 
@@ -1034,3 +1050,62 @@ def test_변한_게_없으면_저장하지_않는다():
 
     core._flush_day_lows(force=True)
     assert saved == []
+
+
+# ── 성적 요약 ─────────────────────────────────────────────────
+
+
+def _closed(pnl: float, fees: float = 500) -> dict:
+    return {"realized_pnl": pnl, "fees": fees, "state": "종료"}
+
+
+def test_성적_요약은_승률과_세후_합계를_보여준다():
+    """몇 건인지보다 이겼는지 졌는지가 먼저 궁금하다."""
+    from trader.ui.journal_dialog import summarize_stats
+
+    text = summarize_stats([_closed(9_000)] * 15 + [_closed(-2_000)] * 5)
+    assert "20건" in text
+    assert "익절 15 · 손절 5" in text
+    assert "승률 75.0%" in text
+    assert "세후 +115,000원" in text
+
+
+def test_승률은_본전과_보유중을_분모에서_뺀다():
+    """이긴 것도 진 것도 아닌 건을 넣으면 승률이 실제보다 낮아 보인다."""
+    from trader.ui.journal_dialog import summarize_stats
+
+    rows = [_closed(9_000)] * 6 + [_closed(-2_000)] * 4
+    rows.append({"realized_pnl": 500, "fees": 500, "state": "종료"})  # 세후 0원
+    rows.append({"realized_pnl": 0, "fees": 0, "state": "1차 매수"})  # 보유 중
+    text = summarize_stats(rows)
+    assert "승률 60.0%" in text  # 6 / (6+4)
+    assert "12건" in text  # 건수에는 다 들어간다
+    assert "보유 중 1" in text
+
+
+def test_걸러진_상태는_분자_분모로_보여준다():
+    from trader.ui.journal_dialog import summarize_stats
+
+    assert summarize_stats([_closed(9_000)] * 3, total=30).startswith("3/30건")
+    assert summarize_stats([_closed(9_000)] * 3, total=3).startswith("3건")
+
+
+def test_비어_있으면_0건만_보여준다():
+    from trader.ui.journal_dialog import summarize_stats
+
+    assert summarize_stats([]) == "0건"
+    assert summarize_stats([], total=30) == "0/30건"
+
+
+def test_승패가_없으면_승률을_적지_않는다():
+    """0으로 나누지 않고, 의미 없는 '승률 0%' 도 띄우지 않는다."""
+    from trader.ui.journal_dialog import summarize_stats
+
+    text = summarize_stats([{"realized_pnl": 0, "fees": 0, "state": "1차 매수"}])
+    assert "승률" not in text
+    assert "보유 중 1" in text
+
+
+def test_창의_요약줄이_성적을_보여준다(period_dialog):
+    text = period_dialog._count.cget("text")
+    assert "건" in text and "승률" in text
