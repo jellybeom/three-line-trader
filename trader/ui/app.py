@@ -18,7 +18,9 @@ from __future__ import annotations
 import csv
 import queue
 import re
+import sys
 import tkinter as tk
+import traceback
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -911,12 +913,48 @@ class App(tk.Tk):
     # ── 이벤트 큐 → 화면 갱신 ───────────────────────────────────
 
     def _poll(self) -> None:
+        """이벤트 큐 → 화면. **어떤 일이 있어도 다음 폴링을 예약한다.**
+
+        예전에는 queue.Empty 만 잡아서, 화면 갱신 중 예외가 하나만 나도 이 함수가
+        그대로 빠져나가 다시 예약되지 않았다. 그러면 매매는 계속 도는데(코어는 별도
+        스레드다) **화면만 그 시점에 멈춘다** — 체결도 로그도 손익도 갱신되지 않아
+        사용자가 실제 상태를 모른 채 판단하게 된다. 돈이 걸린 화면에서 가장 위험한
+        고장 방식이라, 개별 이벤트 처리 실패가 루프를 끊지 못하게 막는다
+        (2026-08-13: PositionsView.set_blocked 누락으로 실제 발생).
+        """
         try:
             while True:
-                self._dispatch(self._bus.events.get_nowait())
+                event = self._bus.events.get_nowait()
+                try:
+                    self._dispatch(event)
+                except Exception:  # 이벤트 하나가 실패해도 나머지는 계속 처리한다
+                    self._report_ui_error(event)
         except queue.Empty:
             pass
-        self.after(_POLL_MS, self._poll)
+        except Exception:  # 큐 자체가 이상해도 폴링은 살아 있어야 한다
+            self._report_ui_error(None)
+        finally:
+            self.after(_POLL_MS, self._poll)
+
+    def _report_ui_error(self, event) -> None:
+        """화면 갱신 실패를 조용히 넘기지 않고 눈에 보이게 남긴다.
+
+        조용히 삼키면 '화면이 멈추지는 않지만 값이 틀린' 더 나쁜 상태가 된다.
+        로그 창과 터미널 양쪽에 남겨 재현·수정이 가능하게 한다.
+        """
+        name = type(event).__name__ if event is not None else "이벤트 큐"
+        detail = traceback.format_exc()
+        print(f"[UI 오류] {name} 처리 실패\n{detail}", file=sys.stderr)
+        try:
+            self.events.append(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "시스템",
+                "",
+                "오류",
+                f"화면 갱신 실패({name}) — 매매는 계속됩니다. 로그를 확인하세요",
+            )
+        except Exception:  # 로그 위젯마저 실패하면 터미널 출력으로 끝낸다
+            pass
 
     def _dispatch(self, ev) -> None:
         match ev:

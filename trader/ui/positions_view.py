@@ -259,6 +259,26 @@ class PositionsView(ttk.Frame):
         tag = "profit" if pnl > 0 else ("loss" if pnl < 0 else "")
         self.tree.item(symbol, tags=(tag,) if tag else ())
 
+    def set_blocked(self, symbol: str, active: bool, reason: str = "") -> None:
+        """진입 보류 표시 — 상태 칸에 '(보류)' 를 붙이고 사유를 도구 설명처럼 남긴다.
+
+        보류는 틱마다 성립하므로 로그로 남기지 않고 화면에만 계속 보여준다
+        (코어의 _log_block 참고). 다음 upsert 때 상태 칸이 다시 그려지므로,
+        여기서는 기록만 고치고 지금 화면도 즉시 맞춰준다.
+        """
+        if active:
+            self._blocked[symbol] = reason
+        else:
+            self._blocked.pop(symbol, None)
+        if not self.tree.exists(symbol):
+            return  # 아직 행이 없다 — 다음 upsert 가 반영한다
+        text = self.tree.set(symbol, "state")
+        marked = text.endswith(" (보류)")
+        if active and not marked and "(체결대기)" not in text:
+            self.tree.set(symbol, "state", text + " (보류)")
+        elif not active and marked:
+            self.tree.set(symbol, "state", text[: -len(" (보류)")])
+
     def set_day_open(self, symbol: str, price: float) -> None:
         """복원 시 코어가 알려주는 당일 첫 체결가 (재시작해도 등락률이 이어지도록)."""
         if price:
