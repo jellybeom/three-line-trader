@@ -394,3 +394,39 @@ def test_날짜를_넘겨도_폭이_변하지_않는다(app):
     app.update()
     app.update_idletasks()
     assert app._weekday.winfo_width() == wide
+
+
+def test_휴장_사유가_잘리지_않는다(app):
+    """Tk 의 width 는 **'0' 문자 폭**이 단위다. 한글은 1.5~2배 넓어 글자 수를 그대로
+    넣으면 폰트에 따라 뒷부분이 잘린다(2026-08-17 Windows 실측: '개천절(대체휴일' )."""
+    from tkinter import font as tkfont
+
+    metrics = tkfont.Font(font=app._weekday.cget("font") or "TkDefaultFont")
+    app.update_idletasks()
+    for note in ("광복절(대체휴일)", "석가탄신일(대체휴일)", "연말휴장일", "주말"):
+        app._dispatch(bus.TradeDate("2026-10-05", "휴장", note))
+        app.update()
+        app.update_idletasks()
+        text = app._weekday.cget("text")
+        assert metrics.measure(text) <= app._weekday.winfo_width(), f"{note} 가 잘린다"
+
+
+def test_폭_계산은_폰트를_실측한다():
+    """글자 수로 어림하면 폰트가 바뀔 때 다시 잘린다."""
+    tk = pytest.importorskip("tkinter")
+    from tkinter import font as tkfont, ttk
+
+    from trader.ui.app import _MARKET_SAMPLE, _width_in_chars
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("표시 장치가 없는 환경")
+    root.withdraw()
+    longest = "(월) · 휴장 · 석가탄신일(대체휴일)"
+    for size in (9, 12, 16, 24):  # 폰트가 커져도 여유가 남아야 한다
+        font = tkfont.Font(family="DejaVu Sans", size=size)
+        label = ttk.Label(root, font=font)
+        chars = _width_in_chars(label, _MARKET_SAMPLE)
+        assert chars * font.measure("0") >= font.measure(longest)
+    root.destroy()

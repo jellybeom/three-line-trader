@@ -23,7 +23,7 @@ import tkinter as tk
 import traceback
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from trader.state_machine import State
 from trader.ui import bus
@@ -47,9 +47,9 @@ from trader.ui.register_dialog import RegisterDialog
 # 휴장은 달력의 '빨간 날' 관례를 따른다. 주황은 이 프로그램에서 '진행 중·주의'(연결 중,
 # 3선 미입력)를 뜻해, 확정된 사실인 휴장에는 맞지 않는다.
 _MARKET_COLORS = {"개장": "", "휴장": "#c62828", "확인 불가": "#9e9e9e"}
-_MARKET_CHARS = (
-    22  # 매매일 아래 개장/휴장 줄의 고정 폭 — "(월) · 휴장 (광복절(대체휴일))" 기준
-)
+# 개장/휴장 줄의 폭을 정할 때 기준으로 삼는 가장 긴 문구. 휴장 사유는 holidays.csv 에서
+# 오므로 앞으로 조금 길어질 수 있어 여유를 둔다.
+_MARKET_SAMPLE = "(월) · 휴장 · 석가탄신일(대체휴일)＋"
 _SEARCH_CHARS = 18  # 검색 입력칸 폭(글자 수) — 종목명은 대개 이보다 짧다
 _IME_GAP_PX = 10  # 한글 조합 창이 표 머리글을 덮지 않도록 검색줄 아래 두는 여백
 _POLL_MS = 200
@@ -198,6 +198,21 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
 _ASSETS = Path(__file__).resolve().parents[2] / "assets"
 
 
+def _width_in_chars(widget, sample: str) -> int:
+    """`sample` 이 잘리지 않는 width 값 (글자 수 단위).
+
+    Tk 의 width 는 **'0' 문자 폭**을 단위로 센다. 한글은 그보다 1.5~2배 넓어, 글자 수를
+    그대로 넣으면 폰트에 따라 뒷부분이 잘린다 — 리눅스에서는 아슬아슬하게 들어가고
+    Windows 한글 폰트에서는 잘렸다(2026-08-17 실측). 폰트를 재서 환산한다.
+    """
+    try:
+        metrics = tkfont.Font(font=widget.cget("font") or "TkDefaultFont")
+        unit = metrics.measure("0") or 1
+        return -(-metrics.measure(sample) // unit)  # 올림
+    except tk.TclError:  # 폰트를 못 읽어도 창은 떠야 한다
+        return len(sample) * 2
+
+
 class App(tk.Tk):
     def __init__(self, b: bus.Bus):
         super().__init__()
@@ -323,7 +338,8 @@ class App(tk.Tk):
         self._date_next.pack(side="left", padx=(3, 0))
         # 폭을 고정한다. 날짜를 넘길 때마다 글자 길이가 달라지면 그룹 폭이 늘었다 줄었다
         # 하며 옆 그룹(키움·Discord·자금)이 밀린다.
-        self._weekday = ttk.Label(box, text="-", anchor="center", width=_MARKET_CHARS)
+        self._weekday = ttk.Label(box, text="-", anchor="center")
+        self._weekday.configure(width=_width_in_chars(self._weekday, _MARKET_SAMPLE))
         self._weekday.pack(fill="x")
 
         g_kiwoom = ttk.LabelFrame(row, text="키움증권 API", padding=(10, 2, 10, 6))
