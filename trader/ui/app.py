@@ -44,6 +44,8 @@ from trader.ui.events_view import EventsView
 from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
 
+_SEARCH_CHARS = 18  # 검색 입력칸 폭(글자 수) — 종목명은 대개 이보다 짧다
+_IME_GAP_PX = 10  # 한글 조합 창이 표 머리글을 덮지 않도록 검색줄 아래 두는 여백
 _POLL_MS = 200
 # 종목코드는 6자리이며 **숫자로만 이루어지지 않는다** — 신주인수권·스팩 등에는
 # 영문자가 섞인다(실측 2026-08-05: 아로마티카 0015N0). 숫자만 허용하면 조용히 누락된다.
@@ -485,28 +487,37 @@ class App(tk.Tk):
         살아 있는 감시 화면을 가리는 기능이라 늘 띄워 두지 않는다. 대신 **필터가 걸려
         있으면 절대 사라지지 않는다** — 검색줄이 없는데 종목만 줄어 있으면 왜 안 보이는지
         알 수 없기 때문이다. 그래서 '검색줄을 닫는 것 = 필터를 푸는 것' 으로 묶었다.
+
+        아래쪽 여백을 넉넉히 둔다. 한글을 조합하는 동안 Windows 가 입력칸 바로 아래에
+        자기 조합 창을 띄우는데(OS 가 그리는 창이라 Tk 로는 못 막는다), 간격이 좁으면
+        그 창이 표의 머리글을 덮는다.
         """
         self._search_bar = ttk.Frame(parent)
+        ttk.Label(self._search_bar, text="종목 검색").pack(side="left", padx=(2, 6))
         self._search = SearchEntry(
             self._search_bar, "종목명 또는 종목코드", self._on_search
         )
-        self._search.pack(side="left", fill="x", expand=True)
+        # 폭을 묶어 둔다. 창 너비만큼 늘리면 입력칸만 덩그러니 길어져 보기 나쁘다.
+        self._search.entry.configure(width=_SEARCH_CHARS)
+        self._search.pack(side="left")
         self._search_count = ttk.Label(
-            self._search_bar, text="", foreground="#616161", width=12, anchor="e"
+            self._search_bar, text="", foreground="#616161", width=12
         )
-        self._search_count.pack(side="left", padx=(8, 4))
+        self._search_count.pack(side="left", padx=(10, 0))
+        # 오른쪽 끝에 '닫기'. 입력칸 옆 ✕(글자 지우기)와 역할이 달라 글자로 구분한다 —
+        # ✕ 가 둘이면 어느 쪽이 무엇인지 알 수 없다.
         ttk.Button(
-            self._search_bar, text="✕", width=2, command=self._close_search
-        ).pack(side="left")
+            self._search_bar, text="닫기", width=5, command=self._close_search
+        ).pack(side="right", padx=(6, 2))
         # Esc 는 두 단계다. 글자가 있으면 글자만 지우고(필터만 풀림), 비어 있으면 줄을 닫는다.
         # **검색칸에 포커스가 있을 때만** 반응한다 — 표에서 누른 Esc 로 필터가 풀리면 놀란다.
         self._search.entry.bind("<Escape>", self._on_search_escape)
-        self._search.entry.bind("<Return>", lambda _e: "break")
+        # Enter 는 조합 중인 한글을 확정시킨다. 확정되면 입력칸 내용이 바뀌어 필터가 걸린다.
+        self._search.entry.bind("<Return>", lambda _e: (self._on_search(), "break")[1])
 
     def _open_search(self, _event=None) -> str:
-        self._search_bar.pack(fill="x", pady=(0, 4), before=self.positions)
-        self._search.entry.focus_set()
-        self._search.entry.select_range(0, "end")
+        self._search_bar.pack(fill="x", pady=(0, _IME_GAP_PX), before=self.positions)
+        self._search.take_focus()
         return "break"
 
     def _close_search(self, _event=None) -> str:

@@ -122,8 +122,13 @@ class SearchEntry(ttk.Frame):
             self, text="✕", width=2, command=self.clear, takefocus=False
         )
         self._clear.pack(side="right", padx=(4, 0))
-        self.entry = ttk.Entry(self)
+        # 입력 감지는 **변수 변경**으로 한다. KeyRelease 에만 걸면 한글 조합이 확정되는
+        # 순간(다음 글자 입력·포커스 이동)을 놓쳐, 마지막 글자가 반영되지 않는다.
+        # 변수는 글자가 위젯에 실제로 들어올 때마다 바뀌므로 어떤 경로든 잡힌다.
+        self._var = tk.StringVar()
+        self.entry = ttk.Entry(self, textvariable=self._var)
         self.entry.pack(side="left", fill="x", expand=True)
+        self._var.trace_add("write", self._on_text_changed)
         # 글자가 **들어가기 전에** 안내 문구를 치운다. FocusIn 에만 기대면, 포커스
         # 이벤트 없이 입력이 들어올 때 안내 문구 앞에 글자가 붙어버린다
         # ("로봇" + "종목명 또는 종목코드"). 키를 누르는 순간 지우면 순서가 보장된다.
@@ -137,6 +142,16 @@ class SearchEntry(ttk.Frame):
     def get(self) -> str:
         """실제 검색어. 안내 문구가 보이는 중이면 빈 문자열."""
         return "" if self._showing else self.entry.get()
+
+    def take_focus(self) -> None:
+        """입력칸으로 포커스를 옮긴다 — 안내 문구는 직접 치운다.
+
+        FocusIn 에만 맡기면 OS 가 창에 포커스를 주지 않는 상황에서 안내 문구가 남아,
+        그 뒤에 들어온 글자가 문구 앞에 붙는다.
+        """
+        self._hide_placeholder()
+        self.entry.focus_set()
+        self.entry.select_range(0, "end")
 
     def clear(self) -> None:
         self.entry.delete(0, "end")
@@ -170,9 +185,19 @@ class SearchEntry(ttk.Frame):
         self._hide_placeholder()
 
     def _on_key(self, _event=None) -> None:
+        """KeyRelease — 안내 문구 상태만 정리한다 (내용 반영은 _on_text_changed 담당)."""
         if self._showing and self.entry.get() == self._placeholder:
             return  # 방향키 등 — 글자는 안 들어왔으므로 안내 문구 그대로 둔다
-        self._showing = False  # 글자를 쳤으면 더 이상 안내 문구가 아니다
+        self._showing = False
+        self.entry.configure(foreground="")
+        self._sync_button()
+        self._on_change()
+
+    def _on_text_changed(self, *_args) -> None:
+        """입력칸 내용이 바뀔 때마다 (안내 문구를 넣고 빼는 것도 여기로 온다)."""
+        if self._showing:
+            self._sync_button()  # 안내 문구는 검색어가 아니다
+            return
         self.entry.configure(foreground="")
         self._sync_button()
         self._on_change()
@@ -471,7 +496,7 @@ class JournalDialog(tk.Toplevel):
 
         # 메인 창과 같은 단축키로 검색칸에 바로 간다 (창마다 자기 것만 반응한다)
         for sequence in ("<Control-f>", "<Control-F>"):
-            self.bind(sequence, lambda _e: (self._search.entry.focus_set(), "break")[1])
+            self.bind(sequence, lambda _e: (self._search.take_focus(), "break")[1])
         self._setup_focus_order()
         self._fill_list()
         self.update_idletasks()  # 차트 축소 배율을 실제 배치 크기로 계산하기 위해

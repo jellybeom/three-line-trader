@@ -281,3 +281,72 @@ def test_개수_표시가_전체와_보이는_수를_함께_준다(filled):
     filled._close_search()
     filled.update()
     assert filled._search_count.cget("text") == ""
+
+
+# ── 입력 반영 시점 ────────────────────────────────────────────
+
+
+def test_글자가_들어오는_즉시_필터가_걸린다(filled):
+    """KeyRelease 에만 걸면 한글 조합이 확정되는 순간을 놓친다.
+
+    실측(2026-08-15): '서산' 을 치면 '산' 이 조합 중이라 위젯에는 '서' 만 들어 있고,
+    다른 곳을 클릭해야 '산' 이 확정되며 들어왔다. 그때 KeyRelease 는 오지 않으므로
+    필터가 갱신되지 않았다. 변수 변경을 보면 어떤 경로로 들어오든 잡힌다.
+    """
+    filled._open_search()
+    filled._search.entry.insert(0, "서")  # 키 이벤트 없이 값만 넣는다
+    filled.update()
+    assert filled._search_count.cget("text").startswith("1/")
+
+    filled._search.entry.insert("end", "산")  # 조합 확정으로 뒤늦게 들어온 글자
+    filled.update()
+    assert _visible(filled) == ["079650"]
+
+
+def test_안내_문구는_검색어로_치지_않는다(filled):
+    """안내 문구도 위젯에 들어가는 글자라, 변수 변경이 그것까지 잡으면 안 된다."""
+    filled._open_search()
+    filled._close_search()
+    filled.update()
+    assert len(_visible(filled)) == 6  # 안내 문구로 걸러지지 않았다
+
+
+# ── 검색줄 생김새 ─────────────────────────────────────────────
+
+
+def test_무엇을_검색하는지_라벨이_있다(filled):
+    labels = [
+        w.cget("text")
+        for w in filled._search_bar.winfo_children()
+        if w.winfo_class() == "TLabel"
+    ]
+    assert any("검색" in text for text in labels)
+
+
+def test_입력칸이_창_너비만큼_늘어나지_않는다(filled):
+    """늘리면 입력칸만 덩그러니 길어져 보기 나쁘다."""
+    filled._open_search()
+    filled.update()
+    filled.update_idletasks()
+    assert filled._search.winfo_width() < filled.winfo_width() // 3
+
+
+def test_닫기와_지우기는_글자로_구분된다(filled):
+    """✕ 가 둘이면 어느 쪽이 무엇인지 알 수 없다."""
+    buttons = [
+        w.cget("text")
+        for w in filled._search_bar.winfo_children()
+        if w.winfo_class() == "TButton"
+    ]
+    assert "닫기" in buttons
+    assert "✕" not in buttons  # 줄에 직접 붙은 ✕ 는 없다
+    assert filled._search._clear.cget("text") == "✕"  # 입력칸 옆 ✕ 는 글자 지우기
+
+
+def test_검색줄_아래에_조합창_여백이_있다(filled):
+    """한글 조합 창(OS 가 그린다)이 표 머리글을 덮지 않도록."""
+    filled._open_search()
+    filled.update()
+    pady = filled._search_bar.pack_info()["pady"]
+    bottom = pady[1] if isinstance(pady, (tuple, list)) else int(str(pady).split()[-1])
+    assert int(bottom) >= 8
