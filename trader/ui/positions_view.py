@@ -105,6 +105,10 @@ class PositionsView(ttk.Frame):
         self._blocked: dict[str, str] = {}  # 진입 보류 중인 종목 → 사유
         self._day_open: dict[str, float] = {}  # 종목별 당일 첫 체결가 (등락률 기준)
         self._sort_reverse: dict[str, bool] = {}
+        # 화면에 보이는 순서 그대로의 **전체** 종목 목록. tree.get_children() 은 숨긴 행을
+        # 빼고 돌려주므로, 정렬·전체 삭제에 그것만 쓰면 숨긴 종목이 누락된다.
+        self._order: list[str] = []
+        self._query = ""  # 필터 검색어 (빈 문자열이면 전부 보인다)
 
         # extended: Ctrl·Shift 로 여러 종목을 골라 한 번에 처리할 수 있다
         self.tree = ttk.Treeview(
@@ -239,7 +243,11 @@ class PositionsView(ttk.Frame):
             self.tree.insert(
                 "", "end", iid=symbol, values=values, tags=(tag,) if tag else ()
             )
+            self._order.append(symbol)
         self._ensure_add_row()
+        # 필터를 켠 채로 틱이 오면 insert 로 되살아나거나 _ensure_add_row 의 move 로
+        # 순서가 흔들린다. 갱신 끝에 조건을 다시 걸어 '안 맞으면 안 보인다' 를 지킨다.
+        self._apply_filter(symbol)
 
     def tick(self, symbol: str, price: float) -> None:
         if not self.tree.exists(symbol) or symbol in _SPECIAL:
@@ -285,6 +293,8 @@ class PositionsView(ttk.Frame):
             self._day_open[symbol] = price
 
     def remove(self, symbol: str) -> None:
+        if symbol in self._order:
+            self._order.remove(symbol)
         if self.tree.exists(symbol):
             self.tree.delete(symbol)
         self._avg.pop(symbol, None)
@@ -293,8 +303,17 @@ class PositionsView(ttk.Frame):
         self._blocked.pop(symbol, None)
 
     def clear(self) -> None:
-        """매매일 전환 시 전체 비우기."""
+        """매매일 전환 시 전체 비우기.
+
+        get_children() 은 **숨긴 행을 빼고** 돌려주므로 그것만 지우면 필터에 걸린
+        종목이 유령처럼 남는다. 전체 목록을 따로 들고 있는 이유다.
+        """
+        # **필터를 먼저 푼다.** get_children() 은 숨긴 행을 빼고 주므로, 필터가 걸린 채로
+        # 지우면 그 종목들이 유령처럼 남는다. 겸사겸사 다른 날의 종목 구성에 어제 검색어가
+        # 남는 것도 막는다.
+        self.set_filter("")
         self.tree.delete(*self.tree.get_children())
+        self._order.clear()
         self._avg.clear()
         self._closed.clear()
         self._day_open.clear()  # 매매일이 바뀌면 등락률 기준도 새로 잡는다
@@ -306,6 +325,61 @@ class PositionsView(ttk.Frame):
         return sel[0] if sel and sel[0] not in _SPECIAL else None
 
     # ── 행 내 조작 ──────────────────────────────────────────────
+
+    # ── 검색 필터 ───────────────────────────────────────────────
+
+    def set_filter(self, query: str) -> int:
+        """종목명·코드로 목록을 좁힌다. 보이는 종목 수를 돌려준다.
+
+        **살아 있는 화면을 가리는 기능**이라 규칙을 좁게 잡았다.
+        - 검색 대상은 종목명과 코드뿐이다 (메모·태그까지 넣으면 왜 걸렸는지 알기 어렵다)
+        - 숨긴 행도 값 갱신은 계속된다 — 되돌리면 그동안의 변화가 그대로 보인다
+        - 숨긴 종목은 선택할 수 없다(Tk 가 막는다). 보이지 않는 종목에 주문이 나가지 않는다
+        - ＋추가 행은 언제나 맨 아래 남는다 (0건일 때 바로 등록으로 이어진다)
+        """
+        self._query = query.strip().lower()
+        self._relayout()
+        return sum(1 for iid in self._order if self._matches(iid))
+
+    def count(self) -> int:
+        """등록된 전체 종목 수 (숨긴 것 포함)."""
+        return len(self._order)
+
+    def _matches(self, symbol: str) -> bool:
+        if not self._query:
+            return True
+        if not self.tree.exists(symbol):
+            return False
+        name = str(self.tree.set(symbol, "name")).lower()
+        return self._query in symbol.lower() or self._query in name
+
+    def _relayout(self) -> None:
+        """_order 순서대로 화면을 다시 세운다 (조건에 맞는 것만 붙인다)."""
+        visible = 0
+        for symbol in self._order:
+            if not self.tree.exists(symbol):
+                continue  # 삭제와 겹치면 TclError 가 난다 — 반드시 먼저 확인한다
+            if self._matches(symbol):
+                self.tree.move(symbol, "", visible)
+                visible += 1
+            else:
+                self.tree.detach(symbol)
+        self._ensure_add_row()
+        # selection 은 detach 시 Tk 가 알아서 비우지만 focus 는 남는다.
+        # 남겨두면 나중에 focus 기반 조작이 숨긴 종목을 가리킬 수 있다.
+        if (current := self.tree.focus()) and not self.tree.exists(current):
+            self.tree.focus("")
+        elif current and current not in _SPECIAL and not self._matches(current):
+            self.tree.focus("")
+
+    def _apply_filter(self, symbol: str) -> None:
+        """한 종목만 조건에 맞춰 붙이거나 뗀다 (틱마다 전체를 다시 세우지 않도록)."""
+        if not self._query or not self.tree.exists(symbol):
+            return
+        if self._matches(symbol):
+            self._relayout()  # 순서를 지키려면 전체 배치가 필요하다
+        else:
+            self.tree.detach(symbol)
 
     def _ensure_add_row(self) -> None:
         for iid, label in (
@@ -337,7 +411,9 @@ class PositionsView(ttk.Frame):
             self.tree.item(code, values=values, tags=("staged",))
         else:
             self.tree.insert("", "end", iid=code, values=values, tags=("staged",))
+            self._order.append(code)
         self._ensure_add_row()
+        self._apply_filter(code)
 
     def _on_click(self, event) -> None:
         row = self.tree.identify_row(event.y)
@@ -379,9 +455,14 @@ class PositionsView(ttk.Frame):
     # ── 정렬 ────────────────────────────────────────────────────
 
     def _sort(self, col: str) -> None:
+        """열 기준 정렬 — **숨긴 종목까지 포함해** 순서를 정한다.
+
+        보이는 것만 정렬하면 필터를 풀었을 때 숨어 있던 종목이 제자리를 못 찾아
+        순서가 뒤죽박죽이 된다. 전체 순서를 먼저 확정하고 화면은 그 뒤에 맞춘다.
+        """
         if col in ("chart", "edit", "del"):
             return  # 조작 열은 정렬 대상 아님
-        rows = [iid for iid in self.tree.get_children() if iid not in _SPECIAL]
+        rows = [iid for iid in self._order if self.tree.exists(iid)]
         keyed = [(self.tree.set(iid, col), iid) for iid in rows]
         reverse = self._sort_reverse[col] = not self._sort_reverse.get(col, False)
 
@@ -392,9 +473,8 @@ class PositionsView(ttk.Frame):
             except ValueError:
                 return (1, pair[0])
 
-        for i, (_, iid) in enumerate(sorted(keyed, key=key, reverse=reverse)):
-            self.tree.move(iid, "", i)
-        self._ensure_add_row()
+        self._order = [iid for _, iid in sorted(keyed, key=key, reverse=reverse)]
+        self._relayout()
         for c, base in _BASE_HEADINGS.items():  # 정렬 기준 열에 방향 표시
             if c in ("chart", "edit", "del"):
                 continue

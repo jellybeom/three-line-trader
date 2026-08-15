@@ -39,6 +39,7 @@ try:
 except ImportError:
     DateEntry = None
 from trader.ui.chart_view import ChartView
+from trader.ui.journal_dialog import SearchEntry
 from trader.ui.events_view import EventsView
 from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
@@ -451,8 +452,10 @@ class App(tk.Tk):
     def _build_main_area(self) -> None:
         paned = ttk.PanedWindow(self, orient="vertical")
         paned.pack(fill="both", expand=True, padx=8, pady=(2, 0))
+        monitor = ttk.Frame(paned)
+        self._build_search_bar(monitor)
         self.positions = PositionsView(
-            paned,
+            monitor,
             on_add=self._open_register,
             on_edit=self._open_edit,
             on_reset=self._reset,
@@ -463,13 +466,67 @@ class App(tk.Tk):
             on_carry_position=self._carry_position,
             on_manual_sell=self._manual_sell,
         )
+        self.positions.pack(fill="both", expand=True)
         self.events = EventsView(
             paned,
             on_daily_summary=lambda: self._bus.commands.put(bus.RequestDailySummary()),
             on_journal=self._open_journal,
         )
-        paned.add(self.positions, weight=5)
+        paned.add(monitor, weight=5)
         paned.add(self.events, weight=2)
+        # Ctrl+F 는 **이 창에만** 건다. bind_all 로 걸면 매매일지·등록 창에서 눌러도
+        # 메인 검색줄이 떠, 그 창의 자체 검색을 가로챈다.
+        self.bind("<Control-f>", self._open_search)
+        self.bind("<Control-F>", self._open_search)
+
+    def _build_search_bar(self, parent: ttk.Frame) -> None:
+        """종목 검색줄 — 평소에는 숨어 있고 Ctrl+F 로만 나타난다.
+
+        살아 있는 감시 화면을 가리는 기능이라 늘 띄워 두지 않는다. 대신 **필터가 걸려
+        있으면 절대 사라지지 않는다** — 검색줄이 없는데 종목만 줄어 있으면 왜 안 보이는지
+        알 수 없기 때문이다. 그래서 '검색줄을 닫는 것 = 필터를 푸는 것' 으로 묶었다.
+        """
+        self._search_bar = ttk.Frame(parent)
+        self._search = SearchEntry(
+            self._search_bar, "종목명 또는 종목코드", self._on_search
+        )
+        self._search.pack(side="left", fill="x", expand=True)
+        self._search_count = ttk.Label(
+            self._search_bar, text="", foreground="#616161", width=12, anchor="e"
+        )
+        self._search_count.pack(side="left", padx=(8, 4))
+        ttk.Button(
+            self._search_bar, text="✕", width=2, command=self._close_search
+        ).pack(side="left")
+        # Esc 는 두 단계다. 글자가 있으면 글자만 지우고(필터만 풀림), 비어 있으면 줄을 닫는다.
+        # **검색칸에 포커스가 있을 때만** 반응한다 — 표에서 누른 Esc 로 필터가 풀리면 놀란다.
+        self._search.entry.bind("<Escape>", self._on_search_escape)
+        self._search.entry.bind("<Return>", lambda _e: "break")
+
+    def _open_search(self, _event=None) -> str:
+        self._search_bar.pack(fill="x", pady=(0, 4), before=self.positions)
+        self._search.entry.focus_set()
+        self._search.entry.select_range(0, "end")
+        return "break"
+
+    def _close_search(self, _event=None) -> str:
+        """검색줄을 닫는다 = 필터도 함께 푼다."""
+        self._search.clear()
+        self._search_bar.pack_forget()
+        return "break"
+
+    def _on_search_escape(self, _event=None) -> str:
+        if self._search.get():
+            self._search.clear()  # 1단계: 글자만 지운다 (줄은 남는다)
+        else:
+            self._close_search()  # 2단계: 줄을 닫는다
+        return "break"
+
+    def _on_search(self) -> None:
+        query = self._search.get()
+        shown = self.positions.set_filter(query)
+        total = self.positions.count()
+        self._search_count.configure(text="" if not query else f"{shown}/{total}종목")
 
     def _build_status_bar(self) -> None:
         bar = ttk.Frame(self, padding=(8, 3))

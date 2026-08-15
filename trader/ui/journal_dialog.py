@@ -469,6 +469,9 @@ class JournalDialog(tk.Toplevel):
         self._charts = ttk.Notebook(right)
         self._charts.pack(side="top", fill="both", expand=True)
 
+        # 메인 창과 같은 단축키로 검색칸에 바로 간다 (창마다 자기 것만 반응한다)
+        for sequence in ("<Control-f>", "<Control-F>"):
+            self.bind(sequence, lambda _e: (self._search.entry.focus_set(), "break")[1])
         self._setup_focus_order()
         self._fill_list()
         self.update_idletasks()  # 차트 축소 배율을 실제 배치 크기로 계산하기 위해
