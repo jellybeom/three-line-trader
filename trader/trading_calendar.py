@@ -10,7 +10,58 @@
 
 from __future__ import annotations
 
+import csv
+from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
+
+HOLIDAYS_FILE = Path(__file__).resolve().parents[1] / "holidays.csv"
+
+OPEN = "개장"
+CLOSED = "휴장"
+UNKNOWN = "확인 불가"
+WEEKEND = "주말"
+
+
+@dataclass(frozen=True)
+class MarketDay:
+    """어떤 날짜가 개장일인지 — 사유까지 함께."""
+
+    status: str  # OPEN / CLOSED / UNKNOWN
+    note: str = ""  # 휴장 사유 (주말, 광복절(대체휴일) ...)
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == OPEN
+
+    @property
+    def is_closed(self) -> bool:
+        """**확실히** 휴장인가. 확인 불가는 False — 의심스러우면 여는 쪽으로 둔다."""
+        return self.status == CLOSED
+
+    def label(self) -> str:
+        """'휴장 · 광복절(대체휴일)' — 사유에 이미 괄호가 있어 다시 감싸지 않는다."""
+        return f"{self.status} · {self.note}" if self.note else self.status
+
+
+def load_holidays(path: Path | str | None = None) -> dict[str, str]:
+    """휴장일 목록 (YYYY-MM-DD → 사유). 파일이 없거나 깨지면 빈 목록.
+
+    읽기에 실패해도 예외를 올리지 않는다 — 이 목록이 없다고 매매가 멈추면 안 된다.
+    목록이 비면 '확인 불가' 로 판정되고, 자동 시작 게이트는 평소대로 감시를 켠다.
+    """
+    target = Path(path) if path else HOLIDAYS_FILE
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    rows = [line for line in text.splitlines() if line.strip() and line[0] != "#"]
+    holidays: dict[str, str] = {}
+    for row in csv.DictReader(rows):
+        day = (row.get("date") or "").strip()
+        if _to_date(day) is not None:
+            holidays[day] = (row.get("note") or "").strip()
+    return holidays
 
 
 def _to_date(value: str) -> date | None:
@@ -37,10 +88,68 @@ def weekday_days_between(base: str, target: str) -> int | None:
 class TradingCalendar:
     """실제 거래일 목록. 비어 있으면 주말 기준 근사로 동작한다."""
 
-    def __init__(self, days: list[str] | None = None):
+    def __init__(
+        self, days: list[str] | None = None, holidays: dict[str, str] | None = None
+    ):
         self._days: list[str] = []
         self._index: dict[str, int] = {}
+        self._holidays: dict[str, str] = dict(holidays or {})
+        self._holiday_years: set[str] = {d[:4] for d in self._holidays}
         self.replace(days or [])
+
+    def set_holidays(self, holidays: dict[str, str]) -> None:
+        self._holidays = dict(holidays)
+        self._holiday_years = {d[:4] for d in self._holidays}
+
+    @property
+    def holiday_years(self) -> set[str]:
+        return set(self._holiday_years)
+
+    def market_day(self, day: str) -> MarketDay:
+        """그 날짜가 개장일인지 — 사유까지.
+
+        판정 순서는 **확실한 것부터**다.
+        1. 토·일 → 휴장(주말)
+        2. 그 해 휴장일 목록이 있으면 → 목록에 있으면 휴장(사유), 없으면 개장
+        3. 목록이 없으면 → 지수 일봉 범위 안일 때만 그것으로 판정 (사유는 모른다)
+        4. 둘 다 없으면 → 확인 불가
+
+        목록을 지수 일봉보다 먼저 보는 이유는, 목록이 있으면 그 해 **아무 날짜나**
+        답할 수 있기 때문이다. 지수 일봉은 최근 180일뿐이고 미래는 아예 없다.
+        """
+        parsed = _to_date(day)
+        if parsed is None:
+            return MarketDay(UNKNOWN)
+        if parsed.weekday() >= 5:
+            return MarketDay(CLOSED, WEEKEND)
+        if day[:4] in self._holiday_years:
+            if day in self._holidays:
+                return MarketDay(CLOSED, self._holidays[day] or "휴장일")
+            return MarketDay(OPEN)
+        if self.covers(day):
+            return MarketDay(OPEN if day in self._index else CLOSED)
+        return MarketDay(UNKNOWN)
+
+    def conflicts(self) -> list[str]:
+        """목록은 휴장이라는데 지수 일봉에는 장이 열린 날 — 목록이 낡았다는 신호.
+
+        임시공휴일이 추가되거나 취소됐는데 목록을 갱신하지 않은 경우를 잡는다.
+        """
+        return sorted(d for d in self._index if d in self._holidays)
+
+    def next_open_day(self, day: str, limit: int = 14) -> str:
+        """day 다음의 개장일. 확실히 휴장인 날만 건너뛴다.
+
+        limit 은 무한 루프 방지용이다 — 목록이 이상해도 2주 안에는 반드시 멈춘다.
+        """
+        current = _to_date(day)
+        if current is None:
+            return day
+        for _ in range(limit):
+            current += timedelta(days=1)
+            if not self.market_day(current.isoformat()).is_closed:
+                break
+        return current.isoformat()
 
     def replace(self, days: list[str]) -> None:
         """거래일 목록 교체 (YYYY-MM-DD, 순서 무관 — 정렬해서 보관)."""

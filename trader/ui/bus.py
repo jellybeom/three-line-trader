@@ -108,6 +108,10 @@ class TradeDate:
     """현재 활성 매매일. UI 는 수신 시 테이블을 비우고 이어지는 PositionUpdate 로 다시 채운다."""
 
     date: str  # YYYY-MM-DD
+    # 그 날짜가 개장일인지 — 판정은 코어(휴장일 목록 + 지수 일봉)가 한다.
+    # 화면은 받은 대로 보여주기만 해, 같은 근거로 감시 게이트도 함께 돌게 한다.
+    market: str = ""  # 개장 / 휴장 / 확인 불가 (빈 값이면 표시하지 않는다)
+    market_note: str = ""  # 휴장 사유 (주말, 광복절(대체휴일) ...)
 
 
 @dataclass(frozen=True)

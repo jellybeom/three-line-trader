@@ -54,7 +54,7 @@ from trader.state_machine import (
 )
 from trader.store import Store
 from trader.journal import cycle_timeline, transition_path
-from trader.trading_calendar import TradingCalendar
+from trader.trading_calendar import TradingCalendar, load_holidays
 from trader.ui import bus
 from trader.watcher import Tick, Watcher
 
@@ -147,8 +147,10 @@ def _load_auto_connect(config_path: str) -> bool:
 def _load_schedule(config_path: str) -> dict:
     """config.toml 의 [schedule] — 감시 자동 시작/중지와 일일 요약 발송 시각.
 
-    휴장일 목록은 두지 않는다. 휴장일에는 체결 틱 자체가 없어 감시가 켜져도
-    아무 일도 일어나지 않으므로, 요일만 확인하면 충분하다.
+    휴장일에는 감시를 시작하지 않는다(주말 + holidays.csv 에 적힌 날). 켜져도 체결 틱이
+    없어 손해는 없지만, 로그와 대시보드가 매일 도는 것처럼 보이면 실제로 돈 날과
+    구분되지 않는다. 다만 **확실히 휴장일 때만** 건너뛴다 — 목록이 없거나 판정이 안 되면
+    평소대로 켠다. 개장일에 안 켜면 하루 매매를 통째로 놓치기 때문이다.
 
     **자동화는 일일 요약(15:35)에서 끝난다.** 예전에는 20:05 에 시간외(NXT) 리뷰가
     있었지만, ① 분봉 API(ka10080)가 정규장 범위만 돌려줘 대상이 늘 0종목이었고
@@ -1814,9 +1816,18 @@ class Core:
         if not self._schedule.get("enabled"):
             return
         now = datetime.now()
-        if now.weekday() >= 5:  # 주말
-            return
         today, t = now.date().isoformat(), now.time()
+        market = self._calendar.market_day(today)
+        if market.is_closed:
+            # **확실히 휴장인 날만** 건너뛴다. '확인 불가' 는 여는 쪽으로 둔다 —
+            # 휴장일에 감시를 켜도 체결 틱이 없어 손해가 없지만, 개장일에 안 켜면
+            # 하루 매매를 통째로 놓친다. 실수는 한쪽으로만 나게 만든다.
+            if self._sched_last("holiday") != today:
+                self._sched_mark("holiday", today)
+                self._log(
+                    "시스템", "감시", f"{market.label()} — 감시를 시작하지 않습니다"
+                )
+            return
 
         if (
             self._sched_last("start") != today
@@ -2184,17 +2195,54 @@ class Core:
         return entries, self._store.journal_months()
 
     def _load_calendar(self) -> None:
-        """저장해 둔 거래일 목록 복원 (연결 전에도 D+n 이 맞게 보이도록)."""
+        """휴장일 목록과 저장해 둔 거래일 목록 복원 (연결 전에도 맞게 보이도록)."""
+        self._calendar.set_holidays(load_holidays())
         saved = self._store.get_setting("trading_days", "")
         if saved:
             self._calendar.replace(saved.split(","))
+        self._warn_calendar()
+
+    def _warn_calendar(self) -> None:
+        """휴장일 목록이 낡았거나 없으면 알린다.
+
+        목록이 틀리면 개장일에 감시를 안 켤 수 있다 — 조용히 넘어가면 하루를 통째로
+        놓친다. 다만 경고만 하고 동작은 막지 않는다(게이트는 확실할 때만 건너뛴다).
+        """
+        if conflicts := self._calendar.conflicts():
+            self._log(
+                "시스템",
+                "경고",
+                f"휴장일 목록과 실제 개장일이 다릅니다: {', '.join(conflicts[:5])}"
+                " — holidays.csv 를 확인하세요",
+            )
+        years = self._calendar.holiday_years
+        if not years:
+            self._log(
+                "시스템",
+                "경고",
+                "휴장일 목록(holidays.csv)이 없습니다 — 주말만 휴장으로 봅니다",
+                notify=False,
+            )
+            return
+        # 연말에 다음 해 목록을 미리 챙기도록 (KRX 는 보통 12월 초에 공지한다)
+        today = date.today()
+        if today.month == 12 and today.day >= 15 and str(today.year + 1) not in years:
+            self._log(
+                "시스템",
+                "경고",
+                f"{today.year + 1}년 휴장일 목록이 없습니다 — KRX 공지를 받아"
+                " holidays.csv 아래에 덧붙이세요",
+            )
 
     def _next_trade_date(self) -> str:
-        """다음 영업일 (주말 건너뜀)."""
-        target = date.fromisoformat(self._date) + timedelta(days=1)
-        while target.weekday() >= 5:
-            target += timedelta(days=1)
-        return target.isoformat()
+        """다음 개장일 (주말 + 휴장일 건너뜀).
+
+        예전에는 주말만 건너뛰어, 금요일 보유 종목을 이월하면 대체휴일(월)에 종목이
+        놓였다 — 그날은 장이 없어 감시가 비고, 실제 개장일에는 종목이 없었다
+        (2026-08-17 광복절 대체휴일에서 확인). 휴장일 목록이 없으면 예전대로 주말만
+        건너뛴다.
+        """
+        return self._calendar.next_open_day(self._date)
 
     def _load_date(self, trade_date: str) -> None:
         self._date = trade_date
@@ -2236,7 +2284,8 @@ class Core:
             self._bus.events.put(bus.LogLine(ts, symbol, kind, text))
 
     def _emit_date_loaded(self) -> None:
-        self._bus.events.put(bus.TradeDate(self._date))
+        market = self._calendar.market_day(self._date)
+        self._bus.events.put(bus.TradeDate(self._date, market.status, market.note))
         for symbol in self._entries:
             self._emit_position(symbol)
 

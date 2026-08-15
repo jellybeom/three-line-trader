@@ -350,3 +350,47 @@ def test_검색줄_아래에_조합창_여백이_있다(filled):
     pady = filled._search_bar.pack_info()["pady"]
     bottom = pady[1] if isinstance(pady, (tuple, list)) else int(str(pady).split()[-1])
     assert int(bottom) >= 8
+
+
+# ── 매매일 개장/휴장 표시 ─────────────────────────────────────
+
+
+def test_휴장일은_사유까지_빨갛게_보여준다(app):
+    """달력의 '빨간 날' 관례. 주황은 이 프로그램에서 '진행 중·주의' 를 뜻한다."""
+    app._dispatch(bus.TradeDate("2026-08-17", "휴장", "광복절(대체휴일)"))
+    app.update()
+    assert app._weekday.cget("text") == "(월) · 휴장 · 광복절(대체휴일)"
+    assert str(app._weekday.cget("foreground")) == "#c62828"
+
+
+def test_개장일은_기본색이다(app):
+    app._dispatch(bus.TradeDate("2026-08-18", "개장", ""))
+    app.update()
+    assert app._weekday.cget("text") == "(화) · 개장"
+    assert str(app._weekday.cget("foreground")) == ""
+
+
+def test_확인_불가는_회색이다(app):
+    app._dispatch(bus.TradeDate("2027-03-02", "확인 불가", ""))
+    app.update()
+    assert "확인 불가" in app._weekday.cget("text")
+    assert str(app._weekday.cget("foreground")) == "#9e9e9e"
+
+
+def test_개장_여부를_모르면_요일만_보여준다(app):
+    """옛 이벤트(market 없음)를 받아도 화면이 깨지지 않는다."""
+    app._dispatch(bus.TradeDate("2026-08-18"))
+    app.update()
+    assert app._weekday.cget("text") == "(화)"
+
+
+def test_날짜를_넘겨도_폭이_변하지_않는다(app):
+    """폭이 들쭉날쭉하면 옆 그룹(키움·Discord·자금)이 밀린다."""
+    app._dispatch(bus.TradeDate("2026-08-17", "휴장", "광복절(대체휴일)"))
+    app.update()
+    app.update_idletasks()
+    wide = app._weekday.winfo_width()
+    app._dispatch(bus.TradeDate("2026-08-18", "개장", ""))
+    app.update()
+    app.update_idletasks()
+    assert app._weekday.winfo_width() == wide

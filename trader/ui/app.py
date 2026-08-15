@@ -44,6 +44,12 @@ from trader.ui.events_view import EventsView
 from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
 
+# 휴장은 달력의 '빨간 날' 관례를 따른다. 주황은 이 프로그램에서 '진행 중·주의'(연결 중,
+# 3선 미입력)를 뜻해, 확정된 사실인 휴장에는 맞지 않는다.
+_MARKET_COLORS = {"개장": "", "휴장": "#c62828", "확인 불가": "#9e9e9e"}
+_MARKET_CHARS = (
+    22  # 매매일 아래 개장/휴장 줄의 고정 폭 — "(월) · 휴장 (광복절(대체휴일))" 기준
+)
 _SEARCH_CHARS = 18  # 검색 입력칸 폭(글자 수) — 종목명은 대개 이보다 짧다
 _IME_GAP_PX = 10  # 한글 조합 창이 표 머리글을 덮지 않도록 검색줄 아래 두는 여백
 _POLL_MS = 200
@@ -315,7 +321,9 @@ class App(tk.Tk):
             line, text="▶", width=2, command=lambda: self._shift_date(1)
         )
         self._date_next.pack(side="left", padx=(3, 0))
-        self._weekday = ttk.Label(box, text="-", anchor="center")
+        # 폭을 고정한다. 날짜를 넘길 때마다 글자 길이가 달라지면 그룹 폭이 늘었다 줄었다
+        # 하며 옆 그룹(키움·Discord·자금)이 밀린다.
+        self._weekday = ttk.Label(box, text="-", anchor="center", width=_MARKET_CHARS)
         self._weekday.pack(fill="x")
 
         g_kiwoom = ttk.LabelFrame(row, text="키움증권 API", padding=(10, 2, 10, 6))
@@ -844,16 +852,22 @@ class App(tk.Tk):
             return
         self._bus.commands.put(bus.SetTradeDate(d))
 
-    def _set_date_display(self, d: str) -> None:
+    def _set_date_display(self, d: str, market: str = "", note: str = "") -> None:
         dt = datetime.strptime(d, "%Y-%m-%d")
         if self._date_picker:
             self._date_picker.set_date(dt)
         else:
             self._date_var.set(d)
         weekday = "월화수목금토일"[dt.weekday()]
-        self._weekday.configure(
-            text=f"({weekday})", foreground="#f9a825" if dt.weekday() >= 5 else ""
-        )  # 주말이면 주황 경고
+        # 개장 여부는 코어가 판정해 보내준다(휴장일 목록 + 지수 일봉). 화면은 받은 대로
+        # 보여주기만 한다 — 감시 게이트와 같은 근거를 써야 화면과 동작이 어긋나지 않는다.
+        text = f"({weekday})"
+        color = ""
+        if market:
+            # 사유에 이미 괄호가 있어(광복절(대체휴일)) 다시 감싸면 겹쳐 보인다
+            text += f" · {market}" + (f" · {note}" if note else "")
+            color = _MARKET_COLORS.get(market, "")
+        self._weekday.configure(text=text, foreground=color)
 
     def _manual_sell(self, symbol: str) -> None:
         if symbol in self._staged or symbol not in self._registry:
@@ -1085,9 +1099,9 @@ class App(tk.Tk):
                     self._funds_vars[f"rate{i}"].set(f"{f.tp_rates[i - 1] * 100:g}")
                     self._funds_vars[f"ratio{i}"].set(f"{f.tp_ratios[i - 1] * 100:g}")
                 self._per_symbol.configure(text=f"{int(f.total // f.max_symbols):,}")
-            case bus.TradeDate(date=d):
+            case bus.TradeDate(date=d, market=market, market_note=note):
                 self._current_date = d
-                self._set_date_display(d)
+                self._set_date_display(d, market, note)
                 self.events.clear_view()
                 self._staged.clear()
                 self._registry.clear()
