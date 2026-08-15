@@ -64,6 +64,10 @@ _PENDING_WARN_SEC = 90  # 체결통보 미도착 경고 기준 (아직 정상 �
 _PENDING_RECOVER_SEC = 420  # 7분
 _PENDING_PROBE_SEC = 20  # 이 시간이 지나면 REST(ka10076)로 체결 여부를 직접 확인
 _PENDING_PROBE_EVERY_SEC = 15  # REST 재확인 간격 (조회 자체가 실패할 수도 있다)
+_COST_DIFF_WON = 100  # 거래비용 대조에서 알릴 최소 차이
+_PNL_DIFF_WON = (
+    1_000  # 세후 손익 대조에서 알릴 최소 차이 (평단 계산 차이로 늘 몇백 원은 난다)
+)
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
@@ -1915,57 +1919,138 @@ class Core:
     async def reconcile_broker(self) -> list[str]:
         """프로그램이 계산한 손익·비용을 **증권사 실측값과 대조**한다 (읽기 전용).
 
-        - ka10076 체결요청: 실제 체결 건수와 수수료·세금 합계
+        - ka10076 체결요청: 실제 체결 내역과 수수료·세금
         - ka10072 일자별종목별실현손익: 세후 실현손익 (매도가 있어야 나온다)
 
-        차이가 나면 알려만 준다. 자동으로 맞추지 않는 이유는, 어느 쪽이 맞는지 모르는 채로
-        덮어쓰면 원인을 영영 못 찾기 때문이다. 수수료는 추정치(요율 × 금액)를 쓰고 있어
-        실측과 몇 원씩 어긋나는 것이 정상이므로, **의미 있는 차이만** 보고한다.
+        돌려주는 것은 요약에 실을 **한 줄 정리**이고, 원인을 찾는 데 필요한 종목별 원자료는
+        로그에 남긴다. 합계만 비교하면 어디서 어긋났는지 알 수 없어 원인 규명이 안 된다
+        (2026-08-14: 비용 차이를 반영해도 2,387원이 설명되지 않았다).
 
-        조회 실패는 조용히 넘어간다 — 요약 발송 자체를 막을 만한 일이 아니다.
+        차이가 나도 자동으로 맞추지 않는다 — 어느 쪽이 맞는지 모르는 채로 덮어쓰면
+        원인을 영영 못 찾는다. 조회 실패는 조용히 넘어간다(요약 발송을 막을 일이 아니다).
         """
         if self._broker is None:
             return []
-        lines: list[str] = []
         symbols, fills = self._store.daily_report(self._date)
-        broker_fills = None
-        try:  # 시뮬레이터에는 조회 API 가 없다
-            if hasattr(self._broker, "filled_orders"):
-                broker_fills = await asyncio.to_thread(self._broker.filled_orders)
-        except BrokerError as err:
-            self._log("시스템", "경고", f"체결 대조 실패: {err}", notify=False)
-            broker_fills = None
+        broker_fills = await self._query_broker("filled_orders", "체결")
+        realized = await self._query_broker(
+            "realized_pnl", "실현손익", self._date.replace("-", "")
+        )
+        lines: list[str] = []
         if broker_fills is not None:
-            mine = {s["symbol"] for s in symbols}
-            # 이 프로그램이 다루는 종목만 본다 (직접 매매한 다른 종목이 섞일 수 있다)
-            relevant = [f for f in broker_fills if f["symbol"] in mine]
-            if len(relevant) != len(fills):
-                lines.append(
-                    f"체결 건수 프로그램 {len(fills)}건 · 증권사 {len(relevant)}건"
-                )
-            cost = sum(f["commission"] + f["tax"] for f in relevant)
-            estimated = sum(s["fees"] for s in symbols)
-            if cost and abs(cost - estimated) >= max(100.0, estimated * 0.05):
-                lines.append(f"거래비용 추정 {estimated:,.0f}원 · 실측 {cost:,.0f}원")
-
-        realized = None
-        try:
-            if hasattr(self._broker, "realized_pnl"):
-                realized = await asyncio.to_thread(
-                    self._broker.realized_pnl, self._date.replace("-", "")
-                )
-        except BrokerError as err:
-            self._log("시스템", "경고", f"실현손익 대조 실패: {err}", notify=False)
-            realized = None
+            lines += self._reconcile_cost(symbols, fills, broker_fills)
         if realized is not None:
-            broker_net = sum(r["pnl"] for r in realized)
-            my_net = sum(s["realized_pnl"] - s["fees"] for s in symbols)
-            if abs(broker_net - my_net) >= max(100.0, abs(my_net) * 0.02):
-                lines.append(
-                    f"세후 실현손익 프로그램 {my_net:+,.0f}원 · "
-                    f"증권사 {broker_net:+,.0f}원"
-                )
+            lines += self._reconcile_pnl(symbols, realized)
         return lines
+
+    async def _query_broker(self, method: str, label: str, *args):
+        """대조용 조회 한 건. 실패하면 None (시뮬레이터에는 아예 없을 수도 있다)."""
+        if not hasattr(self._broker, method):
+            return None
+        try:
+            return await asyncio.to_thread(getattr(self._broker, method), *args)
+        except BrokerError as err:
+            self._log("시스템", "경고", f"{label} 대조 실패: {err}", notify=False)
+            return None
+
+    def _reconcile_cost(
+        self, symbols: list[dict], fills: list[dict], broker_fills: list[dict]
+    ) -> list[str]:
+        """거래비용·체결 건수 대조. 종목별 내역은 로그로 남긴다."""
+        mine = {s["symbol"] for s in symbols}
+        # 이 프로그램이 다루지 않는 종목은 뺀다 (계좌에서 직접 매매했을 수 있다)
+        relevant = [f for f in broker_fills if f["symbol"] in mine]
+        if extra := [f for f in broker_fills if f["symbol"] not in mine]:
+            self._log(
+                "시스템",
+                "경고",
+                "대조: 프로그램이 모르는 체결 "
+                + ", ".join(f"{f['symbol']} {f['side']} {f['qty']}주" for f in extra),
+                notify=False,
+            )
+        cost = sum(f["commission"] + f["tax"] for f in relevant)
+        estimated = sum(s["fees"] for s in symbols)
+        self._log(
+            "시스템",
+            "대조",
+            f"비용 추정 {estimated:,.0f} · 실측 {cost:,.0f}"
+            f" (수수료 {sum(f['commission'] for f in relevant):,.0f}"
+            f" · 세금 {sum(f['tax'] for f in relevant):,.0f})"
+            f" · 체결 프로그램 {len(fills)}건 · 증권사 {len(relevant)}건",
+            notify=False,
+        )
+        lines = []
+        if len(relevant) != len(fills):
+            lines.append(
+                f"체결 건수 프로그램 {len(fills)}건 · 증권사 {len(relevant)}건"
+            )
+        if cost and abs(cost - estimated) >= max(_COST_DIFF_WON, estimated * 0.05):
+            lines.append(f"거래비용 추정 {estimated:,.0f}원 · 실측 {cost:,.0f}원")
+        return lines
+
+    def _reconcile_pnl(self, symbols: list[dict], realized: list[dict]) -> list[str]:
+        """세후 실현손익 대조 — **종목별로** 비교해 어긋난 곳을 특정한다.
+
+        ka10072 는 매입단가(buy_uv)까지 주므로, 프로그램 평단과 나란히 찍어 두면
+        '증권사가 매수 수수료를 평단에 포함시켜서' 인지 아닌지 바로 가려진다.
+        """
+        by_symbol: dict[str, dict] = {}
+        for row in realized:  # 같은 종목이 여러 줄로 올 수 있다 (분할 매도)
+            acc = by_symbol.setdefault(
+                row["symbol"], {"pnl": 0.0, "qty": 0, "buy": 0.0, "amount": 0.0}
+            )
+            acc["pnl"] += row["pnl"]
+            acc["qty"] += row["qty"]
+            acc["buy"] += row["buy_price"] * row["qty"]
+            acc["amount"] += row["sell_price"] * row["qty"]
+
+        mine = {s["symbol"]: s for s in symbols}
+        details = []
+        for symbol in sorted(set(mine) | set(by_symbol)):
+            ours = mine.get(symbol)
+            theirs = by_symbol.get(symbol)
+            my_net = (ours["realized_pnl"] - ours["fees"]) if ours else 0.0
+            their_net = theirs["pnl"] if theirs else 0.0
+            if abs(my_net) < 1 and abs(their_net) < 1:
+                continue  # 오늘 청산이 없던 종목
+            note = f"{ours['name'] if ours else symbol}({symbol})"
+            note += f" 프로그램 {my_net:+,.0f}"
+            note += f" · 증권사 {their_net:+,.0f}" if theirs else " · 증권사 없음"
+            if theirs and ours:
+                note += f" (Δ{their_net - my_net:+,.0f})"
+                avg = theirs["buy"] / theirs["qty"] if theirs["qty"] else 0.0
+                note += f" · 평단 {ours['avg_price']:,.2f} vs {avg:,.2f}"
+                note += f" · 수량 {theirs['qty']}"
+            if not ours:
+                note += " · 프로그램에 없는 종목"
+            details.append(note)
+        if details:
+            self._log("시스템", "대조", "실현손익 " + " | ".join(details), notify=False)
+
+        broker_net = sum(v["pnl"] for v in by_symbol.values())
+        my_net = sum(s["realized_pnl"] - s["fees"] for s in symbols)
+        gap = broker_net - my_net
+        if abs(gap) < max(_PNL_DIFF_WON, abs(my_net) * 0.02):
+            return []
+        # 어느 종목이 가장 크게 어긋났는지 한 줄에 같이 적는다 (로그를 안 봐도 감이 오도록)
+        worst = ""
+        if by_symbol:
+            worst_symbol = max(
+                set(mine) | set(by_symbol),
+                key=lambda c: abs(
+                    by_symbol.get(c, {}).get("pnl", 0.0)
+                    - (
+                        (mine[c]["realized_pnl"] - mine[c]["fees"])
+                        if c in mine
+                        else 0.0
+                    )
+                ),
+            )
+            name = mine[worst_symbol]["name"] if worst_symbol in mine else worst_symbol
+            worst = f" (차이 최대: {name})"
+        return [
+            f"세후 실현손익 프로그램 {my_net:+,.0f}원 · 증권사 {broker_net:+,.0f}원{worst}"
+        ]
 
     async def send_daily_summary(self) -> None:
         """하루 매매 요약을 Discord 로 발송한다 (알림 수준과 무관하게 항상 발송)."""
@@ -2000,13 +2085,18 @@ class Core:
         holding = [s for s in symbols if s["total_bought"] > 0 and s["state"] != "종료"]
         # 증권사 실측 대조 — 차이가 있을 때만 한 줄 붙는다 (평소에는 아무것도 안 보인다)
         if fills and (diffs := await self.reconcile_broker()):
-            embed.setdefault("fields", []).append(
-                {
-                    "name": "⚖️ 증권사 대조 — 확인 필요",
-                    "value": "\n".join(diffs),
-                    "inline": False,
-                }
-            )
+            # 거래비용 차이는 설정 요율 문제라 매일 같은 내용이 뜬다 — 요약에 넣으면
+            # 곧 무시하게 되므로 로그에만 남기고, **헤드라인 손익을 반박하는 차이만**
+            # 요약에 싣는다(2026-08-14 판단).
+            urgent = [d for d in diffs if not d.startswith("거래비용")]
+            if urgent:
+                embed.setdefault("fields", []).append(
+                    {
+                        "name": "⚖️ 증권사 대조 — 확인 필요",
+                        "value": "\n".join(urgent),
+                        "inline": False,
+                    }
+                )
             self._log(
                 "시스템", "경고", "증권사 대조 차이: " + " / ".join(diffs), notify=False
             )

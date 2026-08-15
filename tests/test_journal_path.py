@@ -1139,3 +1139,118 @@ def test_선택_위젯은_프로그램의_다른_곳과_같은_모양이다(peri
     ]:
         assert button.winfo_class() == "TRadiobutton"
         assert button.cget("style") == ""  # 별도 스타일을 입히지 않는다
+
+
+# ── 증권사 대조 ───────────────────────────────────────────────
+
+
+def _core():
+    from trader.core import Core
+
+    core = Core.__new__(Core)
+    core._date = "2026-08-14"
+    core.logs = []
+    core._log = lambda sym, kind, text, notify=True: core.logs.append((kind, text))
+    return core
+
+
+def _mine(symbol, name, pre, fees, avg=10_000):
+    return {
+        "symbol": symbol,
+        "name": name,
+        "realized_pnl": pre,
+        "fees": fees,
+        "avg_price": avg,
+    }
+
+
+def _theirs(symbol, pnl, qty=10, buy=10_000, sell=11_000):
+    return {
+        "symbol": symbol,
+        "pnl": pnl,
+        "qty": qty,
+        "buy_price": buy,
+        "sell_price": sell,
+    }
+
+
+def test_작은_차이는_알리지_않는다():
+    """평단 계산 방식 차이로 몇백 원은 늘 난다 — 매일 울리면 무시하게 된다."""
+    core = _core()
+    lines = core._reconcile_pnl(
+        [_mine("005930", "삼성전자", 10_000, 500)], [_theirs("005930", 9_200)]
+    )
+    assert lines == []
+
+
+def test_큰_차이는_알리고_어느_종목인지_알려준다():
+    core = _core()
+    lines = core._reconcile_pnl(
+        [
+            _mine("005930", "삼성전자", 10_000, 500),
+            _mine("079650", "서산", -16_170, 700),
+        ],
+        [_theirs("005930", 9_500), _theirs("079650", -19_100)],
+    )
+    assert len(lines) == 1
+    assert "서산" in lines[0]  # 가장 크게 어긋난 종목
+    assert "-19,724" not in lines[0]  # 합계는 두 쪽 다 적힌다
+    assert "프로그램" in lines[0] and "증권사" in lines[0]
+
+
+def test_종목별_내역이_로그에_남는다():
+    """합계만 비교하면 어디서 어긋났는지 알 수 없어 원인 규명이 안 된다."""
+    core = _core()
+    core._reconcile_pnl(
+        [_mine("079650", "서산", -16_170, 700, avg=5_250)],
+        [_theirs("079650", -19_100, qty=77, buy=5_288, sell=5_040)],
+    )
+    detail = next(text for kind, text in core.logs if kind == "대조")
+    assert "서산(079650)" in detail
+    assert (
+        "평단 5,250.00 vs 5,288.00" in detail
+    )  # 매입단가 비교 (수수료 포함 여부 판별)
+    assert "수량 77" in detail
+    assert "Δ" in detail
+
+
+def test_프로그램이_모르는_종목을_짚어준다():
+    """ka10072 가 다른 날·다른 종목을 섞어 주는지 확인하는 단서다."""
+    core = _core()
+    core._reconcile_pnl(
+        [_mine("005930", "삼성전자", 10_000, 500)], [_theirs("999999", 480)]
+    )
+    detail = next(text for kind, text in core.logs if kind == "대조")
+    assert "프로그램에 없는 종목" in detail
+
+
+def test_분할_매도는_한_종목으로_합친다():
+    """ka10072 는 매도 건마다 줄이 나뉘어 온다."""
+    core = _core()
+    core._reconcile_pnl(
+        [_mine("123330", "제닉", 9_050, 343)],
+        [_theirs("123330", 3_000, qty=2), _theirs("123330", 5_630, qty=4)],
+    )
+    detail = next(text for kind, text in core.logs if kind == "대조")
+    assert detail.count("제닉") == 1
+    assert "수량 6" in detail
+
+
+def test_청산이_없는_종목은_빼고_본다():
+    """보유만 한 종목까지 적으면 로그가 길어져 정작 볼 것이 묻힌다."""
+    core = _core()
+    core._reconcile_pnl([_mine("005930", "삼성전자", 0, 0)], [])
+    assert not [text for kind, text in core.logs if kind == "대조"]
+
+
+def test_거래비용_차이는_로그에만_남긴다():
+    """설정 요율 문제라 매일 같은 내용이 뜬다 — 요약에 넣으면 곧 무시하게 된다."""
+    core = _core()
+    lines = core._reconcile_cost(
+        [_mine("005930", "삼성전자", 10_000, 2_972)],
+        [{"symbol": "005930"}],
+        [{"symbol": "005930", "commission": 1_056, "tax": 2_223}],
+    )
+    assert any(line.startswith("거래비용") for line in lines)
+    logged = next(text for kind, text in core.logs if kind == "대조")
+    assert "수수료 1,056" in logged and "세금 2,223" in logged
