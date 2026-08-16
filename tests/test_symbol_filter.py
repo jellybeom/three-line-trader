@@ -348,13 +348,18 @@ def test_닫기와_지우기는_모양으로_구분된다(filled):
         assert clear.cget("text") == "✕"  # 아이콘을 못 읽으면 글자로 물러난다
 
 
-def test_검색줄_아래에_조합창_여백이_있다(filled):
-    """한글 조합 창(OS 가 그린다)이 표 머리글을 덮지 않도록."""
+def test_검색줄과_표_사이에_최소_간격만_둔다(filled):
+    """붙여 놓으면 입력칸 테두리와 표 머리글이 한 선처럼 보인다.
+
+    예전에는 한글 조합 창을 피하려고 10px 를 뒀는데 검색줄이 세로를 너무 먹었다
+    (2026-08-18 피드백). 조합 중 머리글에 잠깐 걸칠 수 있지만 머리글은 가려도
+    잃는 정보가 없어 세로 공간을 택했다.
+    """
     filled._open_search()
     filled.update()
     pady = filled._search_bar.pack_info()["pady"]
     bottom = pady[1] if isinstance(pady, (tuple, list)) else int(str(pady).split()[-1])
-    assert int(bottom) >= 8
+    assert 1 <= int(bottom) <= 4
 
 
 # ── 매매일 개장/휴장 표시 ─────────────────────────────────────
@@ -496,11 +501,17 @@ def test_검색줄은_입력칸보다_두꺼워지지_않는다(filled):
     검색줄은 표 위에 얹히는 보조 도구라 세로로 얇을수록 좋다(2026-08-18 피드백:
     28px → 22px).
     """
+    filled.update_idletasks()
+    before = filled.positions.winfo_height()
     filled._open_search()
     filled.update()
     filled.update_idletasks()
     entry_height = filled._search.entry.winfo_height()
+
     for widget in filled._search_bar.winfo_children():
         if widget.winfo_class() == "TButton":
             assert widget.winfo_height() <= entry_height + 2
     assert filled._search_bar.winfo_height() <= entry_height + 2
+    # 줄 자체뿐 아니라 **표에서 실제로 뺏는 세로**를 본다 (아래 여백까지 포함)
+    taken = before - filled.positions.winfo_height()
+    assert taken <= entry_height + 6, f"검색줄이 {taken}px 를 차지한다"
