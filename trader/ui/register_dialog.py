@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import datetime as dt
 import tkinter as tk
-from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
@@ -27,6 +26,7 @@ except ImportError:  # 미설치 환경에서는 직접 입력으로 대체
 
 from trader.state_machine import Params, Position, State  # noqa: F401
 from trader.ui import bus
+from trader.ui.icons import apply_icon
 
 # 종목 선정 근거 — 기준봉(급등일) 시점의 시장·종목 성격 판단.
 # 사후 평가가 아니라 **사전 가설**이라, 나중에 태그별 성적을 집계하면
@@ -41,7 +41,6 @@ SELECTION_TAGS = (
 )
 
 _HOLDING_STATES = [s for s in State if s not in (State.WAITING, State.CLOSED)]
-_ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 
 
 class RegisterDialog(tk.Toplevel):
@@ -60,10 +59,7 @@ class RegisterDialog(tk.Toplevel):
         super().__init__(master)
         self._edit_mode = edit is not None
         self.title("종목 편집" if self._edit_mode else "종목 추가")
-        try:
-            self.iconbitmap(_ICON)  # 메인 창과 아이콘 통일
-        except tk.TclError:
-            pass
+        apply_icon(self)  # 메인 창과 아이콘 통일 (실패는 안에서 삼킨다)
         self.resizable(False, False)
         self.grab_set()  # 모달
         self._on_submit = on_submit

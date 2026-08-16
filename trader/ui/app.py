@@ -22,7 +22,6 @@ import sys
 import tkinter as tk
 import traceback
 from datetime import datetime, time as dtime, timedelta
-from pathlib import Path
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from trader.state_machine import State
@@ -41,6 +40,7 @@ except ImportError:
 from trader.ui.chart_view import ChartView
 from trader.ui.journal_dialog import SearchEntry
 from trader.ui.events_view import EventsView
+from trader.ui.icons import apply_icon
 from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
 
@@ -193,9 +193,6 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
             seen.add(code)
             result.append((code, name or code, "", None, "", ""))
     return result
-
-
-_ASSETS = Path(__file__).resolve().parents[2] / "assets"
 
 
 def _width_in_chars(widget, sample: str) -> int:
@@ -528,10 +525,10 @@ class App(tk.Tk):
             self._search_bar, text="", foreground="#616161", width=12
         )
         self._search_count.pack(side="left", padx=(10, 0))
-        # 오른쪽 끝에 '닫기'. 입력칸 옆 ✕(글자 지우기)와 역할이 달라 글자로 구분한다 —
-        # ✕ 가 둘이면 어느 쪽이 무엇인지 알 수 없다.
+        # 오른쪽 끝 ✕ 는 **검색줄 닫기**. 입력칸 옆의 '내용 지우기' 는 아이콘이라
+        # 같은 ✕ 가 둘 있는 혼란이 없다.
         ttk.Button(
-            self._search_bar, text="닫기", width=5, command=self._close_search
+            self._search_bar, text="✕", width=3, command=self._close_search
         ).pack(side="right", padx=(6, 2))
         # Esc 는 두 단계다. 글자가 있으면 글자만 지우고(필터만 풀림), 비어 있으면 줄을 닫는다.
         # **검색칸에 포커스가 있을 때만** 반응한다 — 표에서 누른 Esc 로 필터가 풀리면 놀란다.
@@ -576,14 +573,8 @@ class App(tk.Tk):
         self._summary.pack(side="right")
 
     def _set_icon(self) -> None:
-        """윈도우 아이콘: Windows 는 .ico, 그 외 플랫폼은 .png 로 적용."""
-        try:
-            self.iconbitmap(_ASSETS / "three-line-trader.ico")
-        except tk.TclError:
-            png = _ASSETS / "three-line-trader-512.png"
-            if png.exists():
-                self._icon_image = tk.PhotoImage(file=png)  # GC 방지로 참조 유지
-                self.iconphoto(True, self._icon_image)
+        """창 아이콘 — 모든 창이 같은 것을 쓴다 (trader.ui.icons 참고)."""
+        apply_icon(self)
 
     # ── 사용자 조작 → 명령 큐 ───────────────────────────────────
 
@@ -975,6 +966,7 @@ class App(tk.Tk):
         """생성된 PNG 를 탭 2개짜리 창으로 표시 (휠 확대·드래그 이동)."""
         win = tk.Toplevel(self)
         win.title(f"{name}({symbol}) 복기 차트")
+        apply_icon(win)
         win.geometry("980x900")
         notebook = ttk.Notebook(win)
         notebook.pack(fill="both", expand=True)

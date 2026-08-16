@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import datetime as dt
 import tkinter as tk
-from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
 from trader.journal import transition_path  # 재수출 — 창에서 경로 문자열을 쓴다
 from trader.ui.chart_view import ChartView
+from trader.ui.icons import CLEAR_ICON, CLEAR_ICON_OFF, apply_icon, load_photo
 
 __all__ = [
     "JournalDialog",
@@ -27,8 +27,6 @@ __all__ = [
     "summarize",
     "transition_path",
 ]
-
-_ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader.ico"
 
 _TEXT_LINES = 4  # 잘한 점 · 아쉬운 점 입력칸 줄 수 (둘은 항상 같아야 한다)
 _IME_GAP = 10  # 한글 조합 창이 아래 위젯을 덮지 않도록 검색칸 밑에 두는 여백 (px)
@@ -118,9 +116,16 @@ class SearchEntry(ttk.Frame):
         # ✕ 를 **먼저** 오른쪽에 붙인 뒤 입력칸이 남는 자리를 채우게 한다.
         # 순서를 바꾸면(입력칸 expand → 버튼) 버튼이 들어갈 자리가 남지 않아
         # 폭 0 으로 찌그러져 화면에 보이지 않는다(2026-08-12).
-        self._clear = ttk.Button(
-            self, text="✕", width=2, command=self.clear, takefocus=False
-        )
+        # 입력 내용을 지우는 버튼. 창을 닫는 ✕ 와 **모양으로** 구분되도록 아이콘을 쓴다
+        # (✕ 가 둘이면 어느 쪽이 무엇인지 알 수 없다). 아이콘을 못 읽으면 글자로 물러난다.
+        # self 에 담아 참조를 유지한다 (버튼에 붙이는 것만으로는 회수된다)
+        self._clear_on = load_photo(CLEAR_ICON, self)
+        self._clear_off = load_photo(CLEAR_ICON_OFF, self)
+        self._clear = ttk.Button(self, command=self.clear, takefocus=False)
+        if self._clear_on is not None:
+            self._clear.configure(image=self._clear_on, width=3)
+        else:
+            self._clear.configure(text="✕", width=2)
         self._clear.pack(side="right", padx=(4, 0))
         # 입력 감지는 **변수 변경**으로 한다. KeyRelease 에만 걸면 한글 조합이 확정되는
         # 순간(다음 글자 입력·포커스 이동)을 놓쳐, 마지막 글자가 반영되지 않는다.
@@ -203,12 +208,18 @@ class SearchEntry(ttk.Frame):
         self._on_change()
 
     def _sync_button(self) -> None:
-        """지울 것이 없으면 ✕ 를 눌리지 않게 한다.
+        """지울 것이 없으면 눌리지 않게 한다.
 
         숨기지 않고 흐리게만 둔다 — 숨겼다 보였다 하면 입력칸 폭이 그때마다 달라져
         글자가 밀린다. 자리는 늘 잡아두고 상태만 바꾼다.
+
+        아이콘은 테마에 따라 비활성 상태에서도 그대로 진하게 나오므로, 흐린 그림으로
+        직접 바꿔 준다.
         """
-        self._clear.state(["!disabled"] if self.get() else ["disabled"])
+        active = bool(self.get())
+        self._clear.state(["!disabled"] if active else ["disabled"])
+        if self._clear_on is not None and self._clear_off is not None:
+            self._clear.configure(image=self._clear_on if active else self._clear_off)
 
 
 def net_pnl(entry: dict) -> float:
@@ -335,11 +346,7 @@ class JournalDialog(tk.Toplevel):
         super().__init__(master)
         self.title("매매일지")
         self.geometry("1180x760")
-        if _ICON.exists():
-            try:
-                self.iconbitmap(str(_ICON))
-            except tk.TclError:
-                pass
+        apply_icon(self)
 
         self._entries = entries
         self._visible = entries  # 검색·필터를 통과해 지금 목록에 보이는 것

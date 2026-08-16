@@ -331,16 +331,21 @@ def test_입력칸이_창_너비만큼_늘어나지_않는다(filled):
     assert filled._search.winfo_width() < filled.winfo_width() // 3
 
 
-def test_닫기와_지우기는_글자로_구분된다(filled):
-    """✕ 가 둘이면 어느 쪽이 무엇인지 알 수 없다."""
+def test_닫기와_지우기는_모양으로_구분된다(filled):
+    """✕ 가 둘이면 어느 쪽이 무엇인지 알 수 없다 — 지우기는 아이콘을 쓴다."""
     buttons = [
         w.cget("text")
         for w in filled._search_bar.winfo_children()
         if w.winfo_class() == "TButton"
     ]
-    assert "닫기" in buttons
-    assert "✕" not in buttons  # 줄에 직접 붙은 ✕ 는 없다
-    assert filled._search._clear.cget("text") == "✕"  # 입력칸 옆 ✕ 는 글자 지우기
+    assert buttons == ["✕"]  # 줄에 직접 붙은 버튼은 '닫기' 하나뿐
+
+    clear = filled._search._clear
+    if filled._search._clear_on is not None:
+        assert "pyimage" in str(clear.cget("image"))  # 아이콘이 붙어 있다
+        assert clear.cget("text") == ""  # 글자와 겹쳐 보이지 않는다
+    else:
+        assert clear.cget("text") == "✕"  # 아이콘을 못 읽으면 글자로 물러난다
 
 
 def test_검색줄_아래에_조합창_여백이_있다(filled):
@@ -430,3 +435,56 @@ def test_폭_계산은_폰트를_실측한다():
         chars = _width_in_chars(label, _MARKET_SAMPLE)
         assert chars * font.measure("0") >= font.measure(longest)
     root.destroy()
+
+
+# ── 창 아이콘 ─────────────────────────────────────────────────
+
+
+def test_모든_창에_같은_아이콘이_붙는다(app):
+    """새 창을 만들 때 아이콘을 빠뜨리기 쉬워, 한 곳에서 관리한다.
+
+    실제로 복기 차트 창에는 아이콘이 없었고 매매일지·등록 창은 `.ico` 만 시도해
+    Windows 밖에서는 조용히 실패했다(2026-08-18 점검).
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "trader" / "ui"
+    for path in root.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        # Toplevel 을 만들거나 상속하는 파일은 apply_icon 을 써야 한다
+        makes_window = re.search(r"tk\.Toplevel\(|\(tk\.Toplevel\)|\(tk\.Tk\)", source)
+        if makes_window:
+            assert "apply_icon" in source, f"{path.name} 에 창 아이콘이 없다"
+
+
+def test_아이콘_파일이_실제로_있다():
+    from trader.ui.icons import CLEAR_ICON, CLEAR_ICON_OFF
+
+    assert CLEAR_ICON.exists()
+    assert CLEAR_ICON_OFF.exists()
+
+
+def test_아이콘이_없어도_창은_뜬다(app, tmp_path):
+    """아이콘은 있으면 좋은 것이지 창을 못 띄울 이유가 아니다."""
+    from trader.ui.icons import apply_icon, load_photo
+
+    assert load_photo(tmp_path / "없는파일.png") is None
+    apply_icon(app)  # 예외가 나지 않는다
+
+
+def test_지우기_아이콘은_비활성일_때_흐려진다(filled):
+    """테마에 따라 비활성 상태에서도 그림이 그대로 진하게 나온다."""
+    search = filled._search
+    if search._clear_on is None:
+        pytest.skip("아이콘을 못 읽는 환경")
+    filled._open_search()
+    filled.update()
+    # cget("image") 는 튜플로 온다 — 이름만 뽑아 비교한다
+    assert str(search._clear_off) in str(search._clear.cget("image"))
+    assert "disabled" in search._clear.state()
+
+    search.entry.insert(0, "서")
+    filled.update()
+    assert str(search._clear_on) in str(search._clear.cget("image"))
+    assert "disabled" not in search._clear.state()
