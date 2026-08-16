@@ -488,3 +488,19 @@ def test_지우기_아이콘은_비활성일_때_흐려진다(filled):
     filled.update()
     assert str(search._clear_on) in str(search._clear.cget("image"))
     assert "disabled" not in search._clear.state()
+
+
+def test_검색줄은_입력칸보다_두꺼워지지_않는다(filled):
+    """기본 버튼은 위아래 여백이 붙어 입력칸보다 커지고, 그만큼 줄이 두꺼워진다.
+
+    검색줄은 표 위에 얹히는 보조 도구라 세로로 얇을수록 좋다(2026-08-18 피드백:
+    28px → 22px).
+    """
+    filled._open_search()
+    filled.update()
+    filled.update_idletasks()
+    entry_height = filled._search.entry.winfo_height()
+    for widget in filled._search_bar.winfo_children():
+        if widget.winfo_class() == "TButton":
+            assert widget.winfo_height() <= entry_height + 2
+    assert filled._search_bar.winfo_height() <= entry_height + 2

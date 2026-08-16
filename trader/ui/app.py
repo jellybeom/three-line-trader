@@ -514,6 +514,9 @@ class App(tk.Tk):
         그 창이 표의 머리글을 덮는다.
         """
         self._search_bar = ttk.Frame(parent)
+        # 검색줄은 표 위에 얹히는 보조 도구라 세로로 얇을수록 좋다. 기본 버튼은 위아래
+        # 여백(3px)이 붙어 입력칸보다 커지고, 그만큼 줄 전체가 두꺼워진다.
+        ttk.Style().configure("Search.TButton", padding=(2, 0))
         ttk.Label(self._search_bar, text="종목 검색").pack(side="left", padx=(2, 6))
         self._search = SearchEntry(
             self._search_bar, "종목명 또는 종목코드", self._on_search
@@ -528,7 +531,11 @@ class App(tk.Tk):
         # 오른쪽 끝 ✕ 는 **검색줄 닫기**. 입력칸 옆의 '내용 지우기' 는 아이콘이라
         # 같은 ✕ 가 둘 있는 혼란이 없다.
         ttk.Button(
-            self._search_bar, text="✕", width=3, command=self._close_search
+            self._search_bar,
+            text="✕",
+            width=3,
+            style="Search.TButton",
+            command=self._close_search,
         ).pack(side="right", padx=(6, 2))
         # Esc 는 두 단계다. 글자가 있으면 글자만 지우고(필터만 풀림), 비어 있으면 줄을 닫는다.
         # **검색칸에 포커스가 있을 때만** 반응한다 — 표에서 누른 Esc 로 필터가 풀리면 놀란다.

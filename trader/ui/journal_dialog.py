@@ -121,7 +121,11 @@ class SearchEntry(ttk.Frame):
         # self 에 담아 참조를 유지한다 (버튼에 붙이는 것만으로는 회수된다)
         self._clear_on = load_photo(CLEAR_ICON, self)
         self._clear_off = load_photo(CLEAR_ICON_OFF, self)
-        self._clear = ttk.Button(self, command=self.clear, takefocus=False)
+        # 위아래 여백을 줄여 입력칸보다 커지지 않게 한다 (검색줄이 두꺼워진다)
+        ttk.Style().configure("Search.TButton", padding=(2, 0))
+        self._clear = ttk.Button(
+            self, command=self.clear, takefocus=False, style="Search.TButton"
+        )
         if self._clear_on is not None:
             self._clear.configure(image=self._clear_on, width=3)
         else:
