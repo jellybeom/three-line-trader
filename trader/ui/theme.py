@@ -83,7 +83,9 @@ DARK_PALETTE = Palette(
     row="#1b1e20",
     head="#2e3236",
     border="#4a4f54",
-    select_bg="#2f5d8a",
+    # 선택 배경이 밝으면 그 위의 빨강·파랑이 묻힌다(#2f5d8a 에서 익절 2.5). 목록은
+    # 고른 줄도 색으로 결과를 보여줘야 하므로, 어둡게 잡아 색을 살린다(익절 4.7).
+    select_bg="#1b3347",
     select_fg="#ffffff",
     hover="#31363b",
     profit="#ff6b6b",  # 어두운 배경에서 #c62828 은 대비 2.7 → 5.5

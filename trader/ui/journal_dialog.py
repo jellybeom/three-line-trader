@@ -29,6 +29,9 @@ __all__ = [
     "transition_path",
 ]
 
+# 코멘트를 쓴 줄에 붙이는 표시. ✍ 는 획이 얇아 작은 크기에서 잘 안 보였다.
+WRITTEN_MARK = "✔"
+
 _TEXT_LINES = 4  # 잘한 점 · 아쉬운 점 입력칸 줄 수 (둘은 항상 같아야 한다)
 _IME_GAP = 10  # 한글 조합 창이 아래 위젯을 덮지 않도록 검색칸 밑에 두는 여백 (px)
 _BUTTON_MIN_PX = 56  # '월별'·'전체' 두 글자가 잘리지 않는 최소 폭
@@ -330,11 +333,27 @@ def summarize_stats(entries: list[dict], total: int | None = None) -> str:
 
 
 def entry_label(entry: dict) -> str:
-    """목록 한 줄 — 작성 여부가 한눈에 보이도록 앞에 표시를 둔다."""
+    """목록 한 줄 — 앞에 코멘트 작성 여부만 표시한다.
+
+    예전에는 손익 아이콘(💰/🛑/⚪)도 붙였는데, 작아서 구분이 안 되고 **부호와 색까지
+    같은 말을 세 번** 하고 있었다. 게다가 ✍ 와 나란히 있어 어느 쪽이 결과인지도
+    헷갈렸다(2026-08-18 피드백). 결과는 **글자 색**으로 보여준다(entry_color).
+    """
     net = net_pnl(entry)
-    icon = "💰" if net > 0 else ("🛑" if net < 0 else "⚪")
-    written = "✍" if (entry.get("good") or entry.get("bad")) else "　"
-    return f"{written} {icon} {entry.get('trade_date', '')} {entry.get('name', '')} {net:+,.0f}"
+    written = WRITTEN_MARK if (entry.get("good") or entry.get("bad")) else "　"
+    return (
+        f"{written} {entry.get('trade_date', '')} {entry.get('name', '')} {net:+,.0f}"
+    )
+
+
+def entry_color(entry: dict) -> str:
+    """목록 한 줄의 글자 색 — 익절 빨강 / 손절 파랑 / 본전·보유 회색.
+
+    종목 표와 같은 규칙이라 새로 익힐 것이 없다.
+    """
+    net = net_pnl(entry)
+    c = theme.palette()
+    return c.profit if net > 0 else (c.loss if net < 0 else c.muted)
 
 
 class JournalDialog(tk.Toplevel):
@@ -365,7 +384,9 @@ class JournalDialog(tk.Toplevel):
         pane.pack(fill="both", expand=True, padx=8, pady=8)
 
         left = ttk.Frame(pane)
-        ttk.Label(left, text="매매 목록 (✍ = 작성됨)").pack(anchor="w", pady=(0, 4))
+        ttk.Label(left, text=f"매매 목록 ({WRITTEN_MARK} = 작성됨)").pack(
+            anchor="w", pady=(0, 4)
+        )
 
         # 검색 — 종목명·코드 어느 쪽으로도 찾을 수 있다. 입력할 때마다 즉시 걸러진다
         # (목록이 수백 건이어도 문자열 비교뿐이라 체감 지연이 없다).
@@ -597,8 +618,12 @@ class JournalDialog(tk.Toplevel):
             self._entries, self._search.get(), self._result.get()
         )
         self._list.delete(0, "end")
-        for entry in self._visible:
+        for index, entry in enumerate(self._visible):
             self._list.insert("end", entry_label(entry))
+            # 줄마다 글자색을 준다. 고른 줄에서도 색이 유지되도록 selectforeground 까지
+            # 지정한다 — 안 하면 선택하는 순간 결과가 안 보인다.
+            color = entry_color(entry)
+            self._list.itemconfigure(index, foreground=color, selectforeground=color)
         self._count.configure(text=summarize_stats(self._visible, len(self._entries)))
         if self._current in self._visible:  # 보고 있던 항목이 남아 있으면 선택 유지
             index = self._visible.index(self._current)
@@ -665,9 +690,11 @@ class JournalDialog(tk.Toplevel):
             return
         self._on_save(self._current["trade_date"], self._current["symbol"], good, bad)
         self._current["good"], self._current["bad"] = good, bad
-        if self._current in self._visible:  # ✍ 표시를 갱신한다
+        if self._current in self._visible:  # 작성 표시를 갱신한다
             index = self._visible.index(self._current)
             self._list.delete(index)
             self._list.insert(index, entry_label(self._current))
+            color = entry_color(self._current)
+            self._list.itemconfigure(index, foreground=color, selectforeground=color)
             self._list.selection_set(index)
         self._status.configure(text="저장했습니다.", foreground=theme.palette().ok)

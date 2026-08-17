@@ -1254,3 +1254,76 @@ def test_거래비용_차이는_로그에만_남긴다():
     assert any(line.startswith("거래비용") for line in lines)
     logged = next(text for kind, text in core.logs if kind == "대조")
     assert "수수료 1,056" in logged and "세금 2,223" in logged
+
+
+# ── 목록에서 익절·손절 구분 ───────────────────────────────────
+
+
+def test_익절은_빨강_손절은_파랑이다():
+    """종목 표와 같은 규칙 — 새로 익힐 것이 없어야 한다."""
+    from trader.ui import theme
+    from trader.ui.journal_dialog import entry_color
+
+    c = theme.palette()
+    assert entry_color(_closed(9_000)) == c.profit
+    assert entry_color(_closed(-2_000)) == c.loss
+
+
+def test_본전과_보유중은_회색이다():
+    """이긴 것도 진 것도 아니면 눈에 덜 띄어야 한다."""
+    from trader.ui import theme
+    from trader.ui.journal_dialog import entry_color
+
+    c = theme.palette()
+    assert entry_color({"realized_pnl": 500, "fees": 500, "state": "종료"}) == c.muted
+    assert entry_color({"realized_pnl": 0, "fees": 0, "state": "1차 매수"}) == c.muted
+
+
+def test_손익_아이콘은_더_붙이지_않는다():
+    """부호·색과 같은 말을 세 번 하고 있었고, 작아서 구분도 안 됐다."""
+    from trader.ui.journal_dialog import entry_label
+
+    label = entry_label(_closed(9_000))
+    for icon in ("💰", "🛑", "⚪"):
+        assert icon not in label
+    assert "+8,500" in label  # 부호는 그대로 남는다
+
+
+def test_코멘트를_쓴_줄에만_표시가_붙는다():
+    from trader.ui.journal_dialog import WRITTEN_MARK, entry_label
+
+    written = {**_closed(9_000), "good": "진입이 좋았다"}
+    assert entry_label(written).startswith(WRITTEN_MARK)
+    assert not entry_label(_closed(9_000)).startswith(WRITTEN_MARK)
+
+
+def test_고른_줄에서도_색이_유지된다(dialog):
+    """선택하는 순간 결과가 안 보이면 목록을 훑는 의미가 없다."""
+    from trader.ui.journal_dialog import entry_color
+
+    dialog._list.selection_set(0)
+    dialog.update()
+    expected = entry_color(dialog._visible[0])
+    assert dialog._list.itemcget(0, "foreground") == expected
+    assert dialog._list.itemcget(0, "selectforeground") == expected
+
+
+def test_다크_선택_배경에서도_색이_읽힌다():
+    """선택 배경이 밝으면 그 위의 빨강·파랑이 묻힌다(#2f5d8a 에서 익절 2.5)."""
+    from trader.ui import theme
+
+    def contrast(a: str, b: str) -> float:
+        def lum(color: str) -> float:
+            rgb = [int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+            rgb = [
+                c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb
+            ]
+            return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+        high, low = sorted((lum(a), lum(b)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    for mode in (theme.LIGHT, theme.DARK):
+        p = theme.resolve(mode)
+        for name in ("profit", "loss", "muted"):
+            assert contrast(getattr(p, name), p.select_bg) >= 4.5, f"{mode} {name}"
