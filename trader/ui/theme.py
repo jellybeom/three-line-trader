@@ -246,6 +246,19 @@ def _colorref(hex_color: str) -> int:
     return (b << 16) | (g << 8) | r
 
 
+def apply_window(window: tk.Misc) -> None:
+    """창 자체의 바탕색을 테마에 맞춘다.
+
+    ttk 스타일은 **위젯**에만 닿고 창(Toplevel)의 바탕은 건드리지 않는다. 그래서
+    위젯이 덮지 않은 가장자리에 Tk 기본색(#d9d9d9)이 그대로 남아, 어두운 창 둘레에
+    밝은 테두리가 있는 것처럼 보였다(2026-08-18 매매일지·복기 차트에서 확인).
+    """
+    try:
+        window.configure(background=_current.bg)
+    except tk.TclError:
+        pass
+
+
 def apply_titlebar(window: tk.Misc) -> bool:
     """창 제목 표시줄·테두리를 지금 테마에 맞춘다 (Windows 전용). 적용됐으면 True.
 

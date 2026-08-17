@@ -214,3 +214,35 @@ def test_창_꾸미기는_한_번에_이뤄진다():
         Path(__file__).resolve().parents[1] / "trader" / "ui" / "icons.py"
     ).read_text(encoding="utf-8")
     assert "apply_titlebar" in source
+
+
+def test_창_바탕도_테마를_따른다():
+    """ttk 스타일은 위젯에만 닿는다 — 창 자체의 바탕은 따로 칠해야 한다.
+
+    안 하면 위젯이 덮지 않은 가장자리에 Tk 기본색(#d9d9d9)이 남아, 어두운 창 둘레에
+    밝은 테두리가 있는 것처럼 보인다(2026-08-18 매매일지·복기 차트에서 확인).
+    """
+    tk = pytest.importorskip("tkinter")
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("표시 장치가 없는 환경")
+    root.withdraw()
+    theme.apply(root, theme.DARK)
+
+    child = tk.Toplevel(root)
+    assert child.cget("background") != theme.DARK_PALETTE.bg  # 아직 기본색
+    theme.apply_window(child)
+    assert child.cget("background") == theme.DARK_PALETTE.bg
+    root.destroy()
+
+
+def test_창_꾸미기는_바탕까지_함께_한다():
+    """호출 지점을 나누면 새 창에서 한쪽을 빠뜨린다."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "trader" / "ui" / "icons.py"
+    ).read_text(encoding="utf-8")
+    assert "apply_window" in source and "apply_titlebar" in source
