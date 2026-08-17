@@ -13,11 +13,19 @@ class NotifierError(RuntimeError):
 
 
 def should_notify(level: str, symbol: str, kind: str) -> bool:
-    """알림 수준 필터 — 로그 한 줄을 Discord 로 보낼지 결정한다."""
+    """알림 수준 필터 — 로그 한 줄을 Discord 로 보낼지 결정한다.
+
+    '매매만' 은 **시스템의 잡음**을 걸러 달라는 뜻이지 **사고를 숨겨 달라는 뜻이 아니다.**
+    예전에는 종류와 무관하게 시스템 로그를 전부 막아, 키움 연결 실패·자동 시작 실패·
+    휴장 안내처럼 반드시 알아야 할 것까지 가지 않았다(2026-08-17 확인). 경고·에러는
+    수준과 상관없이 보낸다 — '끔' 만 예외다.
+    """
     if level == "끔":
         return False
+    if kind in ("에러", "경고"):
+        return True
     if level == "에러만":
-        return kind in ("에러", "경고")
+        return False
     if level.startswith("매매만"):
         return symbol != "시스템"
     return True  # 전체

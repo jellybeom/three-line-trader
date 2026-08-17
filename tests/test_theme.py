@@ -60,8 +60,14 @@ def test_시스템_설정을_읽는다(monkeypatch):
     assert theme.resolve(theme.SYSTEM).name == theme.LIGHT
 
 
-def test_알_수_없는_설정은_라이트로_본다():
-    """설정 파일이 깨져도 화면이 이상해지지 않는다."""
+def test_알_수_없는_설정은_시스템_설정을_따른다(monkeypatch):
+    """설정 파일이 깨져도 화면이 이상해지지 않는다 — '시스템' 과 같게 본다.
+
+    (예전 시험은 라이트를 기대했는데, 실행하는 PC 가 다크면 실패한다.)
+    """
+    monkeypatch.setattr(theme, "system_prefers_dark", lambda: True)
+    assert theme.resolve("이상한값").name == theme.resolve(theme.SYSTEM).name
+    monkeypatch.setattr(theme, "system_prefers_dark", lambda: False)
     assert theme.resolve("이상한값").name == theme.LIGHT
 
 
@@ -106,3 +112,34 @@ def test_테마_적용이_실패해도_예외가_나가지_않는다():
     root.withdraw()
     root.destroy()  # 이미 죽은 창에 적용해도 터지지 않아야 한다
     assert theme.apply(root, theme.DARK).name == theme.DARK
+
+
+def test_버튼이_옆_위젯과_같은_높이다():
+    """clam 기본 버튼 여백은 5 라 버튼만 33px 로 솟는다 (입력칸·콤보는 23px).
+
+    툭 튀어나온 버튼은 줄이 들쭉날쭉해 보인다(2026-08-17 피드백).
+    """
+    tk = pytest.importorskip("tkinter")
+    from tkinter import ttk
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("표시 장치가 없는 환경")
+    root.geometry("400x200")
+    theme.apply(root, theme.LIGHT)
+    frame = ttk.Frame(root)
+    frame.pack(fill="both", expand=True)
+    widgets = {
+        "button": ttk.Button(frame, text="연결"),
+        "entry": ttk.Entry(frame, width=8),
+        "combobox": ttk.Combobox(frame, width=8),
+        "radio": ttk.Radiobutton(frame, text="모의"),
+    }
+    for i, w in enumerate(widgets.values()):
+        w.grid(row=0, column=i)
+    root.update()
+    root.update_idletasks()
+    heights = {k: w.winfo_height() for k, w in widgets.items()}
+    root.destroy()
+    assert len(set(heights.values())) == 1, f"높이가 제각각이다: {heights}"

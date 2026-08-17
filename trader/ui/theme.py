@@ -27,6 +27,9 @@ SYSTEM = "시스템"
 MODES = (SYSTEM, LIGHT, DARK)
 DEFAULT_MODE = SYSTEM
 
+# 버튼 여백 (좌우, 위아래). 위아래 0 이면 입력칸·콤보와 같은 높이가 된다.
+_BUTTON_PADDING = (6, 0)
+
 
 @dataclass(frozen=True)
 class Palette:
@@ -193,7 +196,12 @@ def _apply_ttk(root: tk.Misc, c: Palette) -> None:
     )
     style.configure("TLabelframe", background=c.bg, bordercolor=c.border)
     style.configure("TLabelframe.Label", background=c.bg, foreground=c.muted)
-    style.configure("TButton", background=c.hover, bordercolor=c.border)
+    # clam 기본 버튼 여백은 5 라 버튼만 33px 로 솟아 옆 위젯(입력칸·콤보·라디오 23px)보다
+    # 툭 튀어나온다. 위아래 여백을 없애 같은 높이로 맞춘다 — 좌우는 넉넉히 둬야
+    # 글자가 답답해 보이지 않는다.
+    style.configure(
+        "TButton", background=c.hover, bordercolor=c.border, padding=_BUTTON_PADDING
+    )
     style.map("TButton", background=[("active", c.select_bg), ("disabled", c.bg)])
     style.configure("TEntry", fieldbackground=c.field, foreground=c.fg)
     style.configure("TCombobox", fieldbackground=c.field, foreground=c.fg)
@@ -219,7 +227,7 @@ def _apply_ttk(root: tk.Misc, c: Palette) -> None:
         background=[("selected", c.bg)],
         foreground=[("selected", c.fg)],
     )
-    # 검색줄 버튼 — 위아래 여백을 없애 줄이 두꺼워지지 않게 (theme 재적용 때도 유지)
+    # 검색줄 버튼은 폭도 좁게 (아이콘·✕ 한 글자짜리)
     style.configure("Search.TButton", padding=(2, 0))
     root.configure(background=c.bg)
 

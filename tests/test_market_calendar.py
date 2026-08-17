@@ -209,6 +209,7 @@ def _core(calendar: TradingCalendar):
         "summary": dtm.time(15, 35),
     }
     core._sched_done = {}
+    core._holiday_notified = ""  # 재시작하면 다시 알리도록 메모리에만 둔다
     core.logs = []
     core._log = lambda sym, kind, text, notify=True: core.logs.append((kind, text))
     core._sched_last = lambda key: core._sched_done.get(key, "")
@@ -282,6 +283,33 @@ def test_주말에는_시작하지_않는다(calendar):
     core = _core(calendar)
     asyncio.run(_run_schedule(core, dt.datetime(2026, 8, 15, 9, 0)))
     assert core.started == []
+
+
+def test_휴장_안내는_알림도_함께_간다(calendar):
+    """'매매만' 으로 써도 폰으로 알 수 있어야 한다 — 종류를 '경고' 로 둔다."""
+    import asyncio
+
+    from trader.notifier import should_notify
+
+    core = _core(calendar)
+    asyncio.run(_run_schedule(core, dt.datetime(2026, 8, 17, 9, 0)))
+    kind = next(k for k, t in core.logs if "광복절" in t)
+    assert kind == "경고"
+    assert should_notify("매매만 (시스템 제외)", "시스템", kind)
+
+
+def test_재시작하면_휴장_안내를_다시_한다(calendar):
+    """DB 에 남기면 나중에 켠 창에서는 왜 감시가 안 도는지 알 수 없다."""
+    import asyncio
+
+    first = _core(calendar)
+    asyncio.run(_run_schedule(first, dt.datetime(2026, 8, 17, 9, 0)))
+    assert any("광복절" in t for _k, t in first.logs)
+
+    restarted = _core(calendar)  # 새로 켠 셈 (DB 는 그대로)
+    restarted._sched_done = dict(first._sched_done)
+    asyncio.run(_run_schedule(restarted, dt.datetime(2026, 8, 17, 10, 0)))
+    assert any("광복절" in t for _k, t in restarted.logs)
 
 
 def test_휴장_안내는_하루에_한_번만(calendar):

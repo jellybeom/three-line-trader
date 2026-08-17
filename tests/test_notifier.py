@@ -507,3 +507,43 @@ def test_관심종목_조회를_태그로_거를_수_있다():
     embed = build_watchlist_embed("2026-08-10", _watch_rows(), tag="테마주")
     assert "관심종목 2종목" in embed["title"] and "#테마주" in embed["title"]
     assert "효성" not in embed["description"]
+
+
+# ── 알림 수준과 사고 알림 ──────────────────────────────────────
+
+
+def test_매매만_이어도_사고는_알린다():
+    """'매매만' 은 시스템 **잡음**을 걸러 달라는 뜻이지 사고를 숨기라는 뜻이 아니다.
+
+    예전에는 종류와 무관하게 시스템 로그를 전부 막아, 키움 연결 실패·자동 시작 실패·
+    휴장 안내까지 가지 않았다(2026-08-17 확인).
+    """
+    from trader.notifier import should_notify
+
+    level = "매매만 (시스템 제외)"
+    assert should_notify(level, "시스템", "에러")
+    assert should_notify(level, "시스템", "경고")
+    assert not should_notify(level, "시스템", "연결")  # 잡음은 그대로 걸린다
+    assert not should_notify(level, "시스템", "설정")
+
+
+def test_끔은_사고도_보내지_않는다():
+    """일부러 껐다면 그 뜻을 존중한다."""
+    from trader.notifier import should_notify
+
+    assert not should_notify("끔", "시스템", "에러")
+    assert not should_notify("끔", "005930", "체결")
+
+
+def test_에러만은_매매_알림을_거른다():
+    from trader.notifier import should_notify
+
+    assert should_notify("에러만", "005930", "에러")
+    assert not should_notify("에러만", "005930", "체결")
+
+
+def test_전체는_모두_보낸다():
+    from trader.notifier import should_notify
+
+    for kind in ("체결", "전이", "연결", "경고", "에러"):
+        assert should_notify("전체", "005930", kind)
