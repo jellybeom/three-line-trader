@@ -17,8 +17,18 @@ ASSETS = Path(__file__).resolve().parents[2] / "assets"
 
 _APP_ICO = ASSETS / "three-line-trader.ico"
 _APP_PNG = ASSETS / "three-line-trader-512.png"
+# 지우기 아이콘 — 어두운 배경에서는 짙은 회색이 보이지 않아 모드별로 나눠 둔다
 CLEAR_ICON = ASSETS / "clear-text.png"
 CLEAR_ICON_OFF = ASSETS / "clear-text-off.png"
+CLEAR_ICON_DARK = ASSETS / "clear-text-dark.png"
+CLEAR_ICON_DARK_OFF = ASSETS / "clear-text-dark-off.png"
+
+
+def clear_icons(dark: bool) -> tuple[Path, Path]:
+    """(보통, 흐린) 지우기 아이콘 경로."""
+    if dark:
+        return CLEAR_ICON_DARK, CLEAR_ICON_DARK_OFF
+    return CLEAR_ICON, CLEAR_ICON_OFF
 
 
 def apply_icon(window) -> None:

@@ -30,6 +30,8 @@ except ImportError:  # pragma: no cover - 설치 환경에서는 발생하지 �
 _ZOOM_STEP = 1.25  # 휠 한 칸당 배율
 _ZOOM_MIN = 1.0  # 창에 맞춘 크기보다 작게는 줄이지 않는다
 _ZOOM_MAX = 8.0
+# 차트 PNG 는 흰 배경으로 만들어진다. 캔버스를 어둡게 하면 그림 둘레만 검게
+# 남아 더 어색하므로, 다크 모드에서도 흰색을 유지한다.
 _BG = "#ffffff"
 
 
@@ -113,7 +115,7 @@ class ChartView(ttk.Frame):
         width = max(self.canvas.winfo_width(), 1)
         height = max(self.canvas.winfo_height(), 1)
         self.canvas.create_text(
-            width // 2, height // 2, text=text, fill="#9e9e9e", tags="msg"
+            width // 2, height // 2, text=text, fill="#757575", tags="msg"
         )
         self._set_cursor()
 

@@ -40,13 +40,20 @@ except ImportError:
 from trader.ui.chart_view import ChartView
 from trader.ui.journal_dialog import SearchEntry
 from trader.ui.events_view import EventsView
+from trader.ui import theme
 from trader.ui.icons import apply_icon
 from trader.ui.positions_view import PositionsView
 from trader.ui.register_dialog import RegisterDialog
 
+
 # 휴장은 달력의 '빨간 날' 관례를 따른다. 주황은 이 프로그램에서 '진행 중·주의'(연결 중,
 # 3선 미입력)를 뜻해, 확정된 사실인 휴장에는 맞지 않는다.
-_MARKET_COLORS = {"개장": "", "휴장": "#c62828", "확인 불가": "#9e9e9e"}
+def _market_color(market: str) -> str:
+    """개장/휴장/확인 불가 색. 휴장은 달력의 '빨간 날' 관례를 따른다."""
+    c = theme.palette()
+    return {"휴장": c.profit, "확인 불가": c.muted}.get(market, "")
+
+
 # 개장/휴장 줄의 폭을 정할 때 기준으로 삼는 가장 긴 문구. 휴장 사유는 holidays.csv 에서
 # 오므로 앞으로 조금 길어질 수 있어 여유를 둔다.
 _MARKET_SAMPLE = "(월) · 휴장 · 석가탄신일(대체휴일)＋"
@@ -228,6 +235,10 @@ class App(tk.Tk):
         self._current_date: str = datetime.now().strftime("%Y-%m-%d")
 
         self.title("three-line-trader")
+        # 위젯을 만들기 **전에** 테마를 적용한다. 고전 tk 위젯(목록·코멘트·메뉴)은
+        # 만들 때 색을 넣으므로, 뒤늦게 적용하면 그것들만 옛 색으로 남는다.
+        self._theme_mode = theme.read_mode()
+        theme.apply(self, self._theme_mode)
         self._set_icon()
         try:
             self.state("zoomed")  # Windows: 최대화 (FHD 전체화면)
@@ -259,7 +270,9 @@ class App(tk.Tk):
         ttk.Button(self._toolbar, text="매매일지", command=self._open_journal).pack(
             side="left", padx=(6, 0)
         )
-        self._status = ttk.Label(self._toolbar, text="정지됨", foreground="#9e9e9e")
+        self._status = ttk.Label(
+            self._toolbar, text="정지됨", foreground=theme.palette().muted
+        )
         self._status.pack(side="right")
         pnl_box = ttk.Frame(self._toolbar)
         pnl_box.pack(side="right", padx=(0, 16))
@@ -271,7 +284,10 @@ class App(tk.Tk):
             lbl.pack(side="left")
             self._pnl_parts[key] = lbl
         self._mode_badge = ttk.Label(
-            self._toolbar, text="모의투자", foreground="#1565c0", font=("", 10, "bold")
+            self._toolbar,
+            text="모의투자",
+            foreground=theme.palette().loss,
+            font=("", 10, "bold"),
         )
         self._mode_badge.pack(side="right", padx=(0, 16))
 
@@ -280,7 +296,7 @@ class App(tk.Tk):
         마지막 그룹이 남는 폭을 채워 오른쪽 여백을 없앤다."""
         row = ttk.Frame(parent)
         row.pack(fill="x", padx=8, pady=(2, 4))
-        muted = "#9e9e9e"
+        muted = theme.palette().muted
 
         g_mode = ttk.LabelFrame(row, text="투자 모드", padding=(10, 2, 10, 6))
         g_mode.pack(side="left", fill="both", expand=True)
@@ -367,7 +383,7 @@ class App(tk.Tk):
         line.pack(fill="x", pady=(0, 3))
         # 봇은 프로그램 시작과 함께 자동 연결되므로 버튼이 없다 (상태만 표시)
         self._discord_status = ttk.Label(
-            line, text="● 연결 중...", foreground="#f9a825"
+            line, text="● 연결 중...", foreground=theme.palette().warn
         )
         self._discord_status.pack(side="left")
         line = ttk.Frame(box)
@@ -526,7 +542,7 @@ class App(tk.Tk):
         self._search.entry.configure(width=_SEARCH_CHARS)
         self._search.pack(side="left")
         self._search_count = ttk.Label(
-            self._search_bar, text="", foreground="#616161", width=12
+            self._search_bar, text="", foreground=theme.palette().muted, width=12
         )
         self._search_count.pack(side="left", padx=(10, 0))
         # 오른쪽 끝 ✕ 는 **검색줄 닫기**. 입력칸 옆의 '내용 지우기' 는 아이콘이라
@@ -571,14 +587,46 @@ class App(tk.Tk):
     def _build_status_bar(self) -> None:
         bar = ttk.Frame(self, padding=(8, 3))
         bar.pack(fill="x", side="bottom")
-        self._ws_label = ttk.Label(bar, text="● WS 미연결", foreground="#9e9e9e")
+        self._ws_label = ttk.Label(
+            bar, text="● WS 미연결", foreground=theme.palette().muted
+        )
         self._ws_label.pack(side="left", padx=(0, 12))
         self._tick_label = ttk.Label(bar, text="마지막 틱 --:--:--")
         self._tick_label.pack(side="left", padx=(0, 12))
         self._market_label = ttk.Label(bar, text="")
         self._market_label.pack(side="left")
         self._summary = ttk.Label(bar, text="")
-        self._summary.pack(side="right")
+        self._summary.pack(side="right", padx=(0, 12))
+        # 테마 선택 — 자주 바꾸는 항목이 아니라 툴바·설정 줄의 자리를 뺏지 않는다
+        self._theme_var = tk.StringVar(value=self._theme_mode)
+        picker = ttk.Combobox(
+            bar,
+            textvariable=self._theme_var,
+            state="readonly",
+            width=6,
+            values=list(theme.MODES),
+        )
+        picker.pack(side="right")
+        picker.bind("<<ComboboxSelected>>", self._on_theme_change)
+        ttk.Label(bar, text="테마", foreground=theme.palette().muted).pack(
+            side="right", padx=(0, 4)
+        )
+
+    def _on_theme_change(self, _event=None) -> None:
+        """테마 설정 저장 — 실제 적용은 다시 켤 때다.
+
+        이미 만들어진 고전 tk 위젯(목록·코멘트·메뉴)은 색이 자동으로 바뀌지 않는다.
+        위젯 트리를 훑어 다시 칠할 수도 있지만 놓치는 곳이 생기기 쉬워, 재시작을
+        안내하는 쪽이 확실하다.
+        """
+        mode = self._theme_var.get()
+        if mode == self._theme_mode:
+            return
+        theme.write_mode(mode)
+        self._theme_mode = mode
+        messagebox.showinfo(
+            "테마", f"'{mode}' 로 저장했습니다.\n다음에 프로그램을 켤 때 적용됩니다."
+        )
 
     def _set_icon(self) -> None:
         """창 아이콘 — 모든 창이 같은 것을 쓴다 (trader.ui.icons 참고)."""
@@ -881,7 +929,7 @@ class App(tk.Tk):
         if market:
             # 사유에 이미 괄호가 있어(광복절(대체휴일)) 다시 감싸면 겹쳐 보인다
             text += f" · {market}" + (f" · {note}" if note else "")
-            color = _MARKET_COLORS.get(market, "")
+            color = _market_color(market)
         self._weekday.configure(text=text, foreground=color)
 
     def _manual_sell(self, symbol: str) -> None:
@@ -988,7 +1036,7 @@ class App(tk.Tk):
         ttk.Label(
             bar,
             text="휠: 확대·축소 · 드래그: 이동 · 더블클릭: 원본 열기",
-            foreground="#9e9e9e",
+            foreground=theme.palette().muted,
         ).pack(side="left", padx=8)
         ttk.Button(
             bar,
@@ -1003,7 +1051,9 @@ class App(tk.Tk):
 
     def _connect_kiwoom(self) -> None:
         self._bus.commands.put(bus.ConnectKiwoom())
-        self._kiwoom_status.configure(text="● 연결 중...", foreground="#f9a825")
+        self._kiwoom_status.configure(
+            text="● 연결 중...", foreground=theme.palette().warn
+        )
 
     def _refresh_account(self) -> None:
         self._bus.commands.put(bus.RefreshAccount())
@@ -1092,7 +1142,7 @@ class App(tk.Tk):
                 self._toggle_btn.configure(text="중지" if r else "감시 시작")
                 self._status.configure(
                     text="감시 중" if r else "정지됨",
-                    foreground="#2e7d32" if r else "#9e9e9e",
+                    foreground=theme.palette().ok if r else theme.palette().muted,
                 )
                 self._ws_label.configure(
                     text=(
@@ -1103,7 +1153,7 @@ class App(tk.Tk):
                         if r
                         else "● WS 미연결"
                     ),
-                    foreground="#2e7d32" if r else "#9e9e9e",
+                    foreground=theme.palette().ok if r else theme.palette().muted,
                 )
             case bus.Funds() as f:
                 self._funds = f
@@ -1136,7 +1186,7 @@ class App(tk.Tk):
             case bus.DiscordStatus(connected=ok, detail=detail):
                 self._discord_status.configure(
                     text="● 연결됨" if ok else f"● 미연결 · {detail}",
-                    foreground="#2e7d32" if ok else "#9e9e9e",
+                    foreground=theme.palette().ok if ok else theme.palette().muted,
                 )
             case bus.SymbolInfo(symbol=s, name=n):
                 if getattr(self, "_dialog", None) and self._dialog.winfo_exists():
@@ -1145,7 +1195,7 @@ class App(tk.Tk):
                 self._backend_sim = "시뮬레이션" in detail
                 self._kiwoom_status.configure(
                     text=f"● 연결됨 · {detail}" if ok else f"● 미연결 · {detail}",
-                    foreground="#2e7d32" if ok else "#9e9e9e",
+                    foreground=theme.palette().ok if ok else theme.palette().muted,
                 )
             case bus.Account(deposit=d, account=acct):
                 # 이 값은 '주문가능금액'(= 현금 + 당일 매도대금 재사용분)이다.
@@ -1157,7 +1207,7 @@ class App(tk.Tk):
                 self._mode_var.set("실전" if real else "모의")
                 self._mode_badge.configure(
                     text="실전투자" if real else "모의투자",
-                    foreground="#c62828" if real else "#1565c0",
+                    foreground=theme.palette().profit if real else theme.palette().loss,
                 )
                 self._update_summary()
 
@@ -1221,7 +1271,8 @@ class App(tk.Tk):
             value,
             suffix,
         ) in values.items():  # 항목별로 수익 빨강 / 손실 파랑 / 0 기본색
-            color = "#c62828" if value > 0 else ("#1565c0" if value < 0 else "")
+            c = theme.palette()
+            color = c.profit if value > 0 else (c.loss if value < 0 else "")
             self._pnl_parts[key].configure(
                 text=f"{key} {value:+,.0f}{suffix}", foreground=color
             )

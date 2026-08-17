@@ -370,7 +370,9 @@ def test_휴장일은_사유까지_빨갛게_보여준다(app):
     app._dispatch(bus.TradeDate("2026-08-17", "휴장", "광복절(대체휴일)"))
     app.update()
     assert app._weekday.cget("text") == "(월) · 휴장 · 광복절(대체휴일)"
-    assert str(app._weekday.cget("foreground")) == "#c62828"
+    from trader.ui import theme
+
+    assert str(app._weekday.cget("foreground")) == theme.palette().profit
 
 
 def test_개장일은_기본색이다(app):
@@ -383,8 +385,10 @@ def test_개장일은_기본색이다(app):
 def test_확인_불가는_회색이다(app):
     app._dispatch(bus.TradeDate("2027-03-02", "확인 불가", ""))
     app.update()
+    from trader.ui import theme
+
     assert "확인 불가" in app._weekday.cget("text")
-    assert str(app._weekday.cget("foreground")) == "#9e9e9e"
+    assert str(app._weekday.cget("foreground")) == theme.palette().muted
 
 
 def test_개장_여부를_모르면_요일만_보여준다(app):

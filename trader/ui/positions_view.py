@@ -18,6 +18,7 @@ from typing import Callable
 
 from trader.state_machine import Params, Position, State
 from trader.trading_calendar import format_days
+from trader.ui import theme
 from trader.ui.mini_scroll import MiniScroll
 
 _COLUMNS = (
@@ -132,20 +133,21 @@ class PositionsView(ttk.Frame):
                 anchor = "e" if col in _PRICE_COLUMNS else "center"
                 self.tree.column(col, width=width, anchor=anchor)
 
+        c = theme.palette()
         self.tree.tag_configure(
-            "profit", foreground="#c62828"
+            "profit", foreground=c.profit
         )  # 수익 = 빨강 (국내 관례)
-        self.tree.tag_configure("loss", foreground="#1565c0")  # 손실 = 파랑
-        self.tree.tag_configure("closed", foreground="#9e9e9e")
-        self.tree.tag_configure("addrow", foreground="#1565c0")
-        self.tree.tag_configure("staged", foreground="#f9a825")  # 3선 미입력 대기
+        self.tree.tag_configure("loss", foreground=c.loss)  # 손실 = 파랑
+        self.tree.tag_configure("closed", foreground=c.muted)
+        self.tree.tag_configure("addrow", foreground=c.link)
+        self.tree.tag_configure("staged", foreground=c.warn)  # 3선 미입력 대기
 
         self.tree.pack(side="left", fill="both", expand=True)
         # 스크롤바는 자리를 차지하지 않는 오버레이로 (종목명·상태 열이 그만큼 넓어진다)
         self._scroll = MiniScroll(self.tree)
 
         self._menu_targets: list[str] = []
-        self._menu = tk.Menu(self, tearoff=0)
+        self._menu = tk.Menu(self, tearoff=0, **theme.classic(self, "menu"))
         # 여러 종목을 한 번에 처리할 수 있는 항목을 위에, 한 종목씩 다뤄야 하는 항목은 아래에.
         self._menu.add_command(
             label="다음 매매일로 이월 (상태·평단·수량)",

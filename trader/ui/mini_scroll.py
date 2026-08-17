@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from trader.ui import theme
+
 _WIDTH = 4  # 막대 폭 (px)
 # 대상 위젯의 **테두리 안쪽**에 들어가도록 띄우는 여백. 오버레이는 대상 위에 얹히므로
 # 여백이 없으면 위젯의 테두리를 덮어 프레임 선이 끊겨 보인다(2026-08-11 피드백).
 _MARGIN_X = 3  # 오른쪽 테두리에서 띄우는 여백
 _MARGIN_Y = 3  # 위·아래 테두리에서 띄우는 여백
 _HIDE_MS = 1200  # 마지막 움직임 뒤 사라지기까지
-_TROUGH = "#e8e8e8"
-_THUMB = "#9e9e9e"
 _MIN_THUMB = 18  # 막대 최소 길이 — 목록이 아주 길어도 잡히도록
 
 
@@ -44,7 +44,7 @@ class MiniScroll(tk.Canvas):
             width=width,
             highlightthickness=0,
             borderwidth=0,
-            bg=_TROUGH,
+            bg=theme.palette().row,
         )
         self._target = target
         self._width = width
@@ -122,7 +122,9 @@ class MiniScroll(tk.Canvas):
         top = self._first * height
         thumb = max(_MIN_THUMB, (self._last - self._first) * height)
         top = min(top, height - thumb)  # 끝에서 막대가 삐져나가지 않게
-        self.create_rectangle(0, top, self._width, top + thumb, fill=_THUMB, outline="")
+        self.create_rectangle(
+            0, top, self._width, top + thumb, fill=theme.palette().muted, outline=""
+        )
 
     # ── 드래그 ─────────────────────────────────────────────────
 

@@ -17,7 +17,8 @@ from typing import Callable
 
 from trader.journal import transition_path  # 재수출 — 창에서 경로 문자열을 쓴다
 from trader.ui.chart_view import ChartView
-from trader.ui.icons import CLEAR_ICON, CLEAR_ICON_OFF, apply_icon, load_photo
+from trader.ui import theme
+from trader.ui.icons import apply_icon, clear_icons, load_photo
 
 __all__ = [
     "JournalDialog",
@@ -119,8 +120,9 @@ class SearchEntry(ttk.Frame):
         # 입력 내용을 지우는 버튼. 창을 닫는 ✕ 와 **모양으로** 구분되도록 아이콘을 쓴다
         # (✕ 가 둘이면 어느 쪽이 무엇인지 알 수 없다). 아이콘을 못 읽으면 글자로 물러난다.
         # self 에 담아 참조를 유지한다 (버튼에 붙이는 것만으로는 회수된다)
-        self._clear_on = load_photo(CLEAR_ICON, self)
-        self._clear_off = load_photo(CLEAR_ICON_OFF, self)
+        on_path, off_path = clear_icons(theme.palette().name == theme.DARK)
+        self._clear_on = load_photo(on_path, self)
+        self._clear_off = load_photo(off_path, self)
         # 위아래 여백을 줄여 입력칸보다 커지지 않게 한다 (검색줄이 두꺼워진다)
         ttk.Style().configure("Search.TButton", padding=(2, 0))
         self._clear = ttk.Button(
@@ -174,7 +176,7 @@ class SearchEntry(ttk.Frame):
             return
         self._showing = True
         self.entry.insert(0, self._placeholder)
-        self.entry.configure(foreground="#9e9e9e")
+        self.entry.configure(foreground=theme.palette().muted)
         self._sync_button()
 
     def _hide_placeholder(self) -> None:
@@ -448,7 +450,12 @@ class JournalDialog(tk.Toplevel):
 
         # 목록 칸의 기본 폭은 이 값이 정한다 (weight=0 이라 늘어난 공간은 차트가 가져간다).
         # 사이 막대를 끌어 언제든 넓힐 수 있다.
-        self._list = tk.Listbox(left, width=_LIST_CHARS, exportselection=False)
+        self._list = tk.Listbox(
+            left,
+            width=_LIST_CHARS,
+            exportselection=False,
+            **theme.classic(self, "list"),  # ttk 테마가 닿지 않는 위젯
+        )
         self._list.pack(fill="both", expand=True)
         self._list.bind("<<ListboxSelect>>", self._on_select)
         # 성적 요약 — 목록 폭에 맞춰 줄바꿈한다 (칸을 좁히면 두 줄이 된다).
@@ -457,7 +464,7 @@ class JournalDialog(tk.Toplevel):
         self._count = ttk.Label(
             left,
             text="",
-            foreground="#616161",
+            foreground=theme.palette().muted,
             justify="left",
             wraplength=240,
         )
@@ -482,7 +489,7 @@ class JournalDialog(tk.Toplevel):
         # side="bottom" 으로 먼저 잡아두면 차트는 '남는 만큼' 만 쓰므로 절대 밀리지 않는다.
         bar = ttk.Frame(right)
         bar.pack(side="bottom", fill="x", pady=(6, 0))
-        self._status = ttk.Label(bar, text="", foreground="#9e9e9e")
+        self._status = ttk.Label(bar, text="", foreground=theme.palette().muted)
         self._status.pack(side="left")
         self._save_button = ttk.Button(bar, text="저장", command=self._save)
         self._save_button.pack(side="right")
@@ -490,12 +497,16 @@ class JournalDialog(tk.Toplevel):
         form = ttk.Frame(right)
         form.pack(side="bottom", fill="x", pady=(8, 0))
         ttk.Label(form, text="잘한 점").grid(row=0, column=0, sticky="nw", pady=(0, 4))
-        self._good = tk.Text(form, height=_TEXT_LINES, wrap="word")
+        self._good = tk.Text(
+            form, height=_TEXT_LINES, wrap="word", **theme.classic(self, "text")
+        )
         self._good.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 4))
         ttk.Label(form, text="아쉬운 점").grid(
             row=1, column=0, sticky="nw", pady=(0, 4)
         )
-        self._bad = tk.Text(form, height=_TEXT_LINES, wrap="word")
+        self._bad = tk.Text(
+            form, height=_TEXT_LINES, wrap="word", **theme.classic(self, "text")
+        )
         self._bad.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(0, 4))
         form.columnconfigure(1, weight=1)
         # uniform 을 같게 주면 두 칸의 높이가 항상 같아진다 (한쪽만 눌리지 않는다)
@@ -615,7 +626,7 @@ class JournalDialog(tk.Toplevel):
         for child in self._summary.winfo_children():
             child.destroy()
         for row, (label, value) in enumerate(summarize(entry)):
-            ttk.Label(self._summary, text=label, foreground="#9e9e9e").grid(
+            ttk.Label(self._summary, text=label, foreground=theme.palette().muted).grid(
                 row=row // 2, column=(row % 2) * 2, sticky="w", padx=(0, 6)
             )
             ttk.Label(self._summary, text=value).grid(
@@ -659,4 +670,4 @@ class JournalDialog(tk.Toplevel):
             self._list.delete(index)
             self._list.insert(index, entry_label(self._current))
             self._list.selection_set(index)
-        self._status.configure(text="저장했습니다.", foreground="#2e7d32")
+        self._status.configure(text="저장했습니다.", foreground=theme.palette().ok)

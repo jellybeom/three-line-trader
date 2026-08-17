@@ -26,6 +26,7 @@ except ImportError:  # 미설치 환경에서는 직접 입력으로 대체
 
 from trader.state_machine import Params, Position, State  # noqa: F401
 from trader.ui import bus
+from trader.ui import theme
 from trader.ui.icons import apply_icon
 
 # 종목 선정 근거 — 기준봉(급등일) 시점의 시장·종목 성격 판단.
@@ -149,9 +150,9 @@ class RegisterDialog(tk.Toplevel):
                 width=12,
                 justify="center",
             ).pack(side="left")
-            ttk.Label(date_box, text="YYYY-MM-DD", foreground="#9e9e9e").pack(
-                side="left", padx=(6, 0)
-            )
+            ttk.Label(
+                date_box, text="YYYY-MM-DD", foreground=theme.palette().muted
+            ).pack(side="left", padx=(6, 0))
         row += 1
 
         # 종목 선정 근거 태그 — 기준봉 시점의 판단이라 종목에 고정된다.
