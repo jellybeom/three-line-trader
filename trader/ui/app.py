@@ -606,7 +606,7 @@ class App(tk.Tk):
             width=6,
             values=list(theme.MODES),
         )
-        picker.pack(side="right")
+        picker.pack(side="right", padx=(0, 12))  # 옆 '감시 N종목' 과 붙지 않게
         picker.bind("<<ComboboxSelected>>", self._on_theme_change)
         ttk.Label(bar, text="테마", foreground=theme.palette().muted).pack(
             side="right", padx=(0, 4)

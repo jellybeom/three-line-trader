@@ -143,3 +143,61 @@ def test_버튼이_옆_위젯과_같은_높이다():
     heights = {k: w.winfo_height() for k, w in widgets.items()}
     root.destroy()
     assert len(set(heights.values())) == 1, f"높이가 제각각이다: {heights}"
+
+
+# ── 창 제목 표시줄 (Windows 전용) ─────────────────────────────
+
+
+def test_윈도우가_아니면_아무것도_하지_않는다(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("표시 장치가 없는 환경")
+    root.withdraw()
+    monkeypatch.setattr(theme.sys, "platform", "linux")
+    assert theme.apply_titlebar(root) is False
+    root.destroy()
+
+
+def test_제목_표시줄_적용이_실패해도_예외가_나가지_않는다(monkeypatch):
+    """순수 표시용 호출이다 — 제목 색 때문에 창이 안 뜨는 쪽이 훨씬 나쁘다."""
+    tk = pytest.importorskip("tkinter")
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("표시 장치가 없는 환경")
+    root.withdraw()
+
+    class _FakeSys:
+        platform = "win32"  # Windows 인 척하지만 ctypes.windll 이 없다
+
+    monkeypatch.setattr(theme, "sys", _FakeSys)
+    assert theme.apply_titlebar(root) is False  # 조용히 실패
+    root.destroy()
+
+
+def test_죽은_창에_적용해도_터지지_않는다():
+    tk = pytest.importorskip("tkinter")
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("표시 장치가 없는 환경")
+    root.withdraw()
+    dead = tk.Toplevel(root)
+    dead.destroy()
+    assert theme.apply_titlebar(dead) is False
+    root.destroy()
+
+
+def test_창_꾸미기는_한_번에_이뤄진다():
+    """호출 지점을 나누면 새 창에서 한쪽을 빠뜨린다 (복기 차트 창에서 실제로 있었다)."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "trader" / "ui" / "icons.py"
+    ).read_text(encoding="utf-8")
+    assert "apply_titlebar" in source

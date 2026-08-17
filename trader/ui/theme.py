@@ -232,6 +232,65 @@ def _apply_ttk(root: tk.Misc, c: Palette) -> None:
     root.configure(background=c.bg)
 
 
+# Windows 제목 표시줄을 어둡게 하는 DWM 속성 번호. 20 은 Win10 2004 이상,
+# 19 는 그 전(1809~1903). 어느 쪽이 맞는지 미리 알 수 없어 둘 다 시도한다.
+_DWMWA_DARK_MODE = (20, 19)
+
+
+def apply_titlebar(window: tk.Misc) -> bool:
+    """창 제목 표시줄·테두리를 지금 테마에 맞춘다 (Windows 전용). 적용됐으면 True.
+
+    Tk 는 제목 표시줄을 직접 그리지 않아 다크 모드에서도 흰색으로 남는다. Windows 는
+    앱이 **명시적으로 요청해야만** 어둡게 그려 주므로 DWM API 를 부른다.
+
+    **순수 표시용 호출이다.** 실패하면 제목만 지금처럼 흰색으로 남고 창은 정상이며,
+    매매·주문에는 어떤 경로로도 닿지 않는다. 그래서 모든 예외를 삼킨다 — 제목 색
+    때문에 프로그램이 안 뜨는 쪽이 훨씬 나쁘다.
+
+    주의한 것:
+    - **HWND 는 64비트다.** argtypes 를 지정하지 않으면 ctypes 가 32비트로 잘라
+      엉뚱한 핸들을 넘긴다.
+    - **winfo_id() 는 안쪽 창**을 준다. 제목 표시줄은 그 부모의 것이라 GetParent 로
+      한 단계 올라가야 한다.
+    - 창이 **화면에 나타나기 전에** 불러야 처음부터 어둡게 그려진다. 이미 보이는 창은
+      다시 그려야 반영되는데, 강제로 숨겼다 띄우면 포커스와 모달이 흐트러지므로 하지 않는다.
+    """
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        window.update_idletasks()  # 창이 실제로 만들어진 뒤라야 핸들이 나온다
+        user32 = ctypes.windll.user32
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
+        hwnd = wintypes.HWND(window.winfo_id())
+        parent = user32.GetParent(hwnd) or hwnd  # 부모가 없으면 자기 자신
+
+        dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute.argtypes = [
+            wintypes.HWND,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_long
+        want_dark = ctypes.c_int(1 if _current.name == DARK else 0)
+        for attribute in _DWMWA_DARK_MODE:
+            result = dwm.DwmSetWindowAttribute(
+                parent,
+                attribute,
+                ctypes.byref(want_dark),
+                ctypes.sizeof(want_dark),
+            )
+            if result == 0:  # S_OK
+                return True
+    except Exception:  # noqa: BLE001 — 제목 색 때문에 창이 안 뜨면 안 된다
+        pass
+    return False
+
+
 def classic(widget: tk.Misc, kind: str = "") -> dict:
     """고전 tk 위젯(Listbox·Text·Menu·Canvas)에 넣을 색 묶음.
 

@@ -13,6 +13,8 @@ from __future__ import annotations
 import tkinter as tk
 from pathlib import Path
 
+from trader.ui import theme
+
 ASSETS = Path(__file__).resolve().parents[2] / "assets"
 
 _APP_ICO = ASSETS / "three-line-trader.ico"
@@ -32,11 +34,15 @@ def clear_icons(dark: bool) -> tuple[Path, Path]:
 
 
 def apply_icon(window) -> None:
-    """창에 앱 아이콘을 붙인다. 실패해도 창은 그대로 뜬다.
+    """창 꾸미기 — 앱 아이콘 + 제목 표시줄 색. 실패해도 창은 그대로 뜬다.
 
     Windows 는 `.ico`, 그 밖의 환경은 `.png` 를 쓴다. 아이콘이 없다고 창을 못 띄우면
     안 되므로 모든 실패를 삼킨다 — 아이콘은 있으면 좋은 것이지 필수가 아니다.
+
+    제목 표시줄도 여기서 함께 맞춘다. 호출 지점을 나누면 새 창을 만들 때 한쪽을
+    빠뜨리게 되는데, 실제로 복기 차트 창에서 그런 일이 있었다(2026-08-18).
     """
+    theme.apply_titlebar(window)
     try:
         if _APP_ICO.exists():
             window.iconbitmap(str(_APP_ICO))
