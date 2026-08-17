@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
@@ -129,13 +128,10 @@ class RegisterDialog(tk.Toplevel):
                 "<Button-1>", lambda _e: (self._base_date.drop_down(), "break")[1]
             )
             # DateEntry 는 생성 시 오늘 날짜를 채운다. 기준봉은 '모름' 일 수 있으므로
-            # 위젯이 자리를 잡은 뒤 비운다 — 다만 편집 프리필이나 사용자가 고른 날짜를
-            # 덮지 않도록, 자동으로 채워진 오늘 날짜일 때만 비운다.
-            self._base_date.bind(
-                "<<DateEntrySelected>>",
-                lambda _e: setattr(self, "_base_date_set", True),
-            )
-            self._base_date.after_idle(self._clear_base_date_if_untouched)
+            # **바로 여기서** 비운다. 예전에는 after_idle 로 미뤘는데, 그 사이에 사용자가
+            # 고르거나 프리필이 들어오면 그것을 지워버리는 경주가 생겼다(2026-08-12·17
+            # 두 번 발현). 만들자마자 비우면 지울 것은 자동 입력값뿐이라 경주가 없다.
+            self._vars["base_date"].set("")
             ttk.Button(
                 date_box,
                 text="지우기",
@@ -198,7 +194,6 @@ class RegisterDialog(tk.Toplevel):
         for e in self._holding_entries:
             e.configure(state="disabled")
 
-        self._base_date_set = False  # 프리필/사용자 선택이 있었는지
         if self._edit_mode:
             symbol, name, params, pos, memo, tags, base_date = edit
             self._prev_position = pos
@@ -210,7 +205,6 @@ class RegisterDialog(tk.Toplevel):
                 if self._base_date is not None:
                     self._base_date.set_date(base_date)  # 달력 위치도 그 날짜로
                 self._vars["base_date"].set(base_date)
-                self._base_date_set = True
             else:
                 self._vars["base_date"].set("")
             for tag in (t.strip() for t in tags.split(",") if t.strip()):
@@ -255,18 +249,6 @@ class RegisterDialog(tk.Toplevel):
         editable = State(self._state.get()) is not State.WAITING  # 대기만 0 고정
         for entry in self._holding_entries:
             entry.configure(state="normal" if editable else "disabled")
-
-    def _clear_base_date_if_untouched(self) -> None:
-        """생성 직후 자동으로 채워진 오늘 날짜만 비운다 (프리필·사용자 선택은 지키고).
-
-        플래그만 보면 안 된다. 이 정리는 after_idle 로 미뤄져 있어, 창이 뜨자마자
-        날짜를 고르면 **선택이 끝난 뒤에 실행되어 방금 고른 값을 지워버린다**
-        (2026-08-12, Windows 에서 발현). 값이 실제로 '오늘' 일 때만 지워 그 경주를 없앤다.
-        """
-        if self._base_date_set:
-            return
-        if self._vars["base_date"].get() == dt.date.today().isoformat():
-            self._vars["base_date"].set("")
 
     def _submit(self) -> None:
         v = {k: var.get().strip().replace(",", "") for k, var in self._vars.items()}

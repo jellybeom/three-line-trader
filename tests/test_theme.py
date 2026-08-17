@@ -162,7 +162,11 @@ def test_윈도우가_아니면_아무것도_하지_않는다(monkeypatch):
 
 
 def test_제목_표시줄_적용이_실패해도_예외가_나가지_않는다(monkeypatch):
-    """순수 표시용 호출이다 — 제목 색 때문에 창이 안 뜨는 쪽이 훨씬 나쁘다."""
+    """순수 표시용 호출이다 — 제목 색 때문에 창이 안 뜨는 쪽이 훨씬 나쁘다.
+
+    Windows 인 척만 해서는 안 된다. 진짜 Windows 에서는 호출이 **성공**해 버려
+    시험이 뒤집힌다(2026-08-18). ctypes 자체를 못 쓰게 만들어 실패를 강제한다.
+    """
     tk = pytest.importorskip("tkinter")
 
     try:
@@ -172,11 +176,20 @@ def test_제목_표시줄_적용이_실패해도_예외가_나가지_않는다(m
     root.withdraw()
 
     class _FakeSys:
-        platform = "win32"  # Windows 인 척하지만 ctypes.windll 이 없다
+        platform = "win32"
 
     monkeypatch.setattr(theme, "sys", _FakeSys)
+    monkeypatch.setitem(__import__("sys").modules, "ctypes", None)  # import 가 터진다
+
     assert theme.apply_titlebar(root) is False  # 조용히 실패
     root.destroy()
+
+
+def test_색을_윈도우_형식으로_뒤집는다():
+    """COLORREF 는 0x00BBGGRR 로 RGB 순서가 뒤집혀 있다."""
+    assert theme._colorref("#123456") == 0x563412
+    assert theme._colorref("#ff0000") == 0x0000FF
+    assert theme._colorref("#000000") == 0
 
 
 def test_죽은_창에_적용해도_터지지_않는다():

@@ -43,6 +43,13 @@ def apply_icon(window) -> None:
     빠뜨리게 되는데, 실제로 복기 차트 창에서 그런 일이 있었다(2026-08-18).
     """
     theme.apply_titlebar(window)
+    # 창 설정(resizable·grab_set·transient)을 바꾸면 Windows 가 창틀을 다시 만들어
+    # 방금 건 값이 날아간다. 그 뒤에 한 번 더 건다 — 창이 화면에 나타나기 전이라
+    # 깜빡임 없이 반영된다(등록 창의 제목만 흰색으로 남았던 이유, 2026-08-18).
+    try:
+        window.after_idle(lambda: theme.apply_titlebar(window))
+    except tk.TclError:
+        pass
     try:
         if _APP_ICO.exists():
             window.iconbitmap(str(_APP_ICO))

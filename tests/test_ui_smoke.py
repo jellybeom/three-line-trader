@@ -547,3 +547,38 @@ def test_메뉴_순서가_의도대로다(app):
         "편집",
         "관심종목 제외",
     ]
+
+
+def test_기준봉은_만들자마자_비워진다(app):
+    """DateEntry 가 자동으로 채우는 오늘 날짜를 **즉시** 비운다.
+
+    예전에는 after_idle 로 미뤘는데, 그 사이에 사용자가 고르거나 프리필이 들어오면
+    그것을 지워버렸다(2026-08-12·17 두 번 발현). 미루지 않으면 지울 것이 자동
+    입력값뿐이라 경주 자체가 없다.
+    """
+    dialog, _ = _dialog(app)
+    if dialog._base_date is None:
+        pytest.skip("tkcalendar 미설치")
+    assert dialog._vars["base_date"].get() == ""
+    app.update()
+    app.update_idletasks()
+    assert dialog._vars["base_date"].get() == ""  # 나중에도 그대로
+
+
+def test_고른_기준봉은_어떤_시점에도_지워지지_않는다(app):
+    """미뤄진 정리가 사라졌으므로, 언제 골라도 값이 남는다."""
+    from trader.ui import bus as bus_mod
+    from trader.ui.register_dialog import RegisterDialog
+
+    funds = bus_mod.Funds(
+        total=1_000_000, max_symbols=5, buy1_amount=100_000, buy2_amount=100_000
+    )
+    dialog = RegisterDialog(app, on_submit=lambda *_: None, funds=funds, edit=None)
+    if dialog._base_date is None:
+        dialog.destroy()
+        pytest.skip("tkcalendar 미설치")
+    dialog._base_date.set_date("2026-08-05")  # update() 전에 고른다
+    app.update()
+    app.update_idletasks()
+    assert dialog._vars["base_date"].get() == "2026-08-05"
+    dialog.destroy()

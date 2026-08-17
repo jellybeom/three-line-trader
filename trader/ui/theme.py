@@ -232,9 +232,18 @@ def _apply_ttk(root: tk.Misc, c: Palette) -> None:
     root.configure(background=c.bg)
 
 
-# Windows 제목 표시줄을 어둡게 하는 DWM 속성 번호. 20 은 Win10 2004 이상,
-# 19 는 그 전(1809~1903). 어느 쪽이 맞는지 미리 알 수 없어 둘 다 시도한다.
-_DWMWA_DARK_MODE = (20, 19)
+# Windows 창 장식 관련 DWM 속성 번호.
+_DWMWA_DARK_MODE = (20, 19)  # 20: Win10 2004+, 19: 1809~1903 — 어느 쪽인지 몰라 둘 다
+_DWMWA_BORDER_COLOR = 34  # Win11 22000+ (그 아래에서는 무시된다)
+_DWMWA_CAPTION_COLOR = 35
+_DWMWA_TEXT_COLOR = 36
+_DWMWA_COLOR_DEFAULT = 0xFFFFFFFF  # 기본값으로 되돌리기
+
+
+def _colorref(hex_color: str) -> int:
+    """#RRGGBB → Windows COLORREF(0x00BBGGRR). 순서가 뒤집혀 있다."""
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+    return (b << 16) | (g << 8) | r
 
 
 def apply_titlebar(window: tk.Misc) -> bool:
@@ -252,8 +261,9 @@ def apply_titlebar(window: tk.Misc) -> bool:
       엉뚱한 핸들을 넘긴다.
     - **winfo_id() 는 안쪽 창**을 준다. 제목 표시줄은 그 부모의 것이라 GetParent 로
       한 단계 올라가야 한다.
-    - 창이 **화면에 나타나기 전에** 불러야 처음부터 어둡게 그려진다. 이미 보이는 창은
-      다시 그려야 반영되는데, 강제로 숨겼다 띄우면 포커스와 모달이 흐트러지므로 하지 않는다.
+    - **창 설정을 바꾸면 값이 날아간다.** resizable()·grab_set() 뒤에 다시 걸어야 한다
+      (등록 창의 제목만 흰색으로 남았던 이유, 2026-08-18).
+    - 테두리 색은 제목과 **다른 속성**이다(34). Win11 에만 있고 그 아래에서는 무시된다.
     """
     if not sys.platform.startswith("win"):
         return False
@@ -276,19 +286,31 @@ def apply_titlebar(window: tk.Misc) -> bool:
             wintypes.DWORD,
         ]
         dwm.DwmSetWindowAttribute.restype = ctypes.c_long
-        want_dark = ctypes.c_int(1 if _current.name == DARK else 0)
-        for attribute in _DWMWA_DARK_MODE:
-            result = dwm.DwmSetWindowAttribute(
-                parent,
-                attribute,
-                ctypes.byref(want_dark),
-                ctypes.sizeof(want_dark),
+
+        def send(attribute: int, value: int) -> bool:
+            data = ctypes.c_int(value)
+            return (
+                dwm.DwmSetWindowAttribute(
+                    parent, attribute, ctypes.byref(data), ctypes.sizeof(data)
+                )
+                == 0
             )
-            if result == 0:  # S_OK
-                return True
+
+        dark = _current.name == DARK
+        applied = any(send(attr, 1 if dark else 0) for attr in _DWMWA_DARK_MODE)
+        # 테두리·제목 색까지 맞춘다 (Win11). 라이트에서는 기본값으로 되돌린다.
+        border = _colorref(_current.border) if dark else _DWMWA_COLOR_DEFAULT
+        caption = _colorref(_current.bg) if dark else _DWMWA_COLOR_DEFAULT
+        text = _colorref(_current.fg) if dark else _DWMWA_COLOR_DEFAULT
+        for attribute, value in (
+            (_DWMWA_BORDER_COLOR, border),
+            (_DWMWA_CAPTION_COLOR, caption),
+            (_DWMWA_TEXT_COLOR, text),
+        ):
+            send(attribute, value)
+        return applied
     except Exception:  # noqa: BLE001 — 제목 색 때문에 창이 안 뜨면 안 된다
-        pass
-    return False
+        return False
 
 
 def classic(widget: tk.Misc, kind: str = "") -> dict:
