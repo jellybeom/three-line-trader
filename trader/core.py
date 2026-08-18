@@ -68,6 +68,9 @@ _COST_DIFF_WON = 100  # 거래비용 대조에서 알릴 최소 차이
 _PNL_DIFF_WON = (
     1_000  # 세후 손익 대조에서 알릴 최소 차이 (평단 계산 차이로 늘 몇백 원은 난다)
 )
+# 장중에 이 시간만큼 틱이 없으면 연결이 살아 있어도 다시 맺는다. 118종목이면 몇 초에
+# 한 번은 오므로 90초 침묵은 명백한 이상이다.
+_TICK_STALL_SEC = 90
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
@@ -290,6 +293,8 @@ class Core:
         self._sched_done: dict[str, str] = {}
         # 휴장 안내를 보낸 날짜. DB 가 아니라 여기 두어 **재시작하면 다시 알린다**.
         self._holiday_notified = ""
+        # 마지막으로 **WebSocket** 틱을 받은 시각 (REST 보정은 세지 않는다)
+        self._last_ws_tick = 0.0
         self._chart_busy: set[str] = set()  # 종목별 차트 생성 중복 방지
 
     # ── 메인 루프 ───────────────────────────────────────────────
@@ -328,6 +333,7 @@ class Core:
         while True:
             await self._drain_commands()
             await self._check_pending()
+            await self._check_tick_flow()
             await self._check_schedule()
             if (
                 self._notice_batch
@@ -721,7 +727,7 @@ class Core:
         self._watcher = Watcher(
             auth.ws_url,
             auth.token,
-            on_tick=self._on_tick,
+            on_tick=self._on_ws_tick,
             on_status=self._on_ws_status,
             on_reconnect=self._on_ws_reconnect,
             on_fill=self._on_fill_values,
@@ -1361,6 +1367,48 @@ class Core:
         )
 
     # ── WebSocket 상태 ──────────────────────────────────────────
+
+    async def _on_ws_tick(self, tick: Tick) -> None:
+        """WebSocket 으로 들어온 틱. **여기서만** 수신 시각을 남긴다.
+
+        재연결 뒤 REST 가격 보정도 _on_tick 을 부르는데, 그것까지 '살아 있다' 로 세면
+        정체를 감지하지 못한다 — 보정은 한 번뿐이고 그 뒤로 조용해도 시계는 갱신된
+        상태로 남기 때문이다.
+        """
+        self._last_ws_tick = time.monotonic()
+        await self._on_tick(tick)
+
+    async def _check_tick_flow(self) -> None:
+        """장중에 틱이 끊기면 연결을 다시 맺는다.
+
+        **연결은 살아 있는데 데이터만 안 오는 상태**가 실제로 있었다(2026-08-18:
+        09:33 프로토콜 오류로 끊겼다가 09:34 재연결에 성공했는데, 그 뒤 15:30 까지
+        틱이 한 건도 오지 않았다). 라이브러리 keepalive 는 소켓이 죽어야 잡아내고,
+        서버가 ping 에만 답하면 `async for` 는 영원히 기다린다. 그날 1선을 이탈한
+        11종목이 통째로 진입하지 못했다.
+
+        감시 중이고 장중일 때만 본다 — 개장 전·점심 전후를 가리지 않아도 118종목이면
+        몇 초에 한 번은 틱이 온다. 조용한 것 자체가 이상 신호다.
+        """
+        if not self._running or self._watcher is None:
+            return
+        now = datetime.now()
+        if now.weekday() >= 5 or not (dtime(9, 0) <= now.time() <= dtime(15, 30)):
+            return
+        if self._last_ws_tick == 0.0:  # 아직 첫 틱 전 (개장 직후 몇 초)
+            self._last_ws_tick = time.monotonic()
+            return
+        idle = time.monotonic() - self._last_ws_tick
+        if idle < _TICK_STALL_SEC:
+            return
+        self._last_ws_tick = time.monotonic()  # 다음 판정까지 다시 기다린다
+        self._log(
+            "시스템",
+            "경고",
+            f"{idle:.0f}초 동안 시세가 오지 않아 연결을 다시 맺습니다"
+            " — 그동안의 진입·청산 판정이 밀렸을 수 있습니다",
+        )
+        await self._watcher.force_reconnect()
 
     async def _on_ws_status(self, msg: str) -> None:
         self._log("시스템", "연결", msg)

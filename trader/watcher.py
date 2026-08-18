@@ -110,6 +110,25 @@ class Watcher:
         if self._ws is not None:
             await self._ws.close()
 
+    async def force_reconnect(self) -> bool:
+        """지금 연결을 끊어 재연결을 유도한다. 끊을 것이 있었으면 True.
+
+        **연결은 살아 있는데 데이터만 안 오는 상태**를 벗어나기 위한 수단이다.
+        서버가 protocol ping 에는 답하면서 시세를 보내지 않으면 라이브러리의 keepalive
+        (ping_interval=20)로는 잡히지 않고, `async for` 가 영원히 기다린다
+        (2026-08-18: 09:34 재연결 뒤 6시간 동안 틱이 한 건도 오지 않았다).
+
+        close() 하면 수신 루프가 끝나고 run() 의 재연결 경로로 이어진다.
+        """
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001 — 이미 죽은 소켓이어도 목적은 달성이다
+            pass
+        return True
+
     async def run(self) -> None:
         """수신 루프. 예외든 서버측 정상 종료든, 끊기면 지수 백오프로 재연결한다."""
         delay = _RECONNECT_BASE
