@@ -416,12 +416,13 @@ def test_실현손익은_세후_순손익이다():
     """문서 예시로 확인한 항등식: (체결가 − 매입단가)×수량 − 수수료 − 세금 = tdy_sel_pl."""
     b = _broker(
         {
-            "ka10072": {
-                "dt_stk_div_rlzt_pl": [
+            "ka10077": {
+                "tdy_rlzt_pl": "179439",
+                "tdy_rlzt_pl_dtl": [
                     {
                         "stk_nm": "삼성전자",
                         "cntr_qty": "1",
-                        "buy_uv": "97602.96",  # 소수 문자열 — int() 는 예외가 난다
+                        "buy_uv": "97602.9573459",  # 소수 문자열 — int() 는 예외가 난다
                         "cntr_pric": "158200",
                         "tdy_sel_pl": "59813.04",
                         "pl_rt": "+61.28",
@@ -429,22 +430,24 @@ def test_실현손익은_세후_순손익이다():
                         "tdy_trde_cmsn": "500",
                         "tdy_trde_tax": "284",
                     }
-                ]
+                ],
             }
         }
     )
-    row = b.realized_pnl("2026-08-11")[0]
+    row = b.realized_pnl()[0]
     assert row["symbol"] == "005930"
     gross = (row["sell_price"] - row["buy_price"]) * row["qty"]
-    assert round(gross - row["commission"] - row["tax"], 2) == row["pnl"]
+    assert abs(gross - row["commission"] - row["tax"] - row["pnl"]) < 0.01
     assert round(row["pnl"] / (row["buy_price"] * row["qty"]), 4) == row["rate"]
 
 
-def test_실현손익은_하루씩_조회한다():
-    """응답에 일자 필드가 없어 여러 날이 섞이면 구분할 수 없다."""
-    b = _broker({"ka10072": {"dt_stk_div_rlzt_pl": []}})
-    b.realized_pnl("2026-08-11")
-    assert b._calls[0][1]["strt_dt"] == "20260811"  # 하이픈 제거
+def test_당일_실현손익만_조회한다():
+    """ka10072 는 응답에 일자가 없어 '오늘' 인지 확인할 수 없었다 — ka10077 로 바꿨다."""
+    b = _broker({"ka10077": {"tdy_rlzt_pl_dtl": []}})
+    b.realized_pnl()
+    api_id, body = b._calls[0]
+    assert api_id == "ka10077"
+    assert "strt_dt" not in body  # 날짜를 넘기지 않는다 (당일 전용 TR)
 
 
 # ── 15:35 이후 자동화 없음 ────────────────────────────────────

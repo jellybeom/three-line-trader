@@ -36,7 +36,7 @@ _TR_DEPOSIT = "kt00001"
 _TR_HOLDINGS = "kt00018"
 _TR_OPEN_ORDERS = "ka10075"  # 미체결요청 — 중복 주문 방지
 _TR_FILLS = "ka10076"  # 체결요청 — 당일 체결 내역 (증권사 실측 수수료·세금)
-_TR_REALIZED = "ka10072"  # 일자별종목별실현손익요청 — 손익 대조
+_TR_REALIZED = "ka10077"  # 당일실현손익상세 — '오늘' 의 정의가 분명해 대조에 쓴다
 _TR_STOCK_INFO = "ka10001"
 _TR_DAILY_CHART = "ka10081"  # 주식 일봉차트
 _TR_MINUTE_CHART = "ka10080"  # 주식 분봉차트
@@ -537,13 +537,15 @@ class Broker:
             )
         return rows
 
-    def realized_pnl(self, trade_date: str, symbol: str = "") -> list[dict]:
-        """일자별 종목별 실현손익 (ka10072). trade_date 는 YYYYMMDD.
+    def realized_pnl(self, symbol: str = "") -> list[dict]:
+        """**당일** 실현손익 상세 (ka10077).
 
-        ⚠️ 응답에 **일자 필드가 없어** 여러 날이 섞여 와도 구분할 수 없다. 그래서
-        하루씩만 조회한다 (strt_dt 를 '그날' 로 지정).
+        예전에는 ka10072(일자별)를 썼는데 응답에 일자 필드가 없어 "그날 하루" 인지
+        "그날 이후" 인지 확인할 수 없었다. ka10077 은 이름 그대로 당일치만 주므로
+        '오늘 얼마 벌었나' 를 대조하기에 맞다(2026-08-19 교체).
+
         ⚠️ stk_cd 에 'A' 접두사가 붙는다 (`A005930`). 다른 TR 과 달라 반드시 벗겨야 한다.
-        ⚠️ 매입단가·손익이 **소수 문자열**("97602.96")이라 int() 파싱은 예외가 난다.
+        ⚠️ 매입단가·손익이 **소수 문자열**("97602.9573459")이라 int() 파싱은 예외가 난다.
 
         문서 예시로 확인한 계산식: tdy_sel_pl = (체결가 − 매입단가) × 수량 − 수수료 − 세금.
         즉 **세후 순손익**이고, pl_rt 는 매입금액 대비 수익률이다.
@@ -551,11 +553,11 @@ class Broker:
         data = self._request(
             _PATH_ACCOUNT,
             _TR_REALIZED,
-            {"stk_cd": symbol, "strt_dt": trade_date.replace("-", "")},
+            {"stk_cd": symbol},
             retries=self._QUERY_RETRIES,
         )
         rows = []
-        for row in data.get("dt_stk_div_rlzt_pl", []) or []:
+        for row in data.get("tdy_rlzt_pl_dtl", []) or []:
             code = str(row.get("stk_cd") or "").lstrip("A")
             if not code:
                 continue

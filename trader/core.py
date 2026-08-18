@@ -43,6 +43,7 @@ from trader.notifier import (
 from dataclasses import replace
 
 from trader.state_machine import (
+    carry_to_next_day,
     Decision,
     Params,
     Side,
@@ -414,7 +415,7 @@ class Core:
                     s,
                     name,
                     params,
-                    e["pos"],
+                    carry_to_next_day(e["pos"]),
                     memo=memo,
                     tags=tags,
                     base_date=base_date,
@@ -446,7 +447,7 @@ class Core:
                     s,
                     e["name"],
                     e["params"],
-                    e["pos"],
+                    carry_to_next_day(e["pos"]),
                     memo=e.get("memo", ""),
                     tags=e.get("tags", ""),
                     base_date=e.get("base_date", ""),
@@ -762,14 +763,19 @@ class Core:
         ):  # 하루 몇 번뿐인 결산 → embed
             # 상태 경로는 매매일지와 같은 문구를 쓴다 — 두 곳이 다르게 말하면
             # 같은 매매인지 헷갈린다.
+            # "이 매매로 얼마 벌었나" 는 사이클 전체다. pos 에는 오늘 것만 들어 있어
+            # 이월된 종목이면 앞선 날의 익절이 빠진다.
+            cycle_realized, cycle_fees = self._store.cycle_totals(
+                symbol, until=self._date
+            )
             embed = build_trade_embed(
                 e["name"],
                 symbol,
                 reason,
                 qty,
                 price,
-                pos.realized_pnl,
-                pos.fees,
+                cycle_realized,
+                cycle_fees,
                 path=transition_path(
                     self._store.symbol_cycle(symbol, until=self._date)
                 ),
@@ -2012,9 +2018,7 @@ class Core:
             return []
         symbols, fills = self._store.daily_report(self._date)
         broker_fills = await self._query_broker("filled_orders", "체결")
-        realized = await self._query_broker(
-            "realized_pnl", "실현손익", self._date.replace("-", "")
-        )
+        realized = await self._query_broker("realized_pnl", "실현손익")
         lines: list[str] = []
         if broker_fills is not None:
             lines += self._reconcile_cost(symbols, fills, broker_fills)

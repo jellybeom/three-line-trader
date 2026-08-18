@@ -356,6 +356,29 @@ def apply_fill(
     )
 
 
+def carry_to_next_day(pos: Position) -> Position:
+    """다음 매매일로 넘길 포지션 — **그날의 값은 남기고 간다.**
+
+    실현손익·거래비용은 **그 일이 일어난 날**의 것이다. 통째로 넘기면 어제 번 돈이
+    오늘 것으로 다시 계산돼, 오늘 한 푼도 못 벌었는데 이익이 난 것처럼 보인다
+    (2026-08-18 씨앤씨인터내셔널: 평단 그대로 팔았는데 +707원으로 보고됐다).
+    매매 전체의 손익은 날짜별 기록을 **합산**해서 구한다(store.cycle_totals).
+
+    반대로 **최고가·최저가(MFE/MAE)는 그대로 가져간다.** 보유가 이어지는 동안의
+    값이라 며칠에 걸치는 것이 원래 의미다.
+
+    당일 시가·종가·최저가는 하루짜리 값이라 비운다.
+    """
+    return replace(
+        pos,
+        realized_pnl=0.0,
+        fees=0.0,
+        day_low=0.0,
+        day_open=0.0,
+        day_close=0.0,
+    )
+
+
 def reset(pos: Position) -> Position:
     """관리자 수동 개입: 종료 → 대기. 새 사이클을 위해 포지션을 초기화한다."""
     if pos.state is not State.CLOSED:

@@ -123,8 +123,12 @@ def _collapse_cycles(rows: list[dict]) -> list[dict]:
     5일치 행이 남는데, 일지에서는 '한 번의 매매' 이므로 한 줄이어야 한다
     (안 그러면 같은 매매를 다섯 번 쓰게 된다).
 
-    이월은 포지션을 통째로 복사하므로 **사이클의 마지막 행에 최종 손익이 들어 있다**.
-    그 행만 남기되, 앞선 날에 써 둔 코멘트는 잃지 않도록 끌어온다.
+    각 행에는 **그날의** 실현손익·비용만 들어 있으므로(이월 시 초기화한다), 사이클
+    전체 손익은 **날짜별 값을 더해서** 구한다. 예전에는 이월이 손익까지 복사해 마지막
+    행 하나로 충분했는데, 그 방식은 어제 번 돈을 오늘 것으로 다시 세는 문제가 있었다
+    (2026-08-18). 표시 값(상태·평단·잔량)은 마지막 행을 쓰고, 돈은 합산한다.
+
+    앞선 날에 써 둔 코멘트는 잃지 않도록 끌어온다.
     직전 행이 '종료' 였다면 그다음은 새 사이클(리셋 후 재진입)이다.
     """
     kept: list[dict] = []
@@ -134,6 +138,14 @@ def _collapse_cycles(rows: list[dict]) -> list[dict]:
         if not current:
             return
         last = dict(current[-1])
+        # 돈은 사이클 전체를 더한다 (그날 것만 담긴 행들의 합)
+        last["realized_pnl"] = sum(r.get("realized_pnl") or 0 for r in current)
+        last["fees"] = sum(r.get("fees") or 0 for r in current)
+        # 보유 구간의 최고·최저는 며칠에 걸치므로 극값을 취한다
+        highs = [r["high_price"] for r in current if r.get("high_price")]
+        lows = [r["low_price"] for r in current if r.get("low_price")]
+        last["high_price"] = max(highs) if highs else 0.0
+        last["low_price"] = min(lows) if lows else 0.0
         for field in ("good", "bad", "daily_path", "minute_path"):
             if not last.get(field):  # 이월 전 날짜에 남긴 것을 이어받는다
                 last[field] = next(
@@ -158,11 +170,44 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 11  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 12  # 스키마 변경 시 1 증가.
+
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
 # 여기 없는 버전 차이는 데이터 구조가 바뀐 것이므로 종전대로 명확한 에러로 안내한다.
-_MIGRATIONS: dict[int, tuple[str, ...]] = {
+def _split_daily_pnl(conn: sqlite3.Connection) -> None:
+    """누적으로 쌓여 있던 실현손익·비용을 **그날 것만** 남기도록 되돌린다.
+
+    예전에는 이월할 때 포지션을 통째로 복사해 어제 번 돈이 오늘 행에도 들어 있었다.
+    그래서 '오늘 얼마 벌었나' 가 부풀려졌다(2026-08-18 씨앤씨인터내셔널: 평단 그대로
+    팔아 0원인데 +1,050 으로 기록). 각 행에서 **직전 행의 누적을 빼면** 그날 몫이 된다.
+
+    사이클이 끝나면(종료) 다음 행은 새 매매이므로 기준을 0 으로 되돌린다.
+    """
+    rows = conn.execute("""SELECT trade_date, symbol, realized_pnl, fees, state
+           FROM positions ORDER BY symbol, trade_date""").fetchall()
+    updates: list[tuple[float, float, str, str]] = []
+    prev_symbol = ""
+    carried_pnl = carried_fees = 0.0
+    for trade_date, symbol, realized, fees, state in rows:
+        if symbol != prev_symbol:  # 다른 종목 — 기준을 새로 잡는다
+            prev_symbol, carried_pnl, carried_fees = symbol, 0.0, 0.0
+        realized, fees = realized or 0.0, fees or 0.0
+        updates.append(
+            (realized - carried_pnl, fees - carried_fees, trade_date, symbol)
+        )
+        # 다음 행의 기준은 **원래 값**이다 (방금 고친 값이 아니라)
+        if state == State.CLOSED.value:
+            carried_pnl = carried_fees = 0.0  # 사이클 종료 — 다음은 새 매매
+        else:
+            carried_pnl, carried_fees = realized, fees
+    conn.executemany(
+        "UPDATE positions SET realized_pnl = ?, fees = ? WHERE trade_date = ? AND symbol = ?",
+        updates,
+    )
+
+
+_MIGRATIONS: dict[int, tuple] = {
     8: ("ALTER TABLE events ADD COLUMN trigger_price REAL",),  # 슬리피지 기록용
     9: ("ALTER TABLE positions ADD COLUMN day_low REAL",),  # 1선 근접도 분석용
     10: (  # 매매일지: 종목 선정 근거(태그·기준봉)와 벤치마크(시가·종가)
@@ -171,6 +216,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE positions ADD COLUMN day_open REAL",
         "ALTER TABLE positions ADD COLUMN day_close REAL",
     ),
+    12: (_split_daily_pnl,),  # 이월이 복사해 온 손익을 날짜별로 되돌린다
     11: (  # 매매일지 2단계: 코멘트와 차트 보관 경로
         """CREATE TABLE IF NOT EXISTS journal (
             trade_date TEXT NOT NULL,
@@ -204,6 +250,7 @@ class Store:
         )
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
         if has_tables and version != _SCHEMA_VERSION:
+            self._backup(path, version)  # 이관은 되돌릴 수 없다 — 먼저 복사해 둔다
             if not self._migrate(version):
                 self._conn.close()
                 raise RuntimeError(
@@ -214,6 +261,23 @@ class Store:
         self._conn.executescript(_SCHEMA)
         self._conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         self._conn.commit()
+
+    @staticmethod
+    def _backup(path: str, version: int) -> None:
+        """이관 전 DB 를 통째로 복사해 둔다.
+
+        v12 처럼 **값을 다시 계산하는** 이관은 되돌릴 수 없다. 매매 이력은 다시 만들 수
+        없는 자료라, 실패했을 때 돌아갈 곳을 남긴다. 복사에 실패해도 이관은 진행한다 —
+        백업이 없다고 프로그램을 못 쓰게 하는 것이 더 나쁘다.
+        """
+        import shutil
+
+        target = f"{path}.v{version}.bak"
+        try:
+            if not Path(target).exists():  # 여러 번 켜도 첫 백업을 덮지 않는다
+                shutil.copy2(path, target)
+        except OSError:
+            pass
 
     def _migrate(self, version: int) -> bool:
         """구버전 DB 를 최신으로 올린다. 매매 이력을 지우지 않는 것이 목적이다.
@@ -228,9 +292,12 @@ class Store:
             if target not in _MIGRATIONS:
                 return False
             steps.extend(_MIGRATIONS[target])
-        for sql in steps:
+        for step in steps:
             try:
-                self._conn.execute(sql)
+                if callable(step):  # 값을 다시 계산하는 이관 (SQL 로는 어려운 것)
+                    step(self._conn)
+                else:
+                    self._conn.execute(step)
             except sqlite3.OperationalError as e:
                 if "duplicate column" not in str(e):  # 이미 적용된 경우는 정상
                     return False
@@ -554,6 +621,26 @@ class Store:
             if cycle or (symbol, until) not in result:
                 result[(symbol, until)] = cycle
         return result
+
+    def cycle_totals(self, symbol: str, until: str = "") -> tuple[float, float]:
+        """마지막 매매 사이클의 (세전 실현손익, 거래비용) 합계.
+
+        날짜별 행에는 그날 것만 있으므로 더해야 매매 전체가 된다. 종료 알림처럼
+        "이 매매로 얼마 벌었나" 를 답해야 하는 곳에서 쓴다.
+        """
+        rows = self._conn.execute(
+            """SELECT p.trade_date, p.realized_pnl, p.fees, p.state
+               FROM positions p WHERE p.symbol = ?
+               AND (? = '' OR p.trade_date <= ?) ORDER BY p.trade_date""",
+            (symbol, until, until),
+        ).fetchall()
+        realized = fees = 0.0
+        for row in rows:
+            realized += row["realized_pnl"] or 0
+            fees += row["fees"] or 0
+            if row["state"] == State.CLOSED.value and row is not rows[-1]:
+                realized = fees = 0.0  # 다음 사이클이 이어진다 — 여기서 다시 센다
+        return realized, fees
 
     def symbol_fills(self, symbol: str, until: str = "") -> list[dict]:
         """마지막 사이클의 **체결만** (주문이 동반된 전이). 차트 마커용."""
