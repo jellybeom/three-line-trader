@@ -754,8 +754,21 @@ class Core:
         if (
             pos.state is State.CLOSED and pos.total_bought
         ):  # 하루 몇 번뿐인 결산 → embed
+            # 상태 경로는 매매일지와 같은 문구를 쓴다 — 두 곳이 다르게 말하면
+            # 같은 매매인지 헷갈린다.
             embed = build_trade_embed(
-                e["name"], symbol, reason, qty, price, pos.realized_pnl, pos.fees
+                e["name"],
+                symbol,
+                reason,
+                qty,
+                price,
+                pos.realized_pnl,
+                pos.fees,
+                path=transition_path(
+                    self._store.symbol_cycle(symbol, until=self._date)
+                ),
+                avg_price=pos.avg_price,
+                total_bought=pos.total_bought,
             )
             asyncio.create_task(self._send_embed(embed))
             return

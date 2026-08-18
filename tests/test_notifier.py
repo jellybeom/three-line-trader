@@ -547,3 +547,96 @@ def test_전체는_모두_보낸다():
 
     for kind in ("체결", "전이", "연결", "경고", "에러"):
         assert should_notify("전체", "005930", kind)
+
+
+# ── 종료 결산 알림 ────────────────────────────────────────────
+
+
+def _closed_embed(**kwargs):
+    from trader.notifier import build_trade_embed
+
+    base = dict(
+        name="동양파일",
+        symbol="228340",
+        reason="3선 이탈 → 전량 손절",
+        qty=125,
+        price=3_065,
+        realized=-22_393,
+        fees=692,
+        path="2차 매수 → 손절",
+        avg_price=3_244,
+        total_bought=125,
+    )
+    base.update(kwargs)
+    return build_trade_embed(**base)
+
+
+def test_상태_경로가_결과_자리를_대신한다():
+    """'전량 손절' 만으로는 1차에서 죽었는지 2차까지 갔는지 알 수 없다."""
+    embed = _closed_embed()
+    assert "2차 매수 → 손절" in embed["description"]
+    assert "125주" not in embed["description"]  # 잔량 주수는 뺐다
+
+
+def test_경로가_없으면_사유로_대신한다():
+    """옛 기록이나 경로 계산 실패에도 알림은 나가야 한다."""
+    assert "전량 손절" in _closed_embed(path="")["description"]
+
+
+def test_수익률을_함께_보여준다():
+    """금액만으로는 큰 손실인지 알 수 없다 — 저가주는 절대액이 커 보인다."""
+    assert "-5.69%" in _closed_embed()["description"]
+
+
+def test_청산가는_평균이다():
+    """3단 익절이면 판 가격이 제각각이라 마지막 한 건으로는 답이 안 된다."""
+    embed = _closed_embed(
+        name="제닉",
+        symbol="123330",
+        realized=9_050,
+        fees=343,
+        price=32_100,  # 마지막 체결가
+        avg_price=30_600,
+        total_bought=6,
+        path="1차 매수 → 3% 익절 → 5% 익절 → 7% 익절",
+    )
+    # 평단 30,600 + 주당 세전손익(9,050/6=1,508) = 32,108
+    assert "평단 30,600 → 청산 32,108" in embed["description"]
+
+
+def test_투입_금액을_읽기_쉽게_줄인다():
+    """폰에서 자릿수를 세지 않아도 규모가 잡히게."""
+    from trader.notifier import _short_won
+
+    assert _short_won(406_000) == "40.6만원"
+    assert _short_won(9_999) == "9,999원"  # 만원 미만은 그대로
+    assert _short_won(120_000_000) == "1.20억원"
+    assert _short_won(8_500) == "8,500원"
+    assert (
+        "투입 40.5만원"
+        in _closed_embed(avg_price=3_244, total_bought=125)["description"]
+    )
+
+
+def test_진입하지_않고_끝나면_가격_줄이_없다():
+    """3선 이하 갭 시가 — 살 것도 팔 것도 없었다."""
+    embed = _closed_embed(
+        path="진입 금지", avg_price=0, total_bought=0, realized=0, fees=0, qty=0
+    )
+    assert "평단" not in embed["description"]
+    assert "%" not in embed["description"]  # 0 으로 나누지 않는다
+
+
+def test_이익과_손실은_색과_아이콘이_다르다():
+    profit = _closed_embed(realized=9_050, fees=343)
+    loss = _closed_embed()
+    assert profit["title"].startswith("💰")
+    assert loss["title"].startswith("🛑")
+    assert profit["color"] != loss["color"]
+
+
+def test_세후_기준이다():
+    """비용을 뺀 값이 실제로 번 돈이다."""
+    embed = _closed_embed(realized=1_000, fees=300)
+    assert "+700원" in embed["description"]
+    assert "세전" not in embed["description"]  # 분해는 로그·대조에서 본다

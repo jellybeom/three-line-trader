@@ -116,29 +116,57 @@ def build_trade_embed(
     price: float,
     realized: float,
     fees: float,
+    path: str = "",
+    avg_price: float = 0.0,
+    total_bought: int = 0,
 ) -> dict:
     """종목이 '종료' 될 때의 결산 embed — 색 띠로 이익/손실이 한눈에 들어온다.
 
     매수·단계 익절처럼 자주 오는 알림은 한 줄 텍스트로 두고, 하루에 몇 번뿐인
     '종료' 만 embed 로 보내 대비를 만든다.
+
+    담는 것은 **경로 · 세후 손익 · 가격대** 셋이다(2026-08-18 재구성).
+    - 예전에는 '전량 손절 — 125주 @ 3,065' 였는데, 잔량 주수는 "그래서 어땠나" 에
+      답하지 않았고 1차에서 죽었는지 2차까지 갔는지도 알 수 없었다. 상태 경로가 그 자리를
+      대신한다.
+    - **수익률(%)** 을 넣는다. 금액만으로는 큰 손실인지 알 수 없다 — 저가주는 주식 수가
+      많아 절대액이 커 보인다.
+    - 청산가는 마지막 체결가가 아니라 **평균 청산가**다. 3단 익절을 하면 판 가격이
+      제각각이라 마지막 한 건만으로는 "결국 얼마에 팔았나" 를 답하지 못한다.
     """
     net = realized - fees
-    result = reason.split("→")[-1].strip()
     if net > 0:
         icon, color = "💰", _COLOR_PROFIT
     elif net < 0:
         icon, color = "🛑", _COLOR_LOSS
     else:
         icon, color = "⚪", _COLOR_FLAT
-    lines = [f"{result} — **{qty}주** @ {price:,.0f}"] if qty > 0 else [result]
-    lines.append(
-        f"실현손익 **{net:+,.0f}원** (세전 {realized:+,.0f} · 비용 {fees:,.0f})"
-    )
+
+    lines = [path or reason.split("→")[-1].strip()]
+    invested = avg_price * total_bought
+    rate = f" ({net / invested:+.2%})" if invested else ""
+    lines.append(f"세후 **{net:+,.0f}원**{rate}")
+    if avg_price and total_bought:
+        # 평균 청산가 = 평단 + 주당 세전손익. 매도 건마다 값이 달라도 하나로 모인다.
+        exit_price = avg_price + realized / total_bought
+        lines.append(
+            f"평단 {avg_price:,.0f} → 청산 {exit_price:,.0f}"
+            f" · 투입 {_short_won(invested)}"
+        )
     return {
         "title": f"{icon} {name}({symbol}) 종료",
         "description": "\n".join(lines),
         "color": color,
     }
+
+
+def _short_won(amount: float) -> str:
+    """40.6만원 / 1,250만원 — 폰에서 자릿수를 세지 않아도 규모가 잡히게."""
+    if amount >= 100_000_000:
+        return f"{amount / 100_000_000:,.2f}억원"
+    if amount >= 10_000:
+        return f"{amount / 10_000:,.1f}만원"
+    return f"{amount:,.0f}원"
 
 
 _COLOR_LINK = 0x00838F  # 청록 — 연결·감시 상태
