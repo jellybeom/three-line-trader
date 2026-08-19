@@ -12,6 +12,7 @@ import asyncio
 import socket
 import sys
 import threading
+from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox
 
@@ -53,10 +54,32 @@ def main() -> None:
     b = bus.Bus()
 
     def run_core() -> None:
+        """코어 스레드. **죽더라도 조용히 죽지 않게** 한다.
+
+        데몬 스레드라 여기서 예외가 나면 프로세스는 살아 있고 창도 멀쩡한데 매매만
+        완전히 멈춘다. 콘솔 없이 start.bat 으로 띄우면 아무도 알아채지 못한다.
+        그래서 마지막에 화면 로그로 알린다 — 이벤트 큐는 스레드와 무관하게 동작한다.
+        """
         # Store(sqlite)는 반드시 사용할 스레드 안에서 생성한다 — Core.run() 내부에서 생성됨
+        import traceback
+
         from trader.core import Core
 
-        asyncio.run(Core(b).run())
+        try:
+            asyncio.run(Core(b).run())
+        except BaseException:  # noqa: BLE001 — 무엇이든 사용자에게 알려야 한다
+            detail = traceback.format_exc()
+            print(f"[코어 중단]\n{detail}", file=sys.stderr)
+            b.events.put(
+                bus.LogLine(
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "시스템",
+                    "에러",
+                    "코어가 멈췄습니다 — 매매가 진행되지 않습니다. "
+                    "프로그램을 다시 시작하세요 (자세한 내용은 로그 참고)",
+                )
+            )
+            raise
 
     threading.Thread(target=run_core, daemon=True).start()
 

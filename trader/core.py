@@ -19,7 +19,9 @@ blocking REST 호출만 asyncio.to_thread 로 내보낸다.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
+import traceback
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
@@ -296,6 +298,8 @@ class Core:
         self._holiday_notified = ""
         # 마지막으로 **WebSocket** 틱을 받은 시각 (REST 보정은 세지 않는다)
         self._last_ws_tick = 0.0
+        self._last_cycle_error = ""  # 같은 실패를 5초마다 다시 알리지 않기 위해
+        self._tick_errors: set[str] = set()  # 이미 알린 틱 처리 실패 (종목+원인)
         self._chart_busy: set[str] = set()  # 종목별 차트 생성 중복 방지
 
     # ── 메인 루프 ───────────────────────────────────────────────
@@ -332,19 +336,104 @@ class Core:
             )
 
         while True:
-            await self._drain_commands()
-            await self._check_pending()
-            await self._check_tick_flow()
-            await self._check_schedule()
-            if (
-                self._notice_batch
-                and time.monotonic() - self._notice_at > _BATCH_QUIET_SEC
-            ):
-                await self._flush_notices()
-            await self._tick_bot()
-            await self._tick_auto_connect()
-            self._flush_day_lows()
+            # **한 번의 실패가 루프를 끊지 못하게 막는다.** 예전에는 방어가 없어서
+            # 여기 어디서든 예외가 나면 코어 스레드가 통째로 죽었다 — 화면은 멀쩡한데
+            # 매매만 완전히 멈추고, 데몬 스레드라 아무도 알아채지 못한다.
+            # UI 폴링 루프와 같은 원칙이다(2026-08-19 점검).
+            try:
+                await self._cycle()
+            except asyncio.CancelledError:
+                raise  # 종료 요청은 그대로 흘려보낸다
+            except Exception:  # noqa: BLE001
+                self._report_cycle_error()
             await asyncio.sleep(_LOOP_SEC)
+
+    async def _cycle(self) -> None:
+        """루프 한 바퀴 — 명령 처리, 각종 주기 점검."""
+        await self._drain_commands()
+        await self._check_pending()
+        await self._check_tick_flow()
+        await self._check_schedule()
+        if self._notice_batch and time.monotonic() - self._notice_at > _BATCH_QUIET_SEC:
+            await self._flush_notices()
+        await self._tick_bot()
+        await self._tick_auto_connect()
+        self._flush_day_lows()
+
+    def _spawn(self, coro, what: str) -> None:
+        """뒤에서 도는 일을 띄우되 **실패를 삼키지 않는다**.
+
+        asyncio.create_task 로 띄운 코루틴이 예외로 끝나면 파이썬은 그 태스크가
+        회수될 때에야 경고를 찍는다. 창 없이 돌리면 아무도 못 본다 — 종료 알림이나
+        차트 전송이 조용히 사라진다(2026-08-19 점검).
+        """
+        task = asyncio.create_task(coro)
+
+        def done(finished: asyncio.Task) -> None:
+            if finished.cancelled():
+                return
+            if (error := finished.exception()) is not None:
+                print(f"[백그라운드 오류] {what}: {error!r}", file=sys.stderr)
+                try:
+                    self._log("시스템", "에러", f"{what} 실패: {error}")
+                except Exception:  # noqa: BLE001
+                    pass
+
+        task.add_done_callback(done)
+
+    def _task_died(self, what: str):
+        """오래 도는 태스크(시세 수신·봇)가 끝났을 때 알린다.
+
+        이 둘이 죽으면 매매가 멈추는데, create_task 는 조용히 끝난다.
+        """
+
+        def done(finished: asyncio.Task) -> None:
+            if finished.cancelled():
+                return
+            error = finished.exception()
+            try:
+                self._log(
+                    "시스템",
+                    "에러",
+                    f"{what}이(가) 멈췄습니다"
+                    + (f": {error}" if error else " — 다시 연결해 주세요"),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        return done
+
+    def _report_tick_error(self, symbol: str) -> None:
+        """틱 처리 실패 — 같은 종목의 같은 원인은 한 번만 알린다."""
+        detail = traceback.format_exc()
+        print(f"[틱 처리 오류] {symbol}\n{detail}", file=sys.stderr)
+        signature = f"{symbol}:{detail.strip().splitlines()[-1] if detail else '?'}"
+        if signature in self._tick_errors:
+            return
+        self._tick_errors.add(signature)
+        try:
+            self._log(symbol, "에러", f"시세 처리 실패: {signature.split(':', 1)[1]}")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _report_cycle_error(self) -> None:
+        """루프 한 바퀴가 실패했을 때 — 조용히 넘기지 않는다.
+
+        같은 실패가 5초마다 반복되면 로그가 넘치므로 같은 원인은 한 번만 알린다.
+        원인이 바뀌면 다시 알린다.
+        """
+        detail = traceback.format_exc()
+        print(f"[코어 오류]\n{detail}", file=sys.stderr)
+        signature = detail.strip().splitlines()[-1] if detail else "?"
+        if signature == self._last_cycle_error:
+            return
+        self._last_cycle_error = signature
+        try:
+            self._log(
+                "시스템", "에러", f"주기 처리 실패: {signature} — 계속 진행합니다"
+            )
+        except Exception:  # noqa: BLE001 — 로그마저 실패하면 터미널 출력으로 끝낸다
+            pass
 
     def _open_store(self) -> None:
         """현재 모드의 DB 를 열고 화면 상태를 전부 다시 발행한다 (시작·모드 전환 공용)."""
@@ -507,14 +596,15 @@ class Core:
                     self._log(s, "차트", "이미 생성 중입니다", notify=False)
                     return
                 self._log(s, "차트", "복기 차트 생성 중... (수 초 소요)", notify=False)
-                asyncio.create_task(
-                    self._chart_task(s, to_ui=not to_discord, to_discord=to_discord)
+                self._spawn(
+                    self._chart_task(s, to_ui=not to_discord, to_discord=to_discord),
+                    "차트 생성",
                 )
             case bus.SendChartDiscord(symbol=s, paths=paths):
                 if self._bot is None:
                     self._log(s, "에러", "Discord 연결 후 전송할 수 있습니다")
                     return
-                asyncio.create_task(self._send_chart_images(s, paths))
+                self._spawn(self._send_chart_images(s, paths), "차트 전송")
             case bus.SetNotifyLevel(level=lv):
                 self._notify_level = lv
                 self._store.set_setting("notify_level", lv)
@@ -735,6 +825,7 @@ class Core:
         )
         await self._sync_watcher_symbols()
         self._watcher_task = asyncio.create_task(self._watcher.run())
+        self._watcher_task.add_done_callback(self._task_died("시세 수신"))
         await self.refresh_calendar()  # 실패해도 근사로 동작한다
 
     async def _disconnect(self, reason: str) -> None:
@@ -782,12 +873,13 @@ class Core:
                 avg_price=pos.avg_price,
                 total_bought=pos.total_bought,
             )
-            asyncio.create_task(self._send_embed(embed))
+            self._spawn(self._send_embed(embed), "종료 알림 발송")
             return
-        asyncio.create_task(
+        self._spawn(
             self._send_discord(
                 format_trade(e["name"], symbol, reason, qty, price, None)
-            )
+            ),
+            "체결 알림 발송",
         )
 
     async def _send_embed(self, embed: dict) -> None:
@@ -1149,7 +1241,7 @@ class Core:
             and e["pos"].total_bought
             and self._bot is not None
         ):
-            asyncio.create_task(self._chart_task(symbol, to_discord=True))
+            self._spawn(self._chart_task(symbol, to_discord=True), "차트 생성")
 
     async def _no_duplicate_order(self, symbol: str, d: Decision) -> bool:
         """직전 주문이 실패했던 종목만, 주문 직전에 미체결(ka10075)을 확인한다.
@@ -1382,7 +1474,15 @@ class Core:
         상태로 남기 때문이다.
         """
         self._last_ws_tick = time.monotonic()
-        await self._on_tick(tick)
+        try:
+            await self._on_tick(tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            # 우리 판정 코드의 실패가 **WebSocket 세션을 끊지 못하게** 막는다.
+            # 예전에는 예외가 수신 루프까지 올라가 재연결로 이어졌다 — 원인이
+            # 네트워크로 위장되고, 매 틱마다 반복되면 무한 재연결이 된다.
+            self._report_tick_error(tick.symbol)
 
     async def _check_tick_flow(self) -> None:
         """장중에 틱이 끊기면 연결을 다시 맺는다.
@@ -1625,6 +1725,7 @@ class Core:
 
         self._bot = bot
         self._bot_task = asyncio.create_task(runner())
+        self._bot_task.add_done_callback(self._task_died("Discord 봇"))
 
     def _flush_day_lows(self, force: bool = False) -> None:
         """틱으로 쌓인 값(당일 최저가, 보유 중 최고·최저)을 주기적으로 저장한다.
@@ -2461,9 +2562,9 @@ class Core:
             self._notice_batch.append((kind, label, text))
             self._notice_at = time.monotonic()
             if len(self._notice_batch) >= _BATCH_MAX:
-                asyncio.create_task(self._flush_notices())
+                self._spawn(self._flush_notices(), "등록 알림 발송")
             return
-        asyncio.create_task(self._send_discord(format_message(symbol, kind, text)))
+        self._spawn(self._send_discord(format_message(symbol, kind, text)), "알림 발송")
 
     async def _flush_notices(self) -> None:
         """모아둔 정보성 알림을 발송. 1건이면 줄글, 2건 이상이면 embed 한 장."""

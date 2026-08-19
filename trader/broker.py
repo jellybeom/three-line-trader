@@ -616,18 +616,16 @@ class Broker:
     def _request_once(self, path: str, api_id: str, body: dict) -> dict:
         with self._lock:
             self._throttle()
-        resp = requests.post(
-            f"{self._auth.host}{path}",
-            headers={
-                "Content-Type": "application/json;charset=UTF-8",
-                "authorization": f"Bearer {self._auth.token()}",
-                "api-id": api_id,
-                "cont-yn": "N",
-                "next-key": "",
-            },
-            json=body,
-            timeout=10,
-        )
+        try:
+            resp = self._post(path, api_id, body)
+        except BrokerError:
+            raise
+        except Exception as e:  # noqa: BLE001 — 타임아웃·DNS·SSL·토큰 갱신 실패 등
+            # **모든 실패를 BrokerError 로 모은다.** 호출부는 BrokerError 만 잡는데,
+            # requests 의 Timeout·ConnectionError 가 그대로 새어 나가면 주문 경로에서
+            # 예외가 위로 튀어 WebSocket 세션까지 끊고(재연결로 위장) 실패 표시도
+            # 남지 않아 다음 틱에 같은 주문을 다시 낼 수 있다.
+            raise BrokerError(f"{api_id} 호출 실패: {type(e).__name__} {e}") from e
         try:
             data = resp.json()
         except ValueError as e:
@@ -640,3 +638,17 @@ class Broker:
                 f"{data.get('return_msg', data)}"
             )
         return data
+
+    def _post(self, path: str, api_id: str, body: dict):
+        return requests.post(
+            f"{self._auth.host}{path}",
+            headers={
+                "Content-Type": "application/json;charset=UTF-8",
+                "authorization": f"Bearer {self._auth.token()}",
+                "api-id": api_id,
+                "cont-yn": "N",
+                "next-key": "",
+            },
+            json=body,
+            timeout=10,
+        )
