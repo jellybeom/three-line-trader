@@ -737,6 +737,7 @@ class Store:
         """일지 대상 목록 — 매매가 있었던 종목과 그 코멘트 작성 여부.
 
         '무엇을 아직 안 썼는지' 를 알려주는 것이 목적이라 매매 요약도 함께 붙인다.
+        3선 값도 함께 준다 — 사람이 판단한 유일한 지점이라 복기 문서의 핵심이다.
         """
         where = ["p.total_bought > 0"]
         params: list[str] = []
@@ -748,6 +749,7 @@ class Store:
             params.append(until)
         rows = self._conn.execute(
             f"""SELECT s.trade_date, s.symbol, s.name, s.tags, s.base_date, s.memo,
+                       s.line1, s.line2, s.line3, s.buy1_amount, s.buy2_amount,
                        p.state, p.avg_price, p.total_bought, p.realized_pnl, p.fees,
                        p.high_price, p.low_price, p.day_open, p.day_close,
                        COALESCE(j.good, '') good, COALESCE(j.bad, '') bad,
