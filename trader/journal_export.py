@@ -26,8 +26,9 @@ GitHub 어디서나 열리고, A4 PDF 는 필요할 때 여기서 렌더하면 �
       2026-08/
         2026-08-21.md              ← 그날 인덱스
         2026-08-21/
-          263800-데이타솔루션.md    ← 매매 1건 = 파일 1개 = 나중에 A4 1장
-          263800-데이타솔루션.png   ← 차트 (복사해 온 것)
+          263800-데이타솔루션.md          ← 매매 1건 = 파일 1개 = 나중에 A4 1장
+          263800-데이타솔루션-daily.png   ← 일봉 (복사해 온 것)
+          263800-데이타솔루션-minute.png  ← 3분봉
 
 매매 1건이 파일 1개라 검색·링크·개별 참조가 자연스럽고, 4단계에서 A4 한 장으로
 그대로 떨어진다. 날짜는 **청산일**(사이클이 끝난 날) 기준이다 — 이월된 매매를 진입일에
@@ -44,6 +45,10 @@ from trader.journal import cycle_holding, cycle_timeline, transition_path
 from trader.trading_calendar import TradingCalendar, format_days
 
 _BANNED = re.compile(r'[\\/:*?"<>|]')  # 윈도우에서 파일명에 못 쓰는 글자
+
+# (문서에 적을 이름, journal 테이블 컬럼, 파일명 접미사). 순서가 문서에 실리는 순서다 —
+# **일봉 먼저**다. "3선을 어디에 그었나" 를 보고 나서 "그래서 어떻게 체결됐나" 를 본다.
+_CHARTS = (("일봉", "daily_path", "daily"), ("3분봉", "minute_path", "minute"))
 
 
 def net_pnl(entry: dict) -> float:
@@ -147,9 +152,13 @@ def render_trade(
     entry: dict,
     cycle: list[dict],
     calendar: TradingCalendar | None = None,
-    chart_name: str = "",
+    charts: dict[str, str] | None = None,
 ) -> str:
     """매매 1건 문서. A4 한 장에 들어가도록 항목을 절제한다.
+
+    charts 는 `{"일봉": 파일명, "3분봉": 파일명}`. **둘 다 싣는다** — 일봉은 3선을 어디에
+    그었는지(선정 근거)를, 3분봉은 그날 어떻게 체결됐는지(실행)를 보여준다. 복기의 질문이
+    서로 달라 한쪽만으로는 답이 나오지 않는다.
 
     차트는 파일명만 상대 경로로 걸어 둔다 — 문서와 같은 폴더에 복사되므로 GitHub·
     Obsidian·PDF 어디서 열어도 그림이 따라온다.
@@ -179,8 +188,10 @@ def render_trade(
     if memo := (entry.get("memo") or ""):
         parts += [f"> {memo}", ""]
 
-    if chart_name:
-        parts += ["## 차트", "", f"![{name} 차트]({chart_name})", ""]
+    if shown := [(label, f) for label, f in (charts or {}).items() if f]:
+        parts += ["## 차트", ""]
+        for label, filename in shown:
+            parts += [f"**{label}**", "", f"![{name} {label}]({filename})", ""]
 
     if slips := slippage_rows(
         [r for r in cycle if r.get("side") and r.get("trigger_price")]
@@ -250,8 +261,9 @@ def export_day(
     같은 날을 다시 돌리면 통째로 덮어쓴다 — 문서는 순수 생성물이라 그래도 안전하고,
     오히려 그래야 나중에 DB 에 코멘트를 채운 뒤 다시 돌려 반영할 수 있다.
 
-    차트는 `data/journal/...` 에 있는 원본을 문서 옆으로 **복사**한다. 심볼릭 링크나
-    상대 경로 참조로 두면 git 에 올렸을 때 폰에서 그림이 깨진다.
+    차트는 **일봉과 3분봉 둘 다** 문서 옆으로 **복사**한다. 심볼릭 링크나 상대 경로
+    참조로 두면 git 에 올렸을 때 폰에서 그림이 깨진다. 한쪽이 없거나 원본이 지워졌으면
+    있는 것만 싣는다 — 예전 매매의 차트를 정리했다고 생성이 멈추면 안 된다.
     """
     root = Path(root)
     entries = store.journal_entries(since=date, until=date)
@@ -266,17 +278,17 @@ def export_day(
     for entry in entries:
         cycle = cycles.get((entry["symbol"], entry.get("trade_date", "")), [])
         entry["holding"] = cycle_holding(cycle, calendar)
-        chart_name = ""
-        if src := (entry.get("daily_path") or ""):
-            source = Path(src)
-            if source.exists():
-                chart_name = f"{trade_slug(entry)}{source.suffix}"
-                shutil.copyfile(source, day_dir / chart_name)
-                written.append(day_dir / chart_name)
+        charts: dict[str, str] = {}
+        for label, key, suffix in _CHARTS:
+            source = Path(entry.get(key) or "")
+            if not (entry.get(key) and source.exists()):
+                continue
+            filename = f"{trade_slug(entry)}-{suffix}{source.suffix}"
+            shutil.copyfile(source, day_dir / filename)
+            charts[label] = filename
+            written.append(day_dir / filename)
         doc = day_dir / f"{trade_slug(entry)}.md"
-        doc.write_text(
-            render_trade(entry, cycle, calendar, chart_name), encoding="utf-8"
-        )
+        doc.write_text(render_trade(entry, cycle, calendar, charts), encoding="utf-8")
         written.append(doc)
 
     index = root / date[:7] / f"{date}.md"

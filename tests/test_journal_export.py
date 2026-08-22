@@ -186,10 +186,31 @@ def test_보유_중이면_결과가_손익_부호로_갈리지_않는다():
 
 
 def test_차트가_없으면_깨진_이미지_링크를_넣지_않는다():
-    doc = render_trade(_entry(), _cycle(), chart_name="")
-    assert "![" not in doc
-    doc = render_trade(_entry(), _cycle(), chart_name="263800-데이타솔루션.png")
-    assert "![데이타솔루션 차트](263800-데이타솔루션.png)" in doc
+    assert "![" not in render_trade(_entry(), _cycle(), charts={})
+    assert "![" not in render_trade(_entry(), _cycle(), charts={"일봉": ""})
+
+
+def test_일봉과_3분봉을_둘_다_싣는다():
+    """일봉은 '3선을 어디에 그었나', 3분봉은 '그래서 어떻게 체결됐나' 를 보여준다.
+
+    복기의 질문이 서로 달라 한쪽만으로는 답이 나오지 않는다.
+    """
+    doc = render_trade(
+        _entry(),
+        _cycle(),
+        charts={
+            "일봉": "263800-데이타솔루션-daily.png",
+            "3분봉": "263800-데이타솔루션-minute.png",
+        },
+    )
+    assert "![데이타솔루션 일봉](263800-데이타솔루션-daily.png)" in doc
+    assert "![데이타솔루션 3분봉](263800-데이타솔루션-minute.png)" in doc
+    assert doc.index("daily.png") < doc.index("minute.png")  # 일봉 먼저
+
+
+def test_한쪽_차트만_있으면_있는_것만_싣는다():
+    doc = render_trade(_entry(), _cycle(), charts={"3분봉": "x-minute.png"})
+    assert "3분봉" in doc and "일봉" not in doc
 
 
 # ── 인덱스 ──────────────────────────────────────────────────────
@@ -321,36 +342,54 @@ def test_매매가_없는_날은_폴더를_만들지_않는다(store, tmp_path):
     assert not (root / "2026-08" / "2026-08-15").exists()
 
 
-def test_차트를_문서_옆으로_복사한다(store, tmp_path):
-    """상대 경로로 두면 git 에 올렸을 때 폰에서 그림이 깨진다."""
+def test_일봉과_3분봉을_둘_다_문서_옆으로_복사한다(store, tmp_path):
+    """상대 경로로 두면 git 에 올렸을 때 폰에서 그림이 깨진다.
+
+    save_journal 은 두 경로를 다 저장하는데 생성기가 일봉만 복사하고 있었다
+    (2026-08-22 발견). 3분봉이 없으면 체결 시점의 흐름을 복기할 수 없다.
+    """
     _record(store)
-    chart = tmp_path / "data" / "journal" / "orig.png"
-    chart.parent.mkdir(parents=True)
-    chart.write_bytes(b"\x89PNG\r\n")
-    store.save_journal("2026-08-21", "263800", daily_path=str(chart))
+    charts = tmp_path / "data" / "charts"
+    charts.mkdir(parents=True)
+    (charts / "d.png").write_bytes(b"\x89PNGdaily")
+    (charts / "m.png").write_bytes(b"\x89PNGminute")
+    store.save_journal(
+        "2026-08-21",
+        "263800",
+        daily_path=str(charts / "d.png"),
+        minute_path=str(charts / "m.png"),
+    )
     root = tmp_path / "journal"
 
     export_day(store, "2026-08-21", root)
 
-    copied = root / "2026-08" / "2026-08-21" / "263800-데이타솔루션.png"
-    assert copied.exists() and copied.read_bytes() == b"\x89PNG\r\n"
-    doc = (root / "2026-08" / "2026-08-21" / "263800-데이타솔루션.md").read_text(
-        encoding="utf-8"
-    )
-    assert "(263800-데이타솔루션.png)" in doc  # 같은 폴더의 파일명만 건다
+    day = root / "2026-08" / "2026-08-21"
+    assert (day / "263800-데이타솔루션-daily.png").read_bytes() == b"\x89PNGdaily"
+    assert (day / "263800-데이타솔루션-minute.png").read_bytes() == b"\x89PNGminute"
+    doc = (day / "263800-데이타솔루션.md").read_text(encoding="utf-8")
+    assert "(263800-데이타솔루션-daily.png)" in doc  # 같은 폴더의 파일명만 건다
+    assert "(263800-데이타솔루션-minute.png)" in doc
 
 
 def test_없어진_차트_경로는_조용히_넘어간다(store, tmp_path):
-    """예전 매매의 차트를 지웠다고 생성이 멈추면 안 된다."""
+    """예전 매매의 차트를 지웠다고 생성이 멈추면 안 된다 — 있는 것만 싣는다."""
     _record(store)
-    store.save_journal("2026-08-21", "263800", daily_path=str(tmp_path / "없음.png"))
+    kept = tmp_path / "m.png"
+    kept.write_bytes(b"\x89PNGminute")
+    store.save_journal(
+        "2026-08-21",
+        "263800",
+        daily_path=str(tmp_path / "없음.png"),
+        minute_path=str(kept),
+    )
 
     export_day(store, "2026-08-21", tmp_path / "journal")
 
-    doc = (
-        tmp_path / "journal" / "2026-08" / "2026-08-21" / "263800-데이타솔루션.md"
-    ).read_text(encoding="utf-8")
-    assert "![" not in doc
+    day = tmp_path / "journal" / "2026-08" / "2026-08-21"
+    doc = (day / "263800-데이타솔루션.md").read_text(encoding="utf-8")
+    assert "일봉" not in doc
+    assert "(263800-데이타솔루션-minute.png)" in doc
+    assert (day / "263800-데이타솔루션-minute.png").exists()
 
 
 def test_세후_손익_정의가_화면과_같다():
