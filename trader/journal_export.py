@@ -294,10 +294,22 @@ def export_day(
             charts[label] = filename
             written.append(target)
         doc = day_dir / f"{trade_slug(entry)}.md"
-        doc.write_text(render_trade(entry, cycle, calendar, charts), encoding="utf-8")
+        _write_if_changed(doc, render_trade(entry, cycle, calendar, charts))
         written.append(doc)
 
     index = root / date[:7] / f"{date}.md"
-    index.write_text(render_day_index(date, entries), encoding="utf-8")
+    _write_if_changed(index, render_day_index(date, entries))
     written.append(index)
     return written
+
+
+def _write_if_changed(path: Path, text: str) -> None:
+    """내용이 같으면 건드리지 않는다.
+
+    `--all` 로 1년치를 다시 돌리는 것이 기본 사용법이라, 바뀐 것이 없는 날까지 파일
+    시각을 갱신하면 백업 도구가 전부 바뀐 것으로 본다. (git 은 내용 주소 방식이라
+    어차피 커밋이 생기지 않지만, 여기서 막아 두면 다른 동기화 수단에서도 안전하다.)
+    """
+    if path.exists() and path.read_text(encoding="utf-8") == text:
+        return
+    path.write_text(text, encoding="utf-8")
