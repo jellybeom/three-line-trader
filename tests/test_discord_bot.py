@@ -134,6 +134,10 @@ class FakeCore:
         self.deposit_display = 842_100
         self.kiwoom_connected = kiwoom
         self.account = {}
+        self.holdings = {}  # 종목 → 보유기간 표기
+
+    def holding_label(self, symbol):
+        return self.holdings.get(symbol, "")
 
 
 def test_대시보드는_감시_상태와_손익을_담는다():
@@ -281,6 +285,9 @@ class _CommandCore:
     def request_notify_level(self, level):
         self.calls.append(("notify", level))
         self.notify_level = level
+
+    def holding_label(self, symbol):
+        return ""
 
     def request_daily_summary(self):
         self.calls.append(("summary",))
@@ -679,3 +686,17 @@ def test_관심종목_명령은_태그와_쪽수를_받는다():
     choices = asyncio.run(auto(_Interaction(100, 999), ""))
     assert {c.value for c in choices} == {"테마주", "섹터주"}  # 실제 쓰인 태그만
     assert asyncio.run(auto(_Interaction(101, 999), "")) == []  # 타인에게는 비공개
+
+
+def test_대시보드_보유_종목에_보유기간이_붙는다():
+    """폰으로 볼 때 '며칠째 들고 있나' 는 평단·잔량만큼 자주 궁금한 값이다."""
+    core = FakeCore(_entries())
+    core.holdings = {"005930": "3시간 12분", "035420": "2일차"}
+    embed = build_dashboard_embed(core)
+    assert "보유 3시간 12분" in embed["description"]
+
+
+def test_보유기간을_모르면_아무것도_붙지_않는다():
+    """진입 기록이 없는 종목에서 '보유 ' 만 덩그러니 남지 않게."""
+    embed = build_dashboard_embed(FakeCore(_entries()))
+    assert "보유 " not in embed["description"]

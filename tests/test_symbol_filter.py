@@ -519,3 +519,57 @@ def test_검색줄은_입력칸보다_두꺼워지지_않는다(filled):
     # 줄 자체뿐 아니라 **표에서 실제로 뺏는 세로**를 본다 (아래 여백까지 포함)
     taken = before - filled.positions.winfo_height()
     assert taken <= entry_height + 6, f"검색줄이 {taken}px 를 차지한다"
+
+
+# ── 보유기간 열 ─────────────────────────────────────────────────
+
+
+def test_보유기간_열은_해당_칸만_갱신된다(app):
+    """분 단위로만 바뀌는 값 때문에 18칸을 통째로 다시 쓰지 않는다."""
+    app.positions.upsert("005930", "삼성전자", Position(), _params(), holding="47분")
+    app.update()
+    assert app.positions.tree.set("005930", "hold") == "47분"
+
+    app.positions.set_holding("005930", "1시간 2분")
+    app.update()
+    assert app.positions.tree.set("005930", "hold") == "1시간 2분"
+    assert app.positions.tree.set("005930", "name") == "삼성전자"  # 나머지는 그대로
+
+
+def test_보유기간_정렬은_사전순이_아니라_기간순이다(app):
+    """글자로 세우면 '2일차' 가 '47분' 앞에 온다 — 분으로 환산해 정렬한다.
+
+    첫 클릭이 내림차순인 것은 다른 열과 같은 동작이다 (오래 들고 있는 것부터).
+    """
+    for code, held in (
+        ("005930", "47분"),
+        ("079650", "3시간 12분"),
+        ("228340", "2일차"),
+    ):
+        app.positions.upsert(code, code, Position(), _params(), holding=held)
+    app.update()
+
+    app.positions._sort("hold")  # 첫 클릭 — 오래된 것부터
+    app.update()
+    assert app.positions._order[:3] == ["228340", "079650", "005930"]
+
+    app.positions._sort("hold")  # 다시 누르면 뒤집힌다
+    app.update()
+    assert app.positions._order[:3] == ["005930", "079650", "228340"]
+
+
+def test_보유기간이_빈_종목은_정렬에서_맨_뒤로_간다(app):
+    """진입 전 종목이 '오래 들고 있는 것' 자리에 끼어들면 안 된다."""
+    app.positions.upsert("005930", "삼성전자", Position(), _params(), holding="47분")
+    app.positions.upsert("079650", "서산", Position(), _params())
+    app.update()
+
+    app.positions._sort("hold")
+    app.update()
+    assert app.positions._order[:2] == ["005930", "079650"]
+
+
+def test_진입_전_종목은_보유기간이_빈칸이다(app):
+    app.positions.upsert("005930", "삼성전자", Position(), _params())
+    app.update()
+    assert app.positions.tree.set("005930", "hold") == ""

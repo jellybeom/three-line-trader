@@ -498,3 +498,52 @@ def test_v9_DB도_데이터를_지키며_이관된다(tmp_path):
     assert {"tags", "base_date"} <= cols
     assert len(migrated.recent_events("2026-08-06")) == 1  # 기존 이력 보존
     migrated.close()
+
+
+def test_보유기간_기준점은_마지막_사이클의_첫_매수다(tmp_path):
+    """재진입한 종목에서 옛 사이클의 매수를 물고 오면 보유기간이 몇 배로 부풀려진다."""
+    from trader.state_machine import Decision, Side
+
+    store = Store(tmp_path / "t.db")
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=90_000
+    )
+    store.register_symbol("2026-08-19", "005930", "삼성전자", params)
+
+    def transition(from_state, to_state, side, qty):
+        pos = Position(
+            state=to_state,
+            avg_price=9_900 if to_state is not State.CLOSED else 0,
+            total_bought=qty if to_state is not State.CLOSED else qty,
+            remaining=qty if to_state is not State.CLOSED else 0,
+        )
+        store.save_transition(
+            "2026-08-19",
+            "005930",
+            from_state,
+            pos,
+            Decision(to_state, side, qty, "테스트"),
+            9_900,
+        )
+
+    transition(State.WAITING, State.BUY1, Side.BUY, 10)  # 첫 사이클
+    transition(State.BUY1, State.CLOSED, Side.SELL, 10)
+    transition(State.WAITING, State.BUY1, Side.BUY, 10)  # 리셋 후 재진입
+
+    spans = store.holding_spans("2026-08-19")
+    entry, exit_ts = spans["005930"]
+    rows = store.symbol_transitions("005930")
+    assert entry == rows[2]["ts"]  # 두 번째 사이클의 매수
+    assert exit_ts == ""  # 아직 보유 중 — 시계가 돈다
+    store.close()
+
+
+def test_매수_기록이_없으면_보유기간_기준점도_없다(tmp_path):
+    """등록만 하고 진입하지 않은 종목 — 진입 시각을 추정하지 않는다."""
+    store = Store(tmp_path / "t.db")
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=90_000
+    )
+    store.register_symbol("2026-08-19", "005930", "삼성전자", params)
+    assert store.holding_spans("2026-08-19") == {}
+    store.close()

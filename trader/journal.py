@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
 
 from trader.trading_calendar import TradingCalendar, format_days
@@ -80,15 +81,84 @@ def transition_path(transitions: list[dict]) -> str:
     return " → ".join(steps)
 
 
+def entry_time(transitions: list[dict]) -> str:
+    """사이클의 **첫 매수 체결 시각** (YYYY-MM-DD HH:MM:SS). 없으면 빈 문자열.
+
+    2차 매수(물타기)는 새 진입이 아니므로 시계를 되돌리지 않는다 — 언제나 첫 매수다.
+    체결통보 유실로 강제 복구된 포지션이나 등록 창에서 상태를 직접 지정한 오버나이트
+    종목은 매수 전이 행이 없어 빈 문자열이 된다. 추정하지 않는다.
+    """
+    for row in transitions:
+        if row.get("side") == "매수":
+            return row.get("ts") or ""
+    return ""
+
+
+def format_holding(
+    entry_ts: str, until_ts: str = "", hold_days: int | None = None
+) -> str:
+    """보유기간 표기.
+
+    시계가 두 개다. 벽시계 시간은 장중에는 정직하지만 밤·주말을 넘기면 거짓말이 된다
+    (금 15:20 매수 → 월 09:05 은 벽시계로 66시간이지만 실제 장중 노출은 6시간 남짓).
+    그래서 **당일과 이월을 다른 단위로** 적는다.
+
+        47분 · 3시간 12분 · 3일차
+
+    'N일차' 는 **거래일** 기준이며 진입일이 1일차다(주말·휴장 제외). 옆 열의 기준봉이
+    이미 `D+n` 이라 같은 표기를 쓰면 눈으로 구분되지 않아 형태를 달리했다.
+    hold_days 는 거래일 달력이 계산해 넘겨준 값이고, 없으면 날짜 차이로 물러난다.
+    """
+    if not entry_ts:
+        return ""
+    start = _parse_ts(entry_ts)
+    end = _parse_ts(until_ts) if until_ts else _dt.datetime.now()
+    if start is None or end is None or end < start:
+        return ""
+    if hold_days is None:
+        hold_days = (end.date() - start.date()).days
+    if hold_days > 0:  # 날짜를 넘겼다 — 시간 단위는 의미를 잃는다
+        return f"{hold_days + 1}일차"
+    minutes = int((end - start).total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes}분"
+    return f"{minutes // 60}시간 {minutes % 60}분"
+
+
+def _parse_ts(value: str) -> "_dt.datetime | None":
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return _dt.datetime.strptime(value, fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def cycle_holding(
+    transitions: list[dict], calendar: TradingCalendar | None = None
+) -> str:
+    """사이클 전체의 보유기간. 청산했으면 진입~청산, 보유 중이면 지금까지."""
+    entry = entry_time(transitions)
+    if not entry:
+        return ""
+    closed = [r for r in transitions if (r.get("to_state") or "") == _CLOSED]
+    until = (closed[-1].get("ts") or "") if closed else ""
+    last_day = until[:10] if until else _dt.date.today().isoformat()
+    days = calendar.days_between(entry[:10], last_day) if calendar is not None else None
+    return format_holding(entry, until, days)
+
+
 def cycle_timeline(
     transitions: list[dict],
     base_date: str = "",
     calendar: TradingCalendar | None = None,
 ) -> str:
-    """진입·청산 날짜와 기준봉 대비 경과 거래일.
+    """진입·청산 날짜, 기준봉 대비 경과 거래일, 보유기간.
 
-    예) `진입 2026-08-07 (D+1) · 청산 2026-08-12 (D+4)`
+    예) `진입 2026-08-07 09:14 (D+1) · 청산 2026-08-12 13:02 (D+4) · 보유 4일차`
     기준봉이 없으면 날짜만 적는다. 아직 보유 중이면 청산 부분이 빠진다.
+    진입 시각까지 적는 이유는, 표의 '보유' 열이 `3시간 12분` 처럼 경과만 보여 주기
+    때문이다 — 언제 들어갔는지는 여기서 확인한다.
     """
     fills = [r for r in transitions if r.get("side")]
     buys = [r for r in fills if r["side"] == "매수"]
@@ -97,12 +167,17 @@ def cycle_timeline(
     for label, rows in (("진입", buys[:1]), ("청산", closed[-1:])):
         if not rows:
             continue
-        date = rows[0].get("trade_date") or (rows[0].get("ts") or "")[:10]
+        ts = rows[0].get("ts") or ""
+        date = rows[0].get("trade_date") or ts[:10]
         if not date:
             continue
         text = f"{label} {date}"
+        if len(ts) >= 16 and ts[:10] == date:  # 같은 날의 기록일 때만 시각을 덧붙인다
+            text += f" {ts[11:16]}"
         if base_date and calendar is not None:
             if days := format_days(calendar.days_between(base_date, date)):
                 text += f" ({days})"
         parts.append(text)
+    if held := cycle_holding(transitions, calendar):
+        parts.append(f"보유 {held}")
     return " · ".join(parts)

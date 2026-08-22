@@ -3,6 +3,8 @@
 """
 
 import asyncio
+import time
+from datetime import datetime
 
 import pytest
 
@@ -1049,3 +1051,282 @@ def test_달력_조회_실패는_매매에_영향을_주지_않는다(core):
     asyncio.run(core.refresh_calendar())  # 예외가 새어 나오지 않는다
     assert len(core._calendar) == 0
     assert core.base_days("2026-08-07", "2026-08-10") == 1  # 주말 기준 근사로 동작
+
+
+# ── 전역 설정 적용이 종목 선정 근거를 지우지 않는다 ─────────────
+
+
+def test_전역설정_적용이_태그와_기준봉을_지우지_않는다(core, tmp_path):
+    """[적용] 은 매수 금액·익절만 바꾼다 — 태그·기준봉은 왜 골랐는지의 기록이다.
+
+    register_symbol 은 넘긴 값으로 덮어쓰므로 호출부가 빠뜨리면 DB 에서 지워진다.
+    메모리에는 남아 화면이 멀쩡해 보이고, 매매일 전환·재시작 뒤에야 드러났다.
+    저녁 루틴이 'CSV 불러오기 → [적용]' 이라 정상 운용하면 매번 밟는 경로다.
+    """
+    core._store.register_symbol(
+        core._date,
+        "005930",
+        "삼성전자",
+        P,
+        Position(),
+        memo="반도체",
+        tags="테마주,상한가",
+        base_date="2026-07-15",
+    )
+    core._load_date(core._date)
+
+    core._apply_globals_to_waiting(
+        500_000, 500_000, (0.03, 0.05, 0.07), (0.4, 0.5, 0.1)
+    )
+
+    _, params, _, memo, tags, base_date = core._store.load_all(core._date)["005930"]
+    assert params.buy1_amount == 500_000  # 설정은 반영되고
+    assert tags == "테마주,상한가"  # 선정 근거는 그대로다
+    assert base_date == "2026-07-15"
+    assert memo == "반도체"
+
+
+def test_보유_중_종목은_전역설정_적용에서_제외된다(core):
+    """진입 시점의 조건으로 끝까지 간다 — 도중에 익절 기준이 바뀌면 안 된다."""
+    pos = Position(state=State.BUY1, avg_price=9_500, total_bought=10, remaining=10)
+    core._store.register_symbol(core._date, "005930", "삼성전자", P, pos, tags="테마주")
+    core._load_date(core._date)
+
+    core._apply_globals_to_waiting(
+        500_000, 500_000, (0.02, 0.04, 0.06), (0.4, 0.5, 0.1)
+    )
+
+    _, params, _, _, tags, _ = core._store.load_all(core._date)["005930"]
+    assert params.buy1_amount == P.buy1_amount  # 손대지 않는다
+    assert params.tp_rates == P.tp_rates
+    assert tags == "테마주"
+
+
+# ── 0주 매수 주문은 내보내지 않는다 ─────────────────────────────
+
+
+def test_매수_수량이_0이면_주문하지_않고_보류한다(core):
+    """금액이 체결가(+수수료)에 못 미치면 수량이 0 이 된다.
+
+    그대로 보내면 증권사가 거부하고, 그 실패가 3회 쌓이면 당일 그 종목 주문이
+    통째로 막힌다. 가격이 더 내려가면 1주가 되므로 '대기' 로 남겨 재판정한다.
+    """
+    params = Params(
+        line1=10_000,
+        line2=9_000,
+        line3=8_000,
+        buy1_amount=10_000,  # 1선과 같은 금액 — 수수료만큼 모자란다
+        buy2_amount=9_000,
+    )
+    core._commission_rate = 0.00015
+    core._store.register_symbol(core._date, "005930", "삼성전자", params)
+    core._load_date(core._date)
+
+    asyncio.run(tick(core, 10_000))  # 1선 정확히 터치
+
+    assert core._broker.orders == []  # 주문이 나가지 않았다
+    assert core._entries["005930"]["pos"].state is State.WAITING  # 되살아날 수 있다
+    assert "005930" not in core._order_blocked
+
+    asyncio.run(tick(core, 9_500))  # 가격이 내려가면 그때 1주가 된다
+    assert core._broker.orders == [("매수", "005930", 1)]
+
+
+# ── 보유기간 ────────────────────────────────────────────────────
+
+
+def test_보유기간_시계는_첫_매수에서_시작해_2차매수로_리셋되지_않는다(core):
+    """물타기는 새 진입이 아니다 — '언제부터 들고 있나' 의 답은 첫 매수다."""
+    register(core)
+
+    asyncio.run(tick(core, 9_950))  # 1차 매수
+    asyncio.run(fill(core, "ORD1", 100, 9_950))
+    entry = core._entries["005930"]["entry_ts"]
+    assert entry  # 첫 체결 시각이 기록된다
+
+    asyncio.run(tick(core, 8_950))  # 2차 매수 (물타기)
+    asyncio.run(fill(core, "ORD2", 100, 8_950))
+    assert core._entries["005930"]["entry_ts"] == entry  # 되돌아가지 않는다
+    assert core._entries["005930"]["exit_ts"] == ""  # 아직 보유 중 → 시계가 돈다
+
+
+def test_종료되면_보유기간이_고정되고_리셋하면_초기화된다(core):
+    register(core)
+    asyncio.run(tick(core, 9_950))
+    asyncio.run(fill(core, "ORD1", 100, 9_950))
+    asyncio.run(tick(core, 7_900))  # 3선 이탈 → 전량 손절
+    asyncio.run(fill(core, "ORD2", 100, 7_900))
+
+    e = core._entries["005930"]
+    assert e["pos"].state is State.CLOSED
+    assert e["exit_ts"]  # 청산 시각이 박혀 시계가 멈춘다
+    frozen = core.holding_label("005930")
+
+    asyncio.run(core._handle_command(bus.Reset("005930")))
+    assert core._entries["005930"]["entry_ts"] == ""  # 새 사이클 → 처음으로
+    assert core.holding_label("005930") == ""
+    assert frozen  # 리셋 전에는 값이 있었다
+
+
+def test_이월된_종목의_진입_시각은_며칠_전_매수에서_온다(core):
+    """이월 종목은 그날 기록에 매수가 없다 — 사이클 전체를 봐야 답이 나온다."""
+    import datetime
+
+    core._date = datetime.date.today().isoformat()  # 체결 시각과 매매일을 맞춘다
+    register(core)
+    asyncio.run(tick(core, 9_950))
+    asyncio.run(fill(core, "ORD1", 100, 9_950))
+    entry = core._entries["005930"]["entry_ts"]
+
+    core._running = False  # 이월은 감시 중지 후에만 허용된다
+    asyncio.run(core._handle_command(bus.CarryOver("005930")))  # 다음 매매일로
+    target = core._next_trade_date()
+    core._load_date(target)
+
+    assert core._entries["005930"]["entry_ts"] == entry
+    assert core.holding_label("005930").endswith("일차")  # 날짜를 넘겼다
+
+
+def test_진입_기록이_없는_종목은_보유기간이_빈칸이다(core):
+    """등록 창에서 시작 상태를 직접 지정한 오버나이트 종목 — 추정하지 않는다."""
+    pos = Position(state=State.BUY1, avg_price=9_500, total_bought=10, remaining=10)
+    register(core, pos)
+    core._load_date(core._date)
+
+    assert core._entries["005930"]["entry_ts"] == ""
+    assert core.holding_label("005930") == ""
+
+
+# ── 실현손익 대조 (ka10077 은 종목 단위) ─────────────────────────
+
+
+class _RealizedBroker(StubBroker):
+    """종목별 실현손익을 돌려주는 스텁. 어떤 종목으로 불렸는지 기록한다."""
+
+    def __init__(self, fail: set[str] | None = None):
+        super().__init__()
+        self.asked: list[str] = []
+        self.fail = fail or set()
+
+    def realized_pnl(self, symbol):
+        self.asked.append(symbol)
+        if not symbol:  # 실제 브로커와 같은 계약 — 빈 값은 호출 전에 막힌다
+            raise BrokerError("realized_pnl 은 종목코드가 필요합니다")
+        if symbol in self.fail:
+            raise BrokerError(f"{symbol} 조회 실패")
+        return [
+            {
+                "symbol": symbol,
+                "name": symbol,
+                "qty": 1,
+                "buy_price": 100.0,
+                "sell_price": 110.0,
+                "pnl": 10.0,
+                "rate": 0.1,
+                "commission": 0.0,
+                "tax": 0.0,
+            }
+        ]
+
+
+def _sold(core, *symbols):
+    """오늘 매도가 있었던 종목 목록을 흉내 내는 체결 기록."""
+    return [
+        {"symbol": s, "side": "매도", "qty": 1, "price": 110, "ts": ""} for s in symbols
+    ] + [{"symbol": "999999", "side": "매수", "qty": 1, "price": 100, "ts": ""}]
+
+
+def test_실현손익은_매도가_있었던_종목만_종목별로_조회한다(core):
+    """ka10077 은 종목 단위 TR 이다 — 인자 없이 부르면 서버가 거절한다.
+
+    계좌 전체를 주는 줄 알고 인자 없이 불러 2026-08-19 부터 실현손익 대조가 매일
+    통째로 건너뛰어졌다. 매수만 한 종목은 실현손익이 없으니 부를 이유도 없다.
+    """
+    core._broker = _RealizedBroker()
+
+    rows = asyncio.run(core._realized_by_symbol(_sold(core, "005930", "035420")))
+
+    assert core._broker.asked == ["005930", "035420"]  # 매수만 한 종목은 빼고
+    assert "" not in core._broker.asked  # 빈 종목코드로 부르지 않는다
+    assert {r["symbol"] for r in rows} == {"005930", "035420"}
+
+
+def test_한_종목이_실패해도_나머지_대조는_진행한다(core):
+    core._broker = _RealizedBroker(fail={"035420"})
+
+    rows = asyncio.run(core._realized_by_symbol(_sold(core, "005930", "035420")))
+
+    assert [r["symbol"] for r in rows] == ["005930"]
+    logged = core._store._conn.execute(
+        "SELECT reason FROM events WHERE kind='경고'"
+    ).fetchall()
+    assert any("035420" in r["reason"] for r in logged)  # 어느 종목이 빠졌는지 남긴다
+
+
+def test_전부_실패하면_대조를_건너뛴다(core):
+    """일부만 받은 값으로 합계를 비교하면 없는 차이를 만들어 낸다."""
+    core._broker = _RealizedBroker(fail={"005930", "035420"})
+
+    assert (
+        asyncio.run(core._realized_by_symbol(_sold(core, "005930", "035420"))) is None
+    )
+
+
+def test_매도가_없으면_조회하지_않는다(core):
+    core._broker = _RealizedBroker()
+    fills = [{"symbol": "005930", "side": "매수", "qty": 1, "price": 100, "ts": ""}]
+
+    assert asyncio.run(core._realized_by_symbol(fills)) == []
+    assert core._broker.asked == []
+
+
+# ── 틱 정체 감시창 ──────────────────────────────────────────────
+
+
+def test_종가_동시호가에는_틱_정체를_감시하지_않는다(core, monkeypatch):
+    """15:20 부터는 체결 틱이 원래 오지 않는다.
+
+    15:30 까지 열어 두면 90초마다 기계적으로 발동해 멀쩡한 세션을 끊고 재연결 가격
+    보정을 반복한다 (2026-08-21 실측: 10분 동안 경고 6회 · REST 약 450건).
+    """
+    import trader.core as core_mod
+
+    calls = []
+
+    class Watcher:
+        async def force_reconnect(self):
+            calls.append("재연결")
+
+    core._watcher = Watcher()
+    core._last_ws_tick = time.monotonic() - 600  # 10분째 침묵
+
+    class FakeNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 21, 15, 25, 0)  # 금요일 종가 동시호가
+
+    monkeypatch.setattr(core_mod, "datetime", FakeNow)
+    asyncio.run(core._check_tick_flow())
+    assert calls == []  # 조용한 것이 정상이다
+
+
+def test_접속매매_시간의_침묵은_여전히_잡는다(core, monkeypatch):
+    import trader.core as core_mod
+
+    calls = []
+
+    class Watcher:
+        async def force_reconnect(self):
+            calls.append("재연결")
+
+    core._watcher = Watcher()
+    core._last_ws_tick = time.monotonic() - 600
+
+    class FakeNow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 21, 15, 19, 0)  # 15:20 직전
+
+    monkeypatch.setattr(core_mod, "datetime", FakeNow)
+    asyncio.run(core._check_tick_flow())
+    assert calls == ["재연결"]

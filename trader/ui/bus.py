@@ -31,6 +31,11 @@ class PositionUpdate:
     base_date: str = ""  # 기준봉 날짜
     day_open: float = 0.0  # 감시 중 첫 체결가 (재시작해도 등락률이 이어지도록)
     base_days: int | None = None  # 기준봉으로부터 경과한 거래일 수 (공휴일 제외)
+    # 보유기간 표시용. 분·시간 계산은 화면이 스스로 하고(코어 부하 0), 거래일 경과처럼
+    # 달력이 필요한 값만 코어가 계산해 넘긴다 — base_days 와 같은 방식이다.
+    entry_ts: str = ""  # 진입(첫 매수 체결) 시각. 모르면 빈 문자열 → 표시하지 않는다
+    exit_ts: str = ""  # 청산 시각. 보유 중이면 빈 문자열 = 시계가 계속 돈다
+    hold_days: int | None = None  # 진입일로부터 경과한 거래일 수 (0 = 당일 진입)
 
 
 @dataclass(frozen=True)

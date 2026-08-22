@@ -77,8 +77,12 @@ def load_bot_config(config_path="config.toml") -> BotConfig:
 # ── 표시용 데이터 구성 (순수 함수 — 코어 없이 테스트 가능) ─────
 
 
-def build_status_lines(entries: dict) -> list[str]:
-    """보유·보류 종목 요약 줄. 대기 중인 종목은 생략한다."""
+def build_status_lines(entries: dict, holdings: dict | None = None) -> list[str]:
+    """보유·보류 종목 요약 줄. 대기 중인 종목은 생략한다.
+
+    holdings 는 {종목: 보유기간} — 폰으로 볼 때 "이거 며칠째 들고 있더라" 가
+    평단·잔량만큼 자주 궁금한 값이라 잔량 옆에 붙인다.
+    """
     from trader.state_machine import State
 
     lines = []
@@ -98,6 +102,7 @@ def build_status_lines(entries: dict) -> list[str]:
             f"{icon} **{e['name']}({symbol})** {pos.state.value}\n"
             f"　평단 {pos.avg_price:,.0f} → {price:,.0f} ({rate:+.2%}) · "
             f"잔량 {pos.remaining}/{pos.total_bought}"
+            + (f" · 보유 {held}" if (held := (holdings or {}).get(symbol)) else "")
         )
     return lines
 
@@ -109,7 +114,7 @@ def build_dashboard_embed(
     from trader.state_machine import State
 
     entries = core.entries
-    lines = build_status_lines(entries)
+    lines = build_status_lines(entries, {s: core.holding_label(s) for s in entries})
     for symbol, reason in (blocked or {}).items():
         if symbol in entries:
             lines.append(f"⏸️ **{entries[symbol]['name']}({symbol})** 보류 — {reason}")

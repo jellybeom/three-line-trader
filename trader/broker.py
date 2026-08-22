@@ -502,7 +502,7 @@ class Broker:
         """당일 체결 내역 (ka10076) — 실제 체결가·수수료·세금.
 
         ⚠️ 응답에 **날짜 필드가 없다** (ord_tm 은 HHMMSS 뿐). 당일 조회 전용이며
-        이월 종목의 과거 체결 복원에는 쓸 수 없다 — 그건 realized_pnl(ka10072) 몫이다.
+        이월 종목의 과거 체결 복원에는 쓸 수 없다 — 그건 realized_pnl(ka10077) 몫이다.
         """
         data = self._request(
             _PATH_ACCOUNT,
@@ -537,19 +537,32 @@ class Broker:
             )
         return rows
 
-    def realized_pnl(self, symbol: str = "") -> list[dict]:
-        """**당일** 실현손익 상세 (ka10077).
+    def realized_pnl(self, symbol: str) -> list[dict]:
+        """**당일** 실현손익 상세 (ka10077). **종목 단위 TR 이라 symbol 이 필수다.**
 
         예전에는 ka10072(일자별)를 썼는데 응답에 일자 필드가 없어 "그날 하루" 인지
         "그날 이후" 인지 확인할 수 없었다. ka10077 은 이름 그대로 당일치만 주므로
         '오늘 얼마 벌었나' 를 대조하기에 맞다(2026-08-19 교체).
 
+        ⚠️ **계좌 전체를 한 번에 주는 TR 이 아니다.** 교체할 때 그렇게 가정해 인자 없이
+        불렀고, 서버가 `필수입력 파라미터=stk_cd` 로 거절해 실현손익 대조가 그날부터
+        매일 통째로 건너뛰어졌다(2026-08-21 발견). 조회 실패는 조용히 넘어가는 설계라
+        경고 한 줄만 남고 두 달 가까이 드러나지 않을 뻔했다. 그래서 **호출 전에 막는다** —
+        서버만 알던 계약을 코드로 끌어와 다음에 같은 실수가 나면 테스트에서 걸리게 한다.
+
         ⚠️ stk_cd 에 'A' 접두사가 붙는다 (`A005930`). 다른 TR 과 달라 반드시 벗겨야 한다.
         ⚠️ 매입단가·손익이 **소수 문자열**("97602.9573459")이라 int() 파싱은 예외가 난다.
+
+        응답은 **요청한 종목의 행만** 남긴다. 계좌 전체가 딸려 오더라도 호출부가 종목마다
+        한 번씩 부르므로 이렇게 걸러야 같은 행이 여러 번 세어지지 않는다.
 
         문서 예시로 확인한 계산식: tdy_sel_pl = (체결가 − 매입단가) × 수량 − 수수료 − 세금.
         즉 **세후 순손익**이고, pl_rt 는 매입금액 대비 수익률이다.
         """
+        if not symbol:
+            raise BrokerError(
+                "realized_pnl 은 종목코드가 필요합니다 (ka10077 은 종목 단위)"
+            )
         data = self._request(
             _PATH_ACCOUNT,
             _TR_REALIZED,
@@ -559,7 +572,7 @@ class Broker:
         rows = []
         for row in data.get("tdy_rlzt_pl_dtl", []) or []:
             code = str(row.get("stk_cd") or "").lstrip("A")
-            if not code:
+            if not code or code != symbol.lstrip("A"):
                 continue
             rows.append(
                 {

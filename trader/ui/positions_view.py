@@ -29,6 +29,7 @@ _COLUMNS = (
     "change",
     "avg",
     "qty",
+    "hold",
     "pnl",
     "realized",
     "line1",
@@ -49,6 +50,7 @@ _HEADINGS = (
     "등락률",
     "평단가",
     "잔량/총량",
+    "보유",
     "수익률",
     "실현손익",
     "1선",
@@ -65,6 +67,30 @@ _ADD_ROW = "__add__"
 _CSV_ROW = "__csv__"
 _SPECIAL = {_ADD_ROW, _CSV_ROW}
 _BASE_HEADINGS = dict(zip(_COLUMNS, _HEADINGS))
+
+
+def _holding_minutes(text: str) -> float:
+    """보유기간 표기를 정렬용 분으로 환산한다.
+
+    '2일차' 는 시간을 모르므로 하루(장 6시간 30분)를 곱해 대략의 자리에 놓는다 —
+    이월 종목끼리는 일수로 갈리고, 당일 종목보다는 항상 뒤에 온다.
+
+    진입 전 종목(빈칸)은 **가장 작은 값**으로 둔다. 첫 클릭이 내림차순이라 이렇게 해야
+    '오래 들고 있는 것부터' 를 보려고 눌렀을 때 아직 사지도 않은 종목이 맨 위를
+    차지하지 않는다. '0분' 과도 구분되게 음수를 쓴다.
+    """
+    import re
+
+    if not text.strip():
+        return -1.0
+    if m := re.match(r"(\d+)일차", text):
+        return int(m.group(1)) * 390.0
+    minutes = 0.0
+    if m := re.search(r"(\d+)시간", text):
+        minutes += int(m.group(1)) * 60
+    if m := re.search(r"(\d+)분", text):
+        minutes += int(m.group(1))
+    return minutes
 
 
 # 가격을 나타내는 열 — 오른쪽 정렬하되 셀 끝에 바싹 붙지 않게 여백을 준다
@@ -105,6 +131,7 @@ class PositionsView(ttk.Frame):
         self._closed: set[str] = set()  # 종료 종목: 수익률을 종료 시점 값으로 고정
         self._blocked: dict[str, str] = {}  # 진입 보류 중인 종목 → 사유
         self._day_open: dict[str, float] = {}  # 종목별 당일 첫 체결가 (등락률 기준)
+        self._holding: dict[str, str] = {}  # 종목별 보유기간 표기 (30초마다 갱신)
         self._sort_reverse: dict[str, bool] = {}
         # 화면에 보이는 순서 그대로의 **전체** 종목 목록. tree.get_children() 은 숨긴 행을
         # 빼고 돌려주므로, 정렬·전체 삭제에 그것만 쓰면 숨긴 종목이 누락된다.
@@ -125,6 +152,8 @@ class PositionsView(ttk.Frame):
                 self.tree.column(col, width=68, anchor="center")
             elif col == "base":  # 기준봉 D+n — 짧은 값이라 좁게
                 self.tree.column(col, width=52, anchor="center")
+            elif col == "hold":  # 보유기간 — '3시간 12분' 이 들어갈 만큼만
+                self.tree.column(col, width=78, anchor="center")
             elif col == "memo":
                 self.tree.column(col, width=110, anchor="center")
             else:
@@ -193,8 +222,10 @@ class PositionsView(ttk.Frame):
         params: Params,
         memo: str = "",
         base_days: int | None = None,
+        holding: str = "",
     ) -> None:
         self._avg[symbol] = pos.avg_price
+        self._holding[symbol] = holding
         qty = f"{pos.remaining}/{pos.total_bought}" if pos.total_bought else "-"
         avg = f"{pos.avg_price:,.0f}" if pos.avg_price else "-"
         state_text = pos.state.value + (" (체결대기)" if pos.pending else "")
@@ -226,6 +257,7 @@ class PositionsView(ttk.Frame):
             self._cell(symbol, "change"),  # 등락률은 틱이 올 때 갱신된다
             _pad(avg),
             qty,
+            holding,
             pnl_cell,
             _pad(realized),
             _pad(f"{params.line1:,.0f}"),
@@ -250,6 +282,21 @@ class PositionsView(ttk.Frame):
         # 필터를 켠 채로 틱이 오면 insert 로 되살아나거나 _ensure_add_row 의 move 로
         # 순서가 흔들린다. 갱신 끝에 조건을 다시 걸어 '안 맞으면 안 보인다' 를 지킨다.
         self._apply_filter(symbol)
+
+    def set_holding(self, symbol: str, text: str) -> None:
+        """보유기간 칸만 갱신한다 (30초 주기).
+
+        upsert 는 18칸을 통째로 다시 쓰고 필터·순서까지 손대므로, 분 단위로만 바뀌는
+        값 하나 때문에 부를 일이 아니다. 값이 그대로면 아무것도 하지 않는다.
+        """
+        if self._holding.get(symbol) == text or not self.tree.exists(symbol):
+            return
+        self._holding[symbol] = text
+        self.tree.set(symbol, "hold", text)
+
+    def holding_symbols(self) -> list[str]:
+        """보유기간 시계가 도는 종목 — 30초 갱신 대상."""
+        return [s for s, text in self._holding.items() if text]
 
     def tick(self, symbol: str, price: float) -> None:
         if not self.tree.exists(symbol) or symbol in _SPECIAL:
@@ -300,6 +347,7 @@ class PositionsView(ttk.Frame):
         if self.tree.exists(symbol):
             self.tree.delete(symbol)
         self._avg.pop(symbol, None)
+        self._holding.pop(symbol, None)
         self._closed.discard(symbol)
         self._day_open.pop(symbol, None)
         self._blocked.pop(symbol, None)
@@ -317,6 +365,7 @@ class PositionsView(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         self._order.clear()
         self._avg.clear()
+        self._holding.clear()
         self._closed.clear()
         self._day_open.clear()  # 매매일이 바뀌면 등락률 기준도 새로 잡는다
         self._blocked.clear()
@@ -469,6 +518,8 @@ class PositionsView(ttk.Frame):
         reverse = self._sort_reverse[col] = not self._sort_reverse.get(col, False)
 
         def key(pair):
+            if col == "hold":  # '47분' < '3시간 12분' < '2일차' 로 세운다
+                return (0, _holding_minutes(pair[0]))
             raw = pair[0].replace(",", "").replace("%", "").replace("+", "")
             try:
                 return (0, float(raw))

@@ -14,6 +14,7 @@ import datetime as dt
 
 import pytest
 
+from trader.broker import BrokerError
 from trader.chart import Bar, Fill, marker_slots
 from trader.journal import close_label, cycle_timeline, transition_path
 from trader.state_machine import Decision, Params, Position, Side, State
@@ -434,7 +435,7 @@ def test_실현손익은_세후_순손익이다():
             }
         }
     )
-    row = b.realized_pnl()[0]
+    row = b.realized_pnl("005930")[0]
     assert row["symbol"] == "005930"
     gross = (row["sell_price"] - row["buy_price"]) * row["qty"]
     assert abs(gross - row["commission"] - row["tax"] - row["pnl"]) < 0.01
@@ -444,10 +445,41 @@ def test_실현손익은_세후_순손익이다():
 def test_당일_실현손익만_조회한다():
     """ka10072 는 응답에 일자가 없어 '오늘' 인지 확인할 수 없었다 — ka10077 로 바꿨다."""
     b = _broker({"ka10077": {"tdy_rlzt_pl_dtl": []}})
-    b.realized_pnl()
+    b.realized_pnl("005930")
     api_id, body = b._calls[0]
     assert api_id == "ka10077"
     assert "strt_dt" not in body  # 날짜를 넘기지 않는다 (당일 전용 TR)
+    assert body["stk_cd"] == "005930"  # 종목 단위 TR — 비우면 서버가 거절한다
+
+
+def test_실현손익_조회에_종목코드가_없으면_호출_전에_막는다():
+    """ka10077 은 종목 단위 TR 이다.
+
+    계좌 전체를 주는 줄 알고 인자 없이 불렀고, 서버가 `필수입력 파라미터=stk_cd` 로
+    거절해 실현손익 대조가 매일 통째로 건너뛰어졌다(2026-08-19 ~ 08-21). 조회 실패를
+    조용히 넘어가는 설계라 경고 한 줄만 남고 드러나지 않았다. 서버만 알던 계약을
+    코드로 끌어와 여기서 걸리게 한다.
+    """
+    b = _broker({"ka10077": {"tdy_rlzt_pl_dtl": []}})
+    with pytest.raises(BrokerError, match="종목코드"):
+        b.realized_pnl("")
+    assert b._calls == []  # 네트워크로 나가지도 않는다
+
+
+def test_실현손익은_요청한_종목의_행만_남긴다():
+    """계좌 전체가 딸려 오더라도 종목마다 부르므로 걸러야 중복으로 세지 않는다."""
+    b = _broker(
+        {
+            "ka10077": {
+                "tdy_rlzt_pl_dtl": [
+                    {"stk_cd": "A005930", "cntr_qty": "1", "tdy_sel_pl": "100"},
+                    {"stk_cd": "A035420", "cntr_qty": "2", "tdy_sel_pl": "200"},
+                ]
+            }
+        }
+    )
+    rows = b.realized_pnl("005930")
+    assert [r["symbol"] for r in rows] == ["005930"]
 
 
 # ── 15:35 이후 자동화 없음 ────────────────────────────────────
@@ -1330,3 +1362,76 @@ def test_다크_선택_배경에서도_색이_읽힌다():
         p = theme.resolve(mode)
         for name in ("profit", "loss", "muted"):
             assert contrast(getattr(p, name), p.select_bg) >= 4.5, f"{mode} {name}"
+
+
+# ── 보유기간 ────────────────────────────────────────────────────
+
+
+def test_보유기간_표기는_당일과_이월을_다른_단위로_적는다():
+    """벽시계 시간은 밤·주말을 넘기면 거짓말이 된다.
+
+    금 15:20 매수 → 월 09:05 은 벽시계로 66시간이지만 실제 장중 노출은 6시간 남짓이다.
+    날짜를 넘긴 순간부터는 거래일 수로만 말한다.
+    """
+    from trader.journal import format_holding
+
+    entry = "2026-08-19 09:14:00"
+    assert format_holding(entry, "2026-08-19 09:14:30", 0) == "0분"
+    assert format_holding(entry, "2026-08-19 10:01:00", 0) == "47분"
+    assert format_holding(entry, "2026-08-19 10:14:00", 0) == "1시간 0분"
+    assert format_holding(entry, "2026-08-19 12:26:00", 0) == "3시간 12분"
+    assert format_holding(entry, "2026-08-20 09:05:00", 1) == "2일차"
+    # 주말·휴장을 건너뛴 거래일 수를 그대로 쓴다 (달력이 계산해 넘겨준다)
+    assert format_holding(entry, "2026-08-24 09:05:00", 2) == "3일차"
+
+
+def test_진입_시각을_모르면_보유기간은_빈칸이다():
+    """강제 복구·수동 시작 상태 지정 — 추정하지 않는다."""
+    from trader.journal import format_holding
+
+    assert format_holding("", "2026-08-19 10:00:00", 0) == ""
+    assert format_holding("깨진값", "2026-08-19 10:00:00", 0) == ""
+
+
+def test_거래일_수가_없으면_날짜_차이로_물러난다():
+    """키움 미연결 등으로 달력이 없어도 값이 보여야 한다."""
+    from trader.journal import format_holding
+
+    assert format_holding("2026-08-19 09:14:00", "2026-08-19 10:01:00") == "47분"
+    assert format_holding("2026-08-19 09:14:00", "2026-08-21 10:01:00") == "3일차"
+
+
+def test_진입_시각은_사이클의_첫_매수다():
+    """2차 매수(물타기)는 새 진입이 아니므로 시계를 되돌리지 않는다."""
+    from trader.journal import entry_time
+
+    cycle = [
+        {"ts": "2026-08-19 09:14:00", "side": "매수", "to_state": "1차 매수"},
+        {"ts": "2026-08-19 10:30:00", "side": "매수", "to_state": "2차 매수"},
+        {"ts": "2026-08-19 13:00:00", "side": "매도", "to_state": "종료"},
+    ]
+    assert entry_time(cycle) == "2026-08-19 09:14:00"
+    assert entry_time([{"ts": "2026-08-19 09:00:00", "side": None}]) == ""
+
+
+def test_일지_타임라인에_진입_시각과_보유기간이_붙는다():
+    from trader.journal import cycle_timeline
+
+    cycle = [
+        {
+            "ts": "2026-08-19 09:14:00",
+            "trade_date": "2026-08-19",
+            "side": "매수",
+            "to_state": "1차 매수",
+        },
+        {
+            "ts": "2026-08-19 12:26:00",
+            "trade_date": "2026-08-19",
+            "side": "매도",
+            "to_state": "종료",
+        },
+    ]
+    text = cycle_timeline(cycle)
+    assert "진입 2026-08-19 09:14" in text
+    assert "청산 2026-08-19 12:26" in text
+    assert "보유 3시간 12분" in text

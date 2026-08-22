@@ -56,7 +56,7 @@ from trader.state_machine import (
     mark_pending,
 )
 from trader.store import Store
-from trader.journal import cycle_timeline, transition_path
+from trader.journal import cycle_timeline, format_holding, transition_path
 from trader.trading_calendar import TradingCalendar, load_holidays
 from trader.ui import bus
 from trader.watcher import Tick, Watcher
@@ -74,6 +74,13 @@ _PNL_DIFF_WON = (
 # 장중에 이 시간만큼 틱이 없으면 연결이 살아 있어도 다시 맺는다. 118종목이면 몇 초에
 # 한 번은 오므로 90초 침묵은 명백한 이상이다.
 _TICK_STALL_SEC = 90
+# 감시창은 **15:20 에 닫는다**. 15:20 부터는 종가 동시호가라 체결 틱이 원래 오지 않아
+# 침묵이 정상이다. 15:30 까지 열어 두면 90초마다 기계적으로 발동해 멀쩡한 세션을 끊고
+# 재연결 가격 보정까지 반복한다 (2026-08-21 실측: 10분 동안 경고 6회 · 재연결 6회 ·
+# REST 약 450건). 15:20~15:30 에 소켓이 진짜 죽으면 못 잡지만, 그 구간은 체결 틱으로
+# 판정할 것이 없고 감시 중지가 15:30 이라 노출은 10분이다.
+_TICK_WATCH_START = dtime(9, 0)
+_TICK_WATCH_END = dtime(15, 20)
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
@@ -696,6 +703,9 @@ class Core:
                     self._log(s, "에러", str(e))
                 else:
                     self._entries[s]["pos"] = new_pos
+                    # 새 사이클이므로 보유기간 시계도 처음으로 되돌린다
+                    self._entries[s]["entry_ts"] = ""
+                    self._entries[s]["exit_ts"] = ""
                     self._clear_block(s)
                     self._emit_position(s)
                     self._log(s, "리셋", "관리자 수동 초기화 (종료 → 대기)")
@@ -872,6 +882,7 @@ class Core:
                 ),
                 avg_price=pos.avg_price,
                 total_bought=pos.total_bought,
+                holding=self.holding_label(symbol),
             )
             self._spawn(self._send_embed(embed), "종료 알림 발송")
             return
@@ -973,6 +984,18 @@ class Core:
                 e["pos"].state is State.CLOSED
             ):  # 진입 금지 등 종료만 알림 (수량 0 익절 전이는 제외)
                 self._notify_trade(symbol, d.reason, 0, price)
+            return
+
+        if d.side is Side.BUY and d.qty <= 0:
+            # 매수 금액이 체결가(+수수료)에 못 미치면 수량이 0 이 된다. 그대로 보내면
+            # 증권사가 거부하고, 그 실패가 3회 쌓이면 당일 그 종목 주문이 통째로 막힌다.
+            # 가격이 더 내려가면 1주가 되므로 '보류' 로 두어 다음 틱에 다시 판정한다.
+            self._log_block(
+                symbol,
+                f"매수 수량 0주 — 매수 금액으로 {price:,.0f}원에 1주도 살 수 없습니다. "
+                "가격이 내려가면 재시도합니다",
+                price,
+            )
             return
 
         if (
@@ -1196,6 +1219,13 @@ class Core:
             "high"
         ):  # 첫 체결 시점부터 MFE/MAE 추적 시작
             e["high"] = e["low"] = fill.fill_price
+        # 보유기간 시계. **첫 매수에서만** 시작한다 — 2차 매수(물타기)는 새 진입이
+        # 아니므로 되돌리지 않는다. 종료되면 그 자리에서 멈춰 최종값이 고정된다.
+        if d.side is Side.BUY and not e["pos"].total_bought:
+            e["entry_ts"] = _now()
+            e["exit_ts"] = ""
+        if filled.state is State.CLOSED:
+            e["exit_ts"] = _now()
         e["pos"] = replace(
             filled,
             fees=filled.fees + fee,
@@ -1450,6 +1480,8 @@ class Core:
             return
 
         e["pos"] = new_pos
+        if new_pos.state is State.CLOSED:
+            e["exit_ts"] = _now()  # 계좌 기준으로 정리됐어도 보유기간 시계는 멈춘다
         self._store.save_position(self._date, symbol, new_pos)
         self._store.update_order(info["order_id"], "미확인")
         self._emit_position(symbol)
@@ -1493,13 +1525,16 @@ class Core:
         서버가 ping 에만 답하면 `async for` 는 영원히 기다린다. 그날 1선을 이탈한
         11종목이 통째로 진입하지 못했다.
 
-        감시 중이고 장중일 때만 본다 — 개장 전·점심 전후를 가리지 않아도 118종목이면
-        몇 초에 한 번은 틱이 온다. 조용한 것 자체가 이상 신호다.
+        감시 중이고 **접속매매 시간(09:00~15:20)** 일 때만 본다. 118종목이면 몇 초에
+        한 번은 틱이 오므로 그 안의 침묵은 이상 신호다. 15:20 부터는 종가 동시호가라
+        체결 틱이 오지 않는 것이 정상이므로 감시하지 않는다 — _TICK_WATCH_END 참고.
         """
         if not self._running or self._watcher is None:
             return
         now = datetime.now()
-        if now.weekday() >= 5 or not (dtime(9, 0) <= now.time() <= dtime(15, 30)):
+        if now.weekday() >= 5 or not (
+            _TICK_WATCH_START <= now.time() < _TICK_WATCH_END
+        ):
             return
         if self._last_ws_tick == 0.0:  # 아직 첫 틱 전 (개장 직후 몇 초)
             self._last_ws_tick = time.monotonic()
@@ -1670,9 +1705,16 @@ class Core:
                 except BrokerError:
                     deposit = None
             return build_daily_summary_embed(
-                date, symbols, fills, deposit, await self.refresh_account()
+                date,
+                symbols,
+                fills,
+                deposit,
+                await self.refresh_account(),
+                holdings=self._holding_labels(date),
             )
-        return build_daily_summary_embed(date, symbols, fills)  # 과거는 기록만
+        return build_daily_summary_embed(  # 과거는 기록만
+            date, symbols, fills, holdings=self._holding_labels(date)
+        )
 
     def trade_dates(self, limit: int = 10) -> list[str]:
         """최근 매매일 목록 (요약 조회 자동완성용)."""
@@ -2106,7 +2148,8 @@ class Core:
         """프로그램이 계산한 손익·비용을 **증권사 실측값과 대조**한다 (읽기 전용).
 
         - ka10076 체결요청: 실제 체결 내역과 수수료·세금
-        - ka10072 일자별종목별실현손익: 세후 실현손익 (매도가 있어야 나온다)
+        - ka10077 당일실현손익상세: 세후 실현손익. **종목 단위 TR** 이라 오늘 매도가
+          있었던 종목마다 한 번씩 부른다 (_realized_by_symbol 참고)
 
         돌려주는 것은 요약에 실을 **한 줄 정리**이고, 원인을 찾는 데 필요한 종목별 원자료는
         로그에 남긴다. 합계만 비교하면 어디서 어긋났는지 알 수 없어 원인 규명이 안 된다
@@ -2119,13 +2162,47 @@ class Core:
             return []
         symbols, fills = self._store.daily_report(self._date)
         broker_fills = await self._query_broker("filled_orders", "체결")
-        realized = await self._query_broker("realized_pnl", "실현손익")
+        realized = await self._realized_by_symbol(fills)
         lines: list[str] = []
         if broker_fills is not None:
             lines += self._reconcile_cost(symbols, fills, broker_fills)
         if realized is not None:
             lines += self._reconcile_pnl(symbols, realized)
         return lines
+
+    async def _realized_by_symbol(self, fills: list[dict]) -> list[dict] | None:
+        """오늘 **매도가 있었던 종목만** 골라 종목별로 실현손익을 조회해 합친다.
+
+        ka10077 은 종목 단위 TR 이라 한 번에 계좌 전체를 받을 수 없다. 매수만 한 종목은
+        실현손익이 없으므로 부를 이유가 없다 — 조회 건수를 청산이 일어난 종목으로 줄인다
+        (2026-08-21 기준 17체결 중 9종목).
+
+        한 종목이 실패해도 나머지는 진행한다. 전부 실패했을 때만 None 을 돌려 대조를
+        통째로 건너뛴다 — 일부만 받은 값으로 합계를 비교하면 없는 차이를 만들어 낸다.
+        """
+        if self._broker is None or not hasattr(self._broker, "realized_pnl"):
+            return None
+        sold = sorted({f["symbol"] for f in fills if f.get("side") == "매도"})
+        if not sold:
+            return []
+        rows: list[dict] = []
+        failed: list[str] = []
+        for symbol in sold:
+            try:
+                rows += await asyncio.to_thread(self._broker.realized_pnl, symbol)
+            except BrokerError as err:
+                failed.append(f"{symbol}({err})")
+        if failed:
+            self._log(
+                "시스템",
+                "경고",
+                f"실현손익 대조 실패 {len(failed)}/{len(sold)}종목: "
+                + ", ".join(failed),
+                notify=False,
+            )
+        if len(failed) == len(sold):
+            return None
+        return rows
 
     async def _query_broker(self, method: str, label: str, *args):
         """대조용 조회 한 건. 실패하면 None (시뮬레이터에는 아예 없을 수도 있다)."""
@@ -2175,7 +2252,7 @@ class Core:
     def _reconcile_pnl(self, symbols: list[dict], realized: list[dict]) -> list[str]:
         """세후 실현손익 대조 — **종목별로** 비교해 어긋난 곳을 특정한다.
 
-        ka10072 는 매입단가(buy_uv)까지 주므로, 프로그램 평단과 나란히 찍어 두면
+        ka10077 은 매입단가(buy_uv)까지 주므로, 프로그램 평단과 나란히 찍어 두면
         '증권사가 매수 수수료를 평단에 포함시켜서' 인지 아닌지 바로 가려진다.
         """
         by_symbol: dict[str, dict] = {}
@@ -2250,7 +2327,14 @@ class Core:
                 deposit = None
         self._flush_day_lows(force=True)  # 요약 직전에 최신 근접도를 확정 저장
         account = await self.refresh_account()
-        embed = build_daily_summary_embed(self._date, symbols, fills, deposit, account)
+        embed = build_daily_summary_embed(
+            self._date,
+            symbols,
+            fills,
+            deposit,
+            account,
+            holdings=self._holding_labels(self._date),
+        )
         # 일지 미작성 안내 — 늦어도 주말에는 쓰기로 한 약속을 상기시킨다
         pending = [
             e for e in self._store.journal_entries() if not (e["good"] or e["bad"])
@@ -2422,6 +2506,9 @@ class Core:
         self._entries = {}
         self._block_logged.clear()
         self._block_notified.clear()
+        # 보유기간의 기준점. events 에서 유도하므로 저장할 것이 없고, 이월 종목도
+        # 며칠 전 매수를 그대로 집어낸다 (조회는 전 종목 배치 1회).
+        spans = self._store.holding_spans(trade_date)
         for symbol, (name, params, pos, memo, tags, base_date) in self._store.load_all(
             trade_date
         ).items():
@@ -2438,6 +2525,8 @@ class Core:
                 "day_low": pos.day_low,
                 "day_open": pos.day_open,
                 "day_close": pos.day_close,
+                "entry_ts": spans.get(symbol, ("", ""))[0],
+                "exit_ts": spans.get(symbol, ("", ""))[1],
             }
 
     def _warn_restored_pending(self) -> None:
@@ -2477,8 +2566,46 @@ class Core:
                 e.get("base_date", ""),
                 e.get("day_open") or 0.0,
                 self.base_days(e.get("base_date", "")),
+                e.get("entry_ts", ""),
+                e.get("exit_ts", ""),
+                self._hold_days(symbol),
             )
         )
+
+    def _hold_days(self, symbol: str) -> int | None:
+        """진입일로부터 경과한 거래일 (0 = 당일 진입). 청산했으면 청산일까지 센다.
+
+        보유 중인 종목은 '오늘까지' 가 아니라 **화면의 매매일까지** 센다 — 과거 날짜를
+        열어 복기할 때 그날 기준으로 보여야 하기 때문이다.
+        """
+        e = self._entries.get(symbol)
+        entry = (e or {}).get("entry_ts") or ""
+        if not entry:
+            return None
+        last_day = (e.get("exit_ts") or "")[:10] or self._date
+        return self._calendar.days_between(entry[:10], last_day)
+
+    def holding_label(self, symbol: str) -> str:
+        """이 종목의 보유기간 표기 (`3시간 12분` / `2일차`). 진입 전이면 빈 문자열."""
+        e = self._entries.get(symbol)
+        if e is None:
+            return ""
+        return format_holding(
+            e.get("entry_ts", ""), e.get("exit_ts", ""), self._hold_days(symbol)
+        )
+
+    def _holding_labels(self, trade_date: str) -> dict[str, str]:
+        """일일 요약용 {종목: 보유기간}. 과거 날짜도 기록에서 그대로 만들 수 있다."""
+        if trade_date == self._date:  # 오늘은 메모리 값이 최신이다
+            return {s: label for s in self._entries if (label := self.holding_label(s))}
+        labels = {}
+        for symbol, (entry, exit_ts) in self._store.holding_spans(trade_date).items():
+            days = self._calendar.days_between(
+                entry[:10], (exit_ts or "")[:10] or trade_date
+            )
+            if label := format_holding(entry, exit_ts, days):
+                labels[symbol] = label
+        return labels
 
     def _apply_globals_to_waiting(self, b1, b2, rates, ratios) -> None:
         """진입 전('대기') 종목에 새 전역 설정을 즉시 반영한다. 보유 중 종목은 진입 시점 값 유지."""
@@ -2497,6 +2624,10 @@ class Core:
             except ValueError as err:  # 예: 금액 < 기준선
                 self._log(symbol, "에러", f"새 전역 설정 적용 불가: {err}")
                 continue
+            # 태그·기준봉을 함께 넘긴다. register_symbol 은 넘긴 값으로 **덮어쓰므로**,
+            # 빠뜨리면 [적용] 한 번에 종목 선정 근거가 DB 에서 지워진다. 메모리에는 값이
+            # 남아 화면은 멀쩡해 보이고, 매매일을 바꾸거나 재시작한 뒤에야 드러난다.
+            # 저녁 루틴이 'CSV 불러오기 → [적용]' 이라 정상 운용하면 매번 밟는 경로였다.
             self._store.register_symbol(
                 self._date,
                 symbol,
@@ -2504,6 +2635,8 @@ class Core:
                 e["params"],
                 e["pos"],
                 memo=e.get("memo", ""),
+                tags=e.get("tags", ""),
+                base_date=e.get("base_date", ""),
             )
             self._emit_position(symbol)
             updated += 1

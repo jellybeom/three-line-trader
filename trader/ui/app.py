@@ -24,6 +24,7 @@ import traceback
 from datetime import datetime, time as dtime, timedelta
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+from trader.journal import format_holding
 from trader.state_machine import State
 from trader.ui import bus
 
@@ -60,6 +61,7 @@ _MARKET_SAMPLE = "(월) · 휴장 · 석가탄신일(대체휴일)＋"
 _SEARCH_CHARS = 18  # 검색 입력칸 폭(글자 수) — 종목명은 대개 이보다 짧다
 _IME_GAP_PX = 3  # 검색줄과 표 사이 여백 — 줄이 세로를 많이 먹지 않도록 최소로 둔다
 _POLL_MS = 200
+_HOLDING_REFRESH_SEC = 30  # 보유기간 표시 갱신 주기 (분 단위 표기라 잦을 필요가 없다)
 # 종목코드는 6자리이며 **숫자로만 이루어지지 않는다** — 신주인수권·스팩 등에는
 # 영문자가 섞인다(실측 2026-08-05: 아로마티카 0015N0). 숫자만 허용하면 조용히 누락된다.
 # 앞의 따옴표(영웅문의 '096770)와 시장구분 접두 A 는 걷어낸다.
@@ -227,6 +229,9 @@ class App(tk.Tk):
         # symbol -> (name, params, position, memo)
         self._registry: dict[str, tuple[str, object, object, str]] = {}
         self._last_price: dict[str, float] = {}  # 평가손익 계산용
+        # 종목 → (진입 시각, 청산 시각, 경과 거래일). 보유기간을 화면이 직접 계산한다
+        self._holding: dict[str, tuple[str, str, int | None]] = {}
+        self._holding_at = datetime.min
         self._staged: dict[str, str] = (
             {}
         )  # CSV 로 불러온 3선 미입력 종목 {코드: 종목명}
@@ -1116,11 +1121,23 @@ class App(tk.Tk):
                 base_date=base_date,
                 day_open=day_open,
                 base_days=base_days,
+                entry_ts=entry_ts,
+                exit_ts=exit_ts,
+                hold_days=hold_days,
             ):
                 self._staged.pop(s, None)  # 3선 입력 완료 → 대기 해제
                 self._registry[s] = (n, prm, p, memo, tags, base_date)
+                self._holding[s] = (entry_ts, exit_ts, hold_days)
                 self.positions.set_day_open(s, day_open)
-                self.positions.upsert(s, n, p, prm, memo, base_days)
+                self.positions.upsert(
+                    s,
+                    n,
+                    p,
+                    prm,
+                    memo,
+                    base_days,
+                    format_holding(entry_ts, exit_ts, hold_days),
+                )
                 self._update_summary()
                 self._update_pnl()
             case bus.Tick(symbol=s, price=p):
@@ -1134,6 +1151,7 @@ class App(tk.Tk):
                 self.events.append(ts, s, name, k, t)
             case bus.SymbolRemoved(symbol=s):
                 self._registry.pop(s, None)
+                self._holding.pop(s, None)
                 self.positions.remove(s)
                 self._update_summary()
             case bus.WatchStatus(running=r):
@@ -1171,6 +1189,7 @@ class App(tk.Tk):
                 self.events.clear_view()
                 self._staged.clear()
                 self._registry.clear()
+                self._holding.clear()
                 self._last_price.clear()
                 self.positions.clear()
                 self._update_summary()
@@ -1288,4 +1307,21 @@ class App(tk.Tk):
         else:
             phase = "장 마감"
         self._market_label.configure(text=phase)
+        self._refresh_holding()
         self.after(1000, self._refresh_clock)
+
+    def _refresh_holding(self) -> None:
+        """보유기간 칸을 30초마다 다시 그린다.
+
+        분 단위 표기라 30초면 충분하고, 코어에 아무것도 묻지 않는다 — 진입·청산 시각을
+        PositionUpdate 로 이미 받아 뒀으므로 화면이 스스로 계산한다. 청산된 종목은
+        exit_ts 가 있어 값이 변하지 않고, set_holding 이 같은 값을 걸러 낸다.
+        """
+        now = datetime.now()
+        if (now - self._holding_at).total_seconds() < _HOLDING_REFRESH_SEC:
+            return
+        self._holding_at = now
+        for symbol, (entry_ts, exit_ts, hold_days) in self._holding.items():
+            self.positions.set_holding(
+                symbol, format_holding(entry_ts, exit_ts, hold_days)
+            )

@@ -63,7 +63,12 @@ def format_trade(
 
 
 def _holding_time(fills: list[dict]) -> str:
-    """첫 체결 ~ 마지막 체결 경과 시간 (요약 표시용)."""
+    """첫 체결 ~ 마지막 체결 경과 시간.
+
+    ⚠️ **당일 체결만** 보므로 이월 종목에서는 답이 되지 않는다(어제 산 것을 오늘 팔면
+    매수 행이 없어 빈칸이 된다). 보유기간은 호출부가 `holdings` 로 넘겨주는 값을 쓰고,
+    이 함수는 그 값이 없을 때의 대비책으로만 남긴다.
+    """
     if len(fills) < 2:
         return ""
     from datetime import datetime
@@ -119,6 +124,7 @@ def build_trade_embed(
     path: str = "",
     avg_price: float = 0.0,
     total_bought: int = 0,
+    holding: str = "",
 ) -> dict:
     """종목이 '종료' 될 때의 결산 embed — 색 띠로 이익/손실이 한눈에 들어온다.
 
@@ -152,6 +158,7 @@ def build_trade_embed(
         lines.append(
             f"평단 {avg_price:,.0f} → 청산 {exit_price:,.0f}"
             f" · 투입 {_short_won(invested)}"
+            + (f" · 보유 {holding}" if holding else "")
         )
     return {
         "title": f"{icon} {name}({symbol}) 종료",
@@ -545,6 +552,7 @@ def build_daily_summary_embed(
     deposit: float | None = None,
     account: dict | None = None,
     index_rate: float | None = None,
+    holdings: dict[str, str] | None = None,
 ) -> dict:
     """일일 요약 Discord embed — 왼쪽 색 띠와 항목 분리로 한눈에 읽히게 만든다.
 
@@ -599,9 +607,12 @@ def build_daily_summary_embed(
         if s["avg_price"] and s["high_price"]:
             high = (s["high_price"] - s["avg_price"]) / s["avg_price"]
             low = (s["low_price"] - s["avg_price"]) / s["avg_price"]
+            # 보유기간은 매매 사이클 전체 기준이라 호출부(코어)가 계산해 넘긴다.
+            # 당일 체결만 보면 이월 종목에서 빈칸이 되거나 실제보다 짧게 나온다.
+            held = (holdings or {}).get(s["symbol"]) or _holding_time(own)
             lines.append(
                 f"최고 `{high:+.1%}` / 최저 `{low:+.1%}`"
-                + (f" · 보유 {held}" if (held := _holding_time(own)) else "")
+                + (f" · 보유 {held}" if held else "")
             )
         if s["state"] != "종료":
             lines.append("**다음 매매일로 이월하세요**")

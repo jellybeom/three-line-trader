@@ -166,6 +166,22 @@ def _collapse_cycles(rows: list[dict]) -> list[dict]:
     return kept
 
 
+def _first_buy_ts(cycle: list[dict]) -> str:
+    """사이클의 첫 매수 체결 시각. 2차 매수는 새 진입이 아니므로 앞의 것을 쓴다."""
+    for row in cycle:
+        if row.get("side") == "매수":
+            return row.get("ts") or ""
+    return ""
+
+
+def _exit_ts(cycle: list[dict]) -> str:
+    """사이클이 끝난 시각. 아직 보유 중이면 빈 문자열."""
+    for row in reversed(cycle):
+        if row.get("to_state") == State.CLOSED.value:
+            return row.get("ts") or ""
+    return ""
+
+
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -216,7 +232,6 @@ _MIGRATIONS: dict[int, tuple] = {
         "ALTER TABLE positions ADD COLUMN day_open REAL",
         "ALTER TABLE positions ADD COLUMN day_close REAL",
     ),
-    12: (_split_daily_pnl,),  # 이월이 복사해 온 손익을 날짜별로 되돌린다
     11: (  # 매매일지 2단계: 코멘트와 차트 보관 경로
         """CREATE TABLE IF NOT EXISTS journal (
             trade_date TEXT NOT NULL,
@@ -229,6 +244,7 @@ _MIGRATIONS: dict[int, tuple] = {
             PRIMARY KEY (trade_date, symbol)
         )""",
     ),
+    12: (_split_daily_pnl,),  # 이월이 복사해 온 손익을 날짜별로 되돌린다
 }
 
 
@@ -641,6 +657,31 @@ class Store:
             if row["state"] == State.CLOSED.value and row is not rows[-1]:
                 realized = fees = 0.0  # 다음 사이클이 이어진다 — 여기서 다시 센다
         return realized, fees
+
+    def holding_spans(self, trade_date: str) -> dict[str, tuple[str, str]]:
+        """{종목코드: (진입 시각, 청산 시각)} — 그 매매일 관심종목 전체를 **한 번에**.
+
+        보유기간의 기준점이다. 이월 종목은 매수가 며칠 전이라 그날 기록만 봐서는 알 수
+        없으므로, 종목별 마지막 사이클을 찾아 그 첫 매수를 집는다. 재시작·매매일 전환마다
+        한 번씩 부르는 자리라 종목 수만큼 조회하면 부담이 되어 배치로 만들었다.
+
+        청산 시각은 아직 보유 중이면 빈 문자열이다(시계가 계속 돈다는 뜻).
+        매수 전이 행이 없는 종목(강제 복구된 포지션, 등록 창에서 상태를 직접 지정한
+        오버나이트 종목)은 **결과에 담기지 않는다** — 진입 시각을 추정하지 않는다.
+        """
+        symbols = [
+            r["symbol"]
+            for r in self._conn.execute(
+                "SELECT symbol FROM symbols WHERE trade_date=?", (trade_date,)
+            ).fetchall()
+        ]
+        cycles = self.cycles_for([(symbol, trade_date) for symbol in symbols])
+        result: dict[str, tuple[str, str]] = {}
+        for symbol in symbols:
+            cycle = cycles.get((symbol, trade_date), [])
+            if entry := _first_buy_ts(cycle):
+                result[symbol] = (entry, _exit_ts(cycle))
+        return result
 
     def symbol_fills(self, symbol: str, until: str = "") -> list[dict]:
         """마지막 사이클의 **체결만** (주문이 동반된 전이). 차트 마커용."""
