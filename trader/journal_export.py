@@ -37,6 +37,7 @@ GitHub 어디서나 열리고, A4 PDF 는 필요할 때 여기서 렌더하면 �
 
 from __future__ import annotations
 
+import filecmp
 import re
 import shutil
 from pathlib import Path
@@ -284,9 +285,14 @@ def export_day(
             if not (entry.get(key) and source.exists()):
                 continue
             filename = f"{trade_slug(entry)}-{suffix}{source.suffix}"
-            shutil.copyfile(source, day_dir / filename)
+            target = day_dir / filename
+            # 내용이 같으면 건드리지 않는다. `--all` 로 1년치를 다시 돌리면 수천 장을
+            # 헛되이 복사하게 되고, 파일 시각만 바뀌어도 백업 도구가 전부 바뀐 것으로
+            # 본다. (git 은 내용 주소 방식이라 같은 그림은 어차피 저장소를 늘리지 않는다.)
+            if not (target.exists() and filecmp.cmp(source, target, shallow=False)):
+                shutil.copyfile(source, target)
             charts[label] = filename
-            written.append(day_dir / filename)
+            written.append(target)
         doc = day_dir / f"{trade_slug(entry)}.md"
         doc.write_text(render_trade(entry, cycle, calendar, charts), encoding="utf-8")
         written.append(doc)
