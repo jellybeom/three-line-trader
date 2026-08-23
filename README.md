@@ -443,7 +443,8 @@ three-line-trader/
 ├── export_journal.py         # 매매일지 → 마크다운 문서 생성 CLI (읽기 전용, 따로 실행)
 ├── .gitattributes            # .bat 은 CRLF 고정 (LF 면 cmd.exe 가 잘못 해석한다)
 ├── start.bat                 # 프로그램 실행 (시작프로그램 + 작업 스케줄러 안전망 겸용)
-├── sync_journal.bat          # 매매일지 문서 생성 + git 커밋·푸시 (폰에서 복기용)
+├── sync_journal.py           # 매매일지 문서 생성 + git 커밋·푸시 (판단은 전부 여기)
+├── sync_journal.bat          # 위를 부르는 얇은 래퍼 — **ASCII 전용** (아래 주의 참고)
 ├── trader/
 │   ├── state_machine.py      # 상태 정의 + 전이 로직 (순수 함수, I/O 없음)
 │   ├── core.py               # 실전 코어: 틱→판단→방어→주문→체결 확정, 잔고 대조·재연결 보정
@@ -480,6 +481,7 @@ three-line-trader/
 │   ├── test_chart.py         # 차트 계산·렌더링·조회 파싱·자동 전송 파이프라인
 │   ├── test_journal.py       # 매매일지 저장·조회, 차트 보관, 벤치마크
 │   ├── test_journal_export.py# 마크다운 생성 (담지 않을 것·렌더·파일 쓰기)
+│   ├── test_sync_journal.py  # git 동기화 (실제 저장소로 시험) + 배치 파일 인코딩 검사
 │   ├── test_journal_path.py  # 상태 경로·사이클 묶기·화살표 배치·조회 API 파싱
 │   ├── test_trading_calendar.py # 거래일 계산 (공휴일·주말·범위 밖 근사)
 │   ├── test_market_calendar.py  # 개장/휴장 판정, 자동 시작 게이트, 이월 날짜
@@ -642,6 +644,14 @@ git branch -M main
 
 > 원격 접속을 끊을 때는 **'연결 끊기'** 를 쓰고 **로그오프하지 않는다.** 로그오프하면
 > 세션이 사라져 프로그램이 같이 죽고, 대화형 세션이 없어 08:50 안전망도 뜨지 않는다.
+
+> **배치 파일에는 한글을 넣지 않는다.** cmd.exe 는 배치 파일을 **바이트 위치를 기억하며**
+> 한 줄씩 읽는다. `chcp 65001` 로 코드페이지를 바꾸면 그 뒤 한글(3바이트)의 위치 계산이
+> 어긋나 주석 끝의 마침표가 명령으로 튀어나온다 — 탐색기 더블클릭이든 PowerShell 이든
+> `'.' is not recognized as an internal or external command` 가 뜬다(2026-08-23 실측).
+> 줄바꿈이 LF 여도 여러 줄 `if (...)` 블록을 잘못 끊는다. 그래서 `.bat` 은 **ASCII + CRLF**
+> 로만 두고(`.gitattributes` 가 고정한다), 한글과 판단은 전부 `.py` 쪽에 둔다.
+> `tests/test_sync_journal.py` 가 이 규칙을 검사한다.
 
 ### 하루의 시각 정리
 

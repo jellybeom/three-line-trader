@@ -38,7 +38,8 @@ def _dates(store: Store, args) -> list[str]:
     return known[:1]  # 기본은 가장 최근 매매일 하나
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """argv 를 받는 이유: sync_journal.py 가 이 함수를 그대로 부른다."""
     parser = argparse.ArgumentParser(description="매매일지 마크다운 생성")
     parser.add_argument("date", nargs="?", default="", help="매매일 (YYYY-MM-DD)")
     parser.add_argument("--month", default="", help="그 달 전체 (YYYY-MM)")
@@ -49,7 +50,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--real", action="store_true", help="실전 DB")
     mode.add_argument("--mock", action="store_true", help="모의 DB")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.db:
         db = args.db
