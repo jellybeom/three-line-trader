@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from trader.journal_export import (
+    closed_cycles,
     export_day,
     metrics,
     net_pnl,
@@ -227,8 +228,8 @@ def test_인덱스는_손익_큰_순으로_세우고_작성_여부를_표시한�
     assert index.count("✔") == 1
 
 
-def test_매매가_없는_날도_문서가_말이_된다():
-    assert "매매 없음" in render_day_index("2026-08-15", [])
+def test_청산된_매매가_없는_날도_문서가_말이_된다():
+    assert "청산된 매매 없음" in render_day_index("2026-08-15", [])
 
 
 def test_인덱스_링크가_매매_문서_경로와_맞는다():
@@ -440,3 +441,106 @@ def test_DB가_없으면_경로를_알려주고_멈춘다(tmp_path, monkeypatch,
     )
     assert export_journal.main() == 1
     assert "trader-mock.db" in capsys.readouterr().err
+
+
+# ── 매매 사이클 하나에 문서 하나 ────────────────────────────────
+
+
+def _multi_day(store):
+    """월 매수 → 화 1차 익절 → 수 전량 매도. 사이클 하나가 사흘에 걸친다."""
+    for date in ("2026-08-24", "2026-08-25", "2026-08-26"):
+        store.register_symbol(date, "263800", "데이타솔루션", P, tags="테마주")
+    # 월: 진입
+    store.save_transition(
+        "2026-08-24",
+        "263800",
+        State.WAITING,
+        Position(State.BUY1, 5_000, 100, 100),
+        Decision(State.BUY1, Side.BUY, 100, "1선 이탈 → 1차 매수"),
+        5_000,
+        5_000,
+    )
+    # 화: 1차 익절 — 그날 손익 +4,000
+    store.save_transition(
+        "2026-08-25",
+        "263800",
+        State.BUY1,
+        Position(State.BUY1_TP1, 5_000, 100, 60, realized_pnl=4_000, fees=100),
+        Decision(State.BUY1_TP1, Side.SELL, 40, "1차 익절"),
+        5_100,
+        5_100,
+    )
+    # 수: 전량 매도 — 그날 손익 +6,000
+    store.save_transition(
+        "2026-08-26",
+        "263800",
+        State.BUY1_TP1,
+        Position(
+            State.CLOSED,
+            5_000,
+            100,
+            0,
+            realized_pnl=6_000,
+            fees=150,
+            high_price=5_300,
+            low_price=4_900,
+        ),
+        Decision(State.CLOSED, Side.SELL, 60, "본절 이탈 → 잔량 전량 청산"),
+        5_100,
+        5_100,
+    )
+
+
+def test_진입일과_중간_익절일에는_문서를_만들지_않는다(store, tmp_path):
+    """같은 매매의 문서가 셋으로 갈라지면 어느 것이 완성본인지 알 수 없다."""
+    _multi_day(store)
+    root = tmp_path / "journal"
+
+    assert export_day(store, "2026-08-24", root) == []  # 진입만 한 날
+    assert export_day(store, "2026-08-25", root) == []  # 일부만 익절한 날
+    assert not (root / "2026-08" / "2026-08-24").exists()
+
+    written = export_day(store, "2026-08-26", root)  # 청산된 날에만
+    assert (root / "2026-08" / "2026-08-26" / "263800-데이타솔루션.md") in written
+
+
+def test_손익은_사이클_전체를_합산한다(store, tmp_path):
+    """v12 에서 손익이 날짜별로 쪼개졌다 — 청산일 행만 쓰면 전날 익절이 빠진다."""
+    _multi_day(store)
+
+    entries = closed_cycles(store, "2026-08-26")
+
+    assert len(entries) == 1
+    assert entries[0]["realized_pnl"] == 10_000  # 4,000 + 6,000
+    assert entries[0]["fees"] == 250  # 100 + 150
+    assert net_pnl(entries[0]) == 9_750
+
+
+def test_이월_중인_종목은_문서가_되지_않는다(store, tmp_path):
+    """내일로 넘어간 종목에 미리 빈 문서를 만들면 '미작성' 만 쌓인다."""
+    store.register_symbol("2026-08-24", "263800", "데이타솔루션", P)
+    store.save_transition(
+        "2026-08-24",
+        "263800",
+        State.WAITING,
+        Position(State.BUY1, 5_000, 100, 100),
+        Decision(State.BUY1, Side.BUY, 100, "1선 이탈 → 1차 매수"),
+        5_000,
+        5_000,
+    )
+
+    assert closed_cycles(store, "2026-08-24") == []
+    assert export_day(store, "2026-08-24", tmp_path / "journal") == []
+
+
+def test_문서에_사이클_전체_기간이_적힌다(store, tmp_path):
+    """사흘짜리 매매인데 청산일 하루만 적히면 복기가 되지 않는다."""
+    _multi_day(store)
+    export_day(store, "2026-08-26", tmp_path / "journal")
+
+    doc = (
+        tmp_path / "journal" / "2026-08" / "2026-08-26" / "263800-데이타솔루션.md"
+    ).read_text(encoding="utf-8")
+    assert "진입 2026-08-24" in doc
+    assert "청산 2026-08-26" in doc
+    assert "+9,750원" in doc  # 사이클 전체 손익

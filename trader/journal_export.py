@@ -30,9 +30,16 @@ GitHub 어디서나 열리고, A4 PDF 는 필요할 때 여기서 렌더하면 �
           263800-데이타솔루션-daily.png   ← 일봉 (복사해 온 것)
           263800-데이타솔루션-minute.png  ← 3분봉
 
-매매 1건이 파일 1개라 검색·링크·개별 참조가 자연스럽고, 4단계에서 A4 한 장으로
-그대로 떨어진다. 날짜는 **청산일**(사이클이 끝난 날) 기준이다 — 이월된 매매를 진입일에
-두면 며칠 뒤에야 완성되는 문서가 되어 그날 폴더를 다시 열어야 한다.
+**매매 사이클 하나에 문서 하나**이고, **청산된 날에만** 만든다. 진입일이나 중간에
+일부만 익절한 날에는 만들지 않는다 — 월요일 매수, 화요일 1차 익절, 수요일 전량 매도면
+수요일 문서 하나뿐이다. 날짜별로 만들면 같은 매매의 문서가 셋으로 갈라져 어느 것이
+완성본인지 알 수 없고, 아직 끝나지 않은 매매에 '미작성' 표시가 계속 쌓인다.
+
+손익은 **사이클 전체를 합산**한다. 스키마 v12 에서 손익을 날짜별로 쪼갠 뒤라 청산일
+행만 쓰면 전날 낸 1차 익절이 빠진다 (store.cycle_totals 참고).
+
+한 종목을 같은 날 청산하고 다시 진입하면 positions 행이 덮어써지므로 **마지막 사이클**
+기준이 된다. 드물지만 그렇게 동작한다는 것을 알아 둔다.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ _BANNED = re.compile(r'[\\/:*?"<>|]')  # 윈도우에서 파일명에 못 쓰는
 # (문서에 적을 이름, journal 테이블 컬럼, 파일명 접미사). 순서가 문서에 실리는 순서다 —
 # **일봉 먼저**다. "3선을 어디에 그었나" 를 보고 나서 "그래서 어떻게 체결됐나" 를 본다.
 _CHARTS = (("일봉", "daily_path", "daily"), ("3분봉", "minute_path", "minute"))
+_CLOSED = "종료"
 
 
 def net_pnl(entry: dict) -> float:
@@ -219,21 +227,21 @@ def render_trade(
 def render_day_index(date: str, entries: list[dict]) -> str:
     """그날 인덱스. 목록에서 각 매매 문서로 들어간다.
 
+    **그날 청산된 매매**만 담긴다 — 문서가 그렇게 만들어지기 때문이다. 진입만 하고
+    넘어간 종목은 실제로 끝나는 날의 인덱스에 나온다.
+
     합계는 **손익만** 적는다 — 예수금·계좌 평가액은 문서에 싣지 않는다.
     """
     parts = [f"# {date}", ""]
     if not entries:
-        return "\n".join(parts + ["매매 없음", ""])
+        return "\n".join(parts + ["청산된 매매 없음", ""])
 
-    closed = [e for e in entries if (e.get("state") or "") == "종료"]
-    wins = sum(1 for e in closed if net_pnl(e) > 0)
-    losses = sum(1 for e in closed if net_pnl(e) < 0)
+    wins = sum(1 for e in entries if net_pnl(e) > 0)
+    losses = sum(1 for e in entries if net_pnl(e) < 0)
     summary = [f"{len(entries)}건"]
     if wins or losses:
         summary.append(f"익절 {wins} · 손절 {losses}")
         summary.append(f"승률 {wins / (wins + losses):.1%}")
-    if holding := len(entries) - len(closed):
-        summary.append(f"보유 중 {holding}")
     summary.append(f"세후 {sum(net_pnl(e) for e in entries):+,.0f}원")
     parts += [" · ".join(summary), ""]
 
@@ -249,6 +257,28 @@ def render_day_index(date: str, entries: list[dict]) -> str:
 
 
 # ── 파일로 쓰기 ─────────────────────────────────────────────────
+
+
+def closed_cycles(store, date: str) -> list[dict]:
+    """그날 **청산된** 매매만. 손익은 사이클 전체를 합산해 넣는다.
+
+    아직 보유 중이거나 일부만 익절한 종목은 뺀다 — 매매 사이클 하나에 문서 하나이고,
+    끝났을 때 한 번 만든다. 그래야 어느 것이 완성본인지 헷갈리지 않고, 진행 중인 매매에
+    '미작성' 표시가 쌓여 정작 안 쓴 것이 묻히지 않는다.
+
+    realized_pnl / fees 는 스키마 v12 에서 **날짜별로 쪼개졌다.** 청산일 행만 쓰면 전날
+    낸 1차 익절이 빠지므로 cycle_totals 로 사이클 전체를 다시 더한다. avg_price·
+    total_bought·최고/최저가는 이월돼도 누적이라 그대로 쓴다.
+    """
+    entries = [
+        e
+        for e in store.journal_entries(since=date, until=date)
+        if (e.get("state") or "") == _CLOSED
+    ]
+    for entry in entries:
+        realized, fees = store.cycle_totals(entry["symbol"], date)
+        entry["realized_pnl"], entry["fees"] = realized, fees
+    return entries
 
 
 def export_day(
@@ -267,7 +297,7 @@ def export_day(
     있는 것만 싣는다 — 예전 매매의 차트를 정리했다고 생성이 멈추면 안 된다.
     """
     root = Path(root)
-    entries = store.journal_entries(since=date, until=date)
+    entries = closed_cycles(store, date)
     day_dir = root / date[:7] / date
     if not entries:
         return []
