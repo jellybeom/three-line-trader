@@ -42,7 +42,11 @@ if not errorlevel 1 (
     echo 바뀐 것이 없습니다.
     exit /b 0
 )
-git diff --cached --stat
+REM --no-pager 가 없으면 git 이 출력을 less 로 넘긴다. 손으로 돌릴 때는 q 를 누를 때까지
+REM 멈춰 있고, **작업 스케줄러로 돌면 눌러 줄 사람이 없어 영원히 멈춘다** (2026-08-23 실측).
+REM core.quotepath=false 는 한글 파일명이 \354\204\234 처럼 깨져 나오는 것을 막는다.
+REM --shortstat 은 한 줄 요약이다. 파일이 수십 개씩 바뀌는 날이 흔해 목록은 읽히지 않는다.
+git --no-pager -c core.quotepath=false diff --cached --shortstat
 
 echo.
 echo [3/3] 커밋과 푸시
@@ -50,7 +54,7 @@ REM %date% 는 윈도우 지역 설정마다 형식이 달라 커밋 메시지�
 REM 형식을 고정한다 (Win10 이상이면 항상 있다).
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set TODAY=%%i
 git commit -q -m "journal: %TODAY%"
-git push -q
+git --no-pager push -q
 if errorlevel 1 (
     echo.
     echo 푸시에 실패했습니다. 커밋은 남아 있으니 인터넷 연결을 확인하고
