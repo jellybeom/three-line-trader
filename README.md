@@ -441,6 +441,7 @@ three-line-trader/
 ├── simulate.py               # 연습용 시뮬레이터: 가짜 틱으로 전체 흐름 구동 (Discord 발송 없음)
 ├── check_kiwoom.py           # 연결 점검: 토큰 → REST 조회 → WS 수신 (--real, --buy1 옵션)
 ├── export_journal.py         # 매매일지 → 마크다운 문서 생성 CLI (읽기 전용, 따로 실행)
+├── .gitattributes            # .bat 은 CRLF 고정 (LF 면 cmd.exe 가 잘못 해석한다)
 ├── start.bat                 # 프로그램 실행 (시작프로그램 + 작업 스케줄러 안전망 겸용)
 ├── sync_journal.bat          # 매매일지 문서 생성 + git 커밋·푸시 (폰에서 복기용)
 ├── trader/

@@ -1,0 +1,14 @@
+# 줄바꿈 고정.
+#
+# Windows 배치 파일은 **반드시 CRLF** 여야 한다. cmd.exe 는 배치 파일을 한 줄씩
+# 읽으면서 해석하는데, LF 만 있으면 `if not exist ".git" (` 같은 여러 줄 블록을
+# 잘못 끊어 엉뚱한 조각을 명령으로 실행한다 — 탐색기에서 더블클릭하면
+# `'.' is not recognized as an internal or external command` 가 뜬다(2026-08-23 실측).
+# 실행 자체는 되지만 조용히 어긋나는 자리가 생기므로 고정해 둔다.
+*.bat text eol=crlf
+
+# 나머지는 저장소에 LF 로 두고 체크아웃할 때 OS 에 맡긴다.
+* text=auto
+
+# 차트 PNG 는 손대지 않는다.
+*.png binary
