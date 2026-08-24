@@ -314,3 +314,34 @@ def test_연결되면_자동_연결_시도를_멈춘다(tmp_path):
     asyncio.run(core._tick_auto_connect())
     assert called == []
     core._store.close()
+
+
+def test_거래세_기본값은_실제와_같은_0_20퍼센트다(tmp_path):
+    """낮게 잡으면 세후 손익이 실제보다 좋아 보이고 매수 수량도 많이 나온다.
+
+    0.15% 로 두었더니 2026-08-24 실측에서 매도대금 547,120원에 세금 1,091원(0.1994%)이
+    나와 하루에 270원이 어긋났다. 코스피는 거래세 0.05% + 농특세 0.15%, 코스닥은
+    거래세 0.20% 로 경로만 다르고 결과는 같다.
+    """
+    from trader.core import _load_fee_rates
+
+    assert _load_fee_rates(str(tmp_path / "없음.toml")) == (0.00015, 0.002)
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[fees]\ncommission_rate = 0.0001\n", encoding="utf-8")
+    assert _load_fee_rates(str(cfg)) == (0.0001, 0.002)  # 빠진 값만 기본값
+
+
+def test_설정_예시의_거래세도_같다():
+    """예시를 그대로 복사해 쓰는 사람이 손해 보지 않도록."""
+    import tomllib
+    from pathlib import Path
+
+    text = (
+        Path(__file__)
+        .resolve()
+        .parents[1]
+        .joinpath("config.toml.example")
+        .read_text(encoding="utf-8")
+    )
+    assert tomllib.loads(text)["fees"]["tax_rate"] == 0.002

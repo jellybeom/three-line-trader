@@ -209,15 +209,21 @@ def _load_chart_font(config_path: str) -> str | None:
 
 
 def _load_fee_rates(config_path: str) -> tuple[float, float]:
-    """(수수료율, 거래세율). config.toml 의 [fees] 에서 읽고, 없으면 보수적 기본값.
+    """(수수료율, 거래세율). config.toml 의 [fees] 에서 읽고, 없으면 기본값.
 
     수수료율은 증권사·계좌마다 다르고 거래세율은 제도 변경이 잦으므로 설정으로 뺀다.
     거래세는 매도에만 부과된다.
+
+    기본값은 **높은 쪽**으로 잡는다. 낮게 잡으면 세후 손익이 실제보다 좋아 보이고, 매수
+    수량도 살 수 있는 것보다 많이 나온다 — 어느 쪽이든 실제보다 유리하게 착각하게 된다.
+    거래세 0.20% 는 2026-08 기준 코스피(거래세 0.05% + 농특세 0.15%)와 코스닥(0.20%)이
+    같다. 0.15% 로 두었더니 2026-08-24 실측에서 매도대금 547,120원에 세금 1,091원
+    (0.1994%)이 나와 270원이 어긋났다.
     """
     import tomllib
     from pathlib import Path
 
-    default = (0.00015, 0.0015)
+    default = (0.00015, 0.002)
     path = Path(config_path)
     if not path.exists():
         return default
