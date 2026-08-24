@@ -157,3 +157,44 @@ def test_배치_파일은_ASCII_에_CRLF_다(name):
     assert data.count(b"\n") == data.count(b"\r\n"), "LF 만 있는 줄이 있다"
     for line in data.decode("ascii").splitlines():
         assert not line.strip().lower().startswith("chcp"), line
+
+
+# ── 실행 기록 (작업 스케줄러에는 0x0/0x1 밖에 안 남는다) ────────
+
+
+def _sync_log(repo) -> str:
+    path = repo / "data" / "sync_journal.log"
+    return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def test_푸시_결과가_로그에_남는다(repo):
+    """작업 스케줄러로 돌면 콘솔이 없다 — 왜 실패했는지 볼 곳이 있어야 한다."""
+    sync_journal.main([])
+
+    log = _sync_log(repo)
+    assert "푸시 완료" in log
+    assert "files changed" in log  # 무엇이 바뀌었는지도 함께
+
+
+def test_실패_원인이_로그에_남는다(repo):
+    _git(repo, "remote", "set-url", "origin", str(repo / "없는원격.git"))
+
+    sync_journal.main([])
+
+    assert "푸시 실패" in _sync_log(repo)
+
+
+def test_변경이_없어도_돌았다는_기록은_남는다(repo):
+    """'작업이 안 돈 것' 과 '돌았는데 바뀐 게 없는 것' 은 다르다."""
+    sync_journal.main([])
+    sync_journal.main([])
+
+    assert "변경 없음" in _sync_log(repo)
+
+
+def test_로그는_무한정_쌓이지_않는다(repo, monkeypatch):
+    monkeypatch.setattr(sync_journal, "_LOG_KEEP", 3)
+    for _ in range(6):
+        sync_journal.main([])
+
+    assert len(_sync_log(repo).strip().splitlines()) == 3

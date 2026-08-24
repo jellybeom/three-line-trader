@@ -24,10 +24,26 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import export_journal
+
+# 작업 스케줄러로 돌면 콘솔이 없어 결과를 볼 수 없다. 작업 스케줄러의 '마지막 실행 결과'
+# 는 0x0/0x1 뿐이라 왜 실패했는지는 안 나온다. data/ 는 .gitignore 대상이라 여기 남긴다.
+_LOG = Path("data") / "sync_journal.log"
+_LOG_KEEP = 200  # 하루 한 줄이면 반년치. 오래된 줄은 버린다
+
+
+def log_result(message: str) -> None:
+    """실행 결과를 한 줄 남긴다. 실패해도 조용히 넘어간다 — 기록 때문에 멈추면 안 된다."""
+    try:
+        _LOG.parent.mkdir(parents=True, exist_ok=True)
+        lines = _LOG.read_text(encoding="utf-8").splitlines() if _LOG.exists() else []
+        lines.append(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {message}")
+        _LOG.write_text("\n".join(lines[-_LOG_KEEP:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def run_git(*args: str) -> subprocess.CompletedProcess:
@@ -54,35 +70,43 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not Path(".git").exists():
         print("git 저장소가 없습니다. README 9장의 준비 단계를 먼저 따라 주세요.")
+        log_result("실패 — git 저장소 없음")
         return 1
 
     print(f"[1/3] 매매일지 문서 생성 ({' '.join(argv) or '--all'})")
     if export_journal.main(argv or ["--all"]) != 0:
         print("\n문서 생성에 실패했습니다. git 은 건드리지 않습니다.")
+        log_result("실패 — 문서 생성")
         return 1
 
     print("\n[2/3] 변경 확인")
     if (added := run_git("add", "journal")).returncode != 0:
         print(f"git add 에 실패했습니다: {added.stderr.strip()}")
+        log_result(f"실패 — git add: {added.stderr.strip()[:120]}")
         return 1
     if not has_staged_changes():
         print("바뀐 것이 없습니다.")
+        log_result("변경 없음 — 커밋하지 않음")
         return 0
     # 파일이 수십 개씩 바뀌는 날이 흔해 목록은 읽히지 않는다 — 한 줄 요약만 낸다.
-    print(run_git("diff", "--cached", "--shortstat").stdout.strip())
+    changed = run_git("diff", "--cached", "--shortstat").stdout.strip()
+    print(changed)
 
     print("\n[3/3] 커밋과 푸시")
     if (done := run_git("commit", "-m", f"journal: {date.today()}")).returncode != 0:
         print(f"커밋에 실패했습니다: {(done.stderr or done.stdout).strip()}")
+        log_result(f"실패 — 커밋: {(done.stderr or done.stdout).strip()[:120]}")
         return 1
     if (pushed := run_git("push")).returncode != 0:
         print(f"\n푸시에 실패했습니다: {pushed.stderr.strip()}")
         print(
             "커밋은 남아 있으니 인터넷 연결을 확인하고 `git push` 를 다시 실행하세요."
         )
+        log_result(f"커밋 완료 · 푸시 실패 — {pushed.stderr.strip()[:120]}")
         return 1
 
     print("완료.")
+    log_result(f"푸시 완료 — {changed}")
     return 0
 
 
