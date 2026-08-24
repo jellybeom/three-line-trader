@@ -89,6 +89,15 @@ CREATE TABLE IF NOT EXISTS journal (
     PRIMARY KEY (trade_date, symbol)
 );
 
+CREATE TABLE IF NOT EXISTS journal_sync (  -- 매매 ↔ Discord 스레드 연결 (3단계-3)
+    trade_date        TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    thread_id         TEXT NOT NULL DEFAULT '',  -- 그 매매의 스레드
+    mirror_message_id TEXT NOT NULL DEFAULT '',  -- 봇이 UI 내용을 올려 두고 고쳐 쓰는 메시지
+    mirrored_at       TEXT NOT NULL DEFAULT '',  -- 어디까지 올렸는지 (journal.updated_at 과 비교)
+    PRIMARY KEY (trade_date, symbol)
+);
+
 CREATE TABLE IF NOT EXISTS settings (   -- 전역 설정 (자금 배분, 투자 모드 등)
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -186,7 +195,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 12  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 13  # 스키마 변경 시 1 증가.
 
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
@@ -245,6 +254,16 @@ _MIGRATIONS: dict[int, tuple] = {
         )""",
     ),
     12: (_split_daily_pnl,),  # 이월이 복사해 온 손익을 날짜별로 되돌린다
+    13: (  # 매매일지 3단계: Discord 스레드 연결
+        """CREATE TABLE IF NOT EXISTS journal_sync (
+            trade_date        TEXT NOT NULL,
+            symbol            TEXT NOT NULL,
+            thread_id         TEXT NOT NULL DEFAULT '',
+            mirror_message_id TEXT NOT NULL DEFAULT '',
+            mirrored_at       TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (trade_date, symbol)
+        )""",
+    ),
 }
 
 
@@ -688,6 +707,113 @@ class Store:
         return [r for r in self.symbol_cycle(symbol, until) if r["side"]]
 
     # ── 매매일지 ────────────────────────────────────────────────
+
+    def replace_journal_text(
+        self, trade_date: str, symbol: str, good: str, bad: str
+    ) -> None:
+        """일지 본문을 **넘긴 값 그대로** 덮어쓴다. 빈 문자열이면 지운다.
+
+        save_journal 은 빈 값을 '건드리지 말라' 로 읽는다 — 차트 경로와 코멘트가 서로
+        다른 시점에 같은 행을 갱신하기 때문이다. 하지만 Discord 스레드에서 오는 값은
+        **스레드 전체를 다시 읽어 만든 최종본**이라, 답글을 전부 지웠으면 일지도 비어야
+        한다. 그 경우를 save_journal 로 처리하면 지운 내용이 되살아난다.
+        """
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO journal (trade_date, symbol, good, bad, updated_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(trade_date, symbol) DO UPDATE SET
+                     good=excluded.good, bad=excluded.bad,
+                     updated_at=excluded.updated_at""",
+                (trade_date, symbol, good, bad, _now()),
+            )
+
+    def journal_text(self, trade_date: str, symbol: str) -> tuple[str, str, str]:
+        """(잘한 점, 아쉬운 점, 마지막 수정 시각). 없으면 빈 문자열 셋."""
+        row = self._conn.execute(
+            "SELECT good, bad, updated_at FROM journal WHERE trade_date=? AND symbol=?",
+            (trade_date, symbol),
+        ).fetchone()
+        return (row["good"], row["bad"], row["updated_at"]) if row else ("", "", "")
+
+    # ── Discord 스레드 연결 (3단계-3) ───────────────────────────
+
+    def save_thread(self, trade_date: str, symbol: str, thread_id: str) -> None:
+        """매매 ↔ 스레드 연결. 이미 있으면 덮어쓰지 않는다.
+
+        스레드는 매매당 하나여야 한다. 재시작이나 재전송으로 같은 매매의 스레드를 또
+        만들면 답글이 두 곳으로 갈라져 어느 쪽이 일지인지 알 수 없게 된다.
+        """
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO journal_sync (trade_date, symbol, thread_id)
+                   VALUES (?,?,?)
+                   ON CONFLICT(trade_date, symbol) DO UPDATE SET
+                     thread_id=CASE WHEN journal_sync.thread_id=''
+                                    THEN excluded.thread_id
+                                    ELSE journal_sync.thread_id END""",
+                (trade_date, symbol, thread_id),
+            )
+
+    def thread_of(self, trade_date: str, symbol: str) -> str:
+        row = self._conn.execute(
+            "SELECT thread_id FROM journal_sync WHERE trade_date=? AND symbol=?",
+            (trade_date, symbol),
+        ).fetchone()
+        return row["thread_id"] if row else ""
+
+    def trade_of_thread(self, thread_id: str) -> tuple[str, str] | None:
+        """스레드 → (매매일, 종목). 답글이 어느 매매의 것인지 되짚을 때 쓴다."""
+        row = self._conn.execute(
+            "SELECT trade_date, symbol FROM journal_sync WHERE thread_id=?",
+            (thread_id,),
+        ).fetchone()
+        return (row["trade_date"], row["symbol"]) if row else None
+
+    def save_mirror(
+        self, trade_date: str, symbol: str, message_id: str, at: str = ""
+    ) -> None:
+        """UI 내용을 올려 둔 메시지 ID 와 그 시각. 되먹임 방지의 두 번째 층이다."""
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO journal_sync (trade_date, symbol, mirror_message_id, mirrored_at)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(trade_date, symbol) DO UPDATE SET
+                     mirror_message_id=excluded.mirror_message_id,
+                     mirrored_at=excluded.mirrored_at""",
+                (trade_date, symbol, message_id, at or _now()),
+            )
+
+    def mirror_of(self, trade_date: str, symbol: str) -> tuple[str, str]:
+        """(메시지 ID, 올린 시각). 없으면 빈 문자열 둘."""
+        row = self._conn.execute(
+            """SELECT mirror_message_id, mirrored_at FROM journal_sync
+               WHERE trade_date=? AND symbol=?""",
+            (trade_date, symbol),
+        ).fetchone()
+        return (row["mirror_message_id"], row["mirrored_at"]) if row else ("", "")
+
+    def pending_mirrors(self) -> list[dict]:
+        """스레드는 있는데 **UI 에서 쓴 내용이 아직 안 올라간** 매매들.
+
+        봇이 꺼진 사이 UI 에서 일지를 저장하면 그때는 올릴 수 없다. 다음 기동 때 이것을
+        훑어 밀린 것을 올린다.
+
+        비교는 **`>=`** 다. 시각이 초 단위라 저장과 반영이 같은 초에 일어나면 `>` 로는
+        놓친다 — 놓치면 그 수정은 영영 안 올라간다. 반대로 한 번 더 올리는 쪽은 같은
+        내용을 덮어쓸 뿐이라 해가 없다. 아직 한 번도 안 올렸으면 mirrored_at 이 빈
+        문자열이라 어떤 시각보다도 작아 자연히 잡힌다.
+        """
+        rows = self._conn.execute(
+            """SELECT s.trade_date, s.symbol, s.thread_id, s.mirror_message_id,
+                      j.good, j.bad
+               FROM journal_sync s JOIN journal j
+                 ON j.trade_date = s.trade_date AND j.symbol = s.symbol
+               WHERE s.thread_id != '' AND (j.good != '' OR j.bad != '')
+                 AND j.updated_at >= s.mirrored_at
+               ORDER BY s.trade_date, s.symbol"""
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def save_journal(
         self,
