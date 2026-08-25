@@ -94,7 +94,8 @@ CREATE TABLE IF NOT EXISTS journal_sync (  -- 매매 ↔ Discord 스레드 연�
     symbol            TEXT NOT NULL,
     thread_id         TEXT NOT NULL DEFAULT '',  -- 그 매매의 스레드
     mirror_message_id TEXT NOT NULL DEFAULT '',  -- 봇이 UI 내용을 올려 두고 고쳐 쓰는 메시지
-    mirrored_at       TEXT NOT NULL DEFAULT '',  -- 어디까지 올렸는지 (journal.updated_at 과 비교)
+    mirrored_at       TEXT NOT NULL DEFAULT '',  -- 마지막으로 올린 시각 (표시용)
+    mirrored_hash     TEXT NOT NULL DEFAULT '',  -- 마지막으로 올린 본문의 지문
     PRIMARY KEY (trade_date, symbol)
 );
 
@@ -175,6 +176,13 @@ def _collapse_cycles(rows: list[dict]) -> list[dict]:
     return kept
 
 
+def journal_hash(good: str, bad: str) -> str:
+    """일지 본문의 지문. 스레드와 DB 가 같은 내용인지 판정하는 데만 쓴다."""
+    import hashlib
+
+    return hashlib.sha1(f"{good}\x00{bad}".encode()).hexdigest()
+
+
 def _first_buy_ts(cycle: list[dict]) -> str:
     """사이클의 첫 매수 체결 시각. 2차 매수는 새 진입이 아니므로 앞의 것을 쓴다."""
     for row in cycle:
@@ -195,7 +203,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 13  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 14  # 스키마 변경 시 1 증가.
 
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
@@ -263,6 +271,9 @@ _MIGRATIONS: dict[int, tuple] = {
             mirrored_at       TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (trade_date, symbol)
         )""",
+    ),
+    14: (  # 올린 내용을 시각이 아니라 **지문**으로 판정한다 (되먹임 방지)
+        "ALTER TABLE journal_sync ADD COLUMN mirrored_hash TEXT NOT NULL DEFAULT ''",
     ),
 }
 
@@ -770,18 +781,38 @@ class Store:
         ).fetchone()
         return (row["trade_date"], row["symbol"]) if row else None
 
+    def threads_with_replies(self) -> list[tuple[str, str]]:
+        """스레드가 열린 매매 전부. 기동할 때 밀린 답글을 훑는 대상이다.
+
+        답글이 있는지는 Discord 를 봐야 알 수 있으므로 여기서는 거르지 않는다. 대신
+        **최근 것부터** 돌려준다 — 스레드가 수백 개로 늘어난 뒤에도 기동이 늘어지지
+        않도록 호출부가 앞에서 끊을 수 있게 한다.
+        """
+        rows = self._conn.execute("""SELECT trade_date, symbol FROM journal_sync
+               WHERE thread_id != '' ORDER BY trade_date DESC, symbol""").fetchall()
+        return [(r["trade_date"], r["symbol"]) for r in rows]
+
     def save_mirror(
-        self, trade_date: str, symbol: str, message_id: str, at: str = ""
+        self, trade_date: str, symbol: str, message_id: str, good: str, bad: str
     ) -> None:
-        """UI 내용을 올려 둔 메시지 ID 와 그 시각. 되먹임 방지의 두 번째 층이다."""
+        """스레드와 DB 가 같은 내용이 됐음을 새긴다.
+
+        **시각이 아니라 본문의 지문을 새긴다.** 시각으로 비교하면 방금 스레드에서 읽어
+        DB 에 넣은 내용이 곧바로 '아직 안 올린 것' 으로 잡혀 다시 스레드로 올라가고,
+        그것을 또 읽는 고리가 생긴다(2026-08-25 테스트에서 잡음). 초 단위라 같은 초에
+        일어난 두 변경을 구분할 수도 없다. 지문은 둘 다 없다 — 내용이 같으면 올릴 것이
+        없고, 다르면 올릴 것이 있다.
+        """
         with self._conn:
             self._conn.execute(
-                """INSERT INTO journal_sync (trade_date, symbol, mirror_message_id, mirrored_at)
-                   VALUES (?,?,?,?)
+                """INSERT INTO journal_sync
+                       (trade_date, symbol, mirror_message_id, mirrored_at, mirrored_hash)
+                   VALUES (?,?,?,?,?)
                    ON CONFLICT(trade_date, symbol) DO UPDATE SET
                      mirror_message_id=excluded.mirror_message_id,
-                     mirrored_at=excluded.mirrored_at""",
-                (trade_date, symbol, message_id, at or _now()),
+                     mirrored_at=excluded.mirrored_at,
+                     mirrored_hash=excluded.mirrored_hash""",
+                (trade_date, symbol, message_id, _now(), journal_hash(good, bad)),
             )
 
     def mirror_of(self, trade_date: str, symbol: str) -> tuple[str, str]:
@@ -799,21 +830,23 @@ class Store:
         봇이 꺼진 사이 UI 에서 일지를 저장하면 그때는 올릴 수 없다. 다음 기동 때 이것을
         훑어 밀린 것을 올린다.
 
-        비교는 **`>=`** 다. 시각이 초 단위라 저장과 반영이 같은 초에 일어나면 `>` 로는
-        놓친다 — 놓치면 그 수정은 영영 안 올라간다. 반대로 한 번 더 올리는 쪽은 같은
-        내용을 덮어쓸 뿐이라 해가 없다. 아직 한 번도 안 올렸으면 mirrored_at 이 빈
-        문자열이라 어떤 시각보다도 작아 자연히 잡힌다.
+        **본문의 지문이 다를 때만** 잡는다. 시각으로 비교하면 스레드에서 읽어 온 내용이
+        곧바로 여기 잡혀 다시 스레드로 올라간다 — 되먹임이다. 지문이면 '스레드와 DB 가
+        같은가' 만 보므로 어느 쪽에서 온 변경이든 한 번에 판정된다.
         """
         rows = self._conn.execute(
             """SELECT s.trade_date, s.symbol, s.thread_id, s.mirror_message_id,
-                      j.good, j.bad
+                      s.mirrored_hash, j.good, j.bad
                FROM journal_sync s JOIN journal j
                  ON j.trade_date = s.trade_date AND j.symbol = s.symbol
                WHERE s.thread_id != '' AND (j.good != '' OR j.bad != '')
-                 AND j.updated_at >= s.mirrored_at
                ORDER BY s.trade_date, s.symbol"""
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [
+            dict(r)
+            for r in rows
+            if journal_hash(r["good"], r["bad"]) != r["mirrored_hash"]
+        ]
 
     def save_journal(
         self,

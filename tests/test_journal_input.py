@@ -187,35 +187,36 @@ def test_봇이_꺼진_사이_UI에서_쓴_것이_밀린_목록에_잡힌다(sto
     """다음 기동 때 이것을 훑어 스레드에 올린다."""
     store.save_thread("2026-08-24", "263800", "111")
     store.replace_journal_text("2026-08-24", "263800", "규칙 지킴", "")
-    store.save_mirror("2026-08-24", "263800", "999", at="2000-01-01 00:00:00")
 
     pending = store.pending_mirrors()
     assert len(pending) == 1
     assert pending[0]["symbol"] == "263800"
-    assert pending[0]["mirror_message_id"] == "999"  # 새로 올리지 않고 고쳐 쓴다
     assert pending[0]["good"] == "규칙 지킴"
 
-    store.save_mirror("2026-08-24", "263800", "999", at="2099-01-01 00:00:00")
-    assert store.pending_mirrors() == []  # 이미 올렸다
+    store.save_mirror("2026-08-24", "263800", "999", "규칙 지킴", "")
+    assert store.pending_mirrors() == []  # 같은 내용이면 올릴 것이 없다
 
 
-def test_아직_한_번도_안_올렸으면_밀린_것으로_잡힌다(store):
-    """mirrored_at 이 빈 문자열이라 어떤 시각보다도 작다."""
+def test_내용이_바뀌면_다시_올릴_것으로_잡힌다(store):
     store.save_thread("2026-08-24", "263800", "111")
     store.replace_journal_text("2026-08-24", "263800", "규칙 지킴", "")
+    store.save_mirror("2026-08-24", "263800", "999", "규칙 지킴", "")
 
-    assert [p["symbol"] for p in store.pending_mirrors()] == ["263800"]
+    store.replace_journal_text("2026-08-24", "263800", "규칙 지킴", "늦었음")
+
+    pending = store.pending_mirrors()
+    assert len(pending) == 1
+    assert pending[0]["mirror_message_id"] == "999"  # 새로 올리지 않고 고쳐 쓴다
 
 
 def test_같은_초에_저장하고_반영해도_놓치지_않는다(store):
-    """시각이 초 단위다. `>` 로 비교하면 그 수정은 영영 안 올라간다.
-
-    한 번 더 올리는 쪽은 같은 내용을 덮어쓸 뿐이라 해가 없다.
-    """
+    """시각이 초 단위라 같은 초의 두 변경을 구분할 수 없다 — 그래서 지문으로 판정한다."""
     store.save_thread("2026-08-24", "263800", "111")
-    store.replace_journal_text("2026-08-24", "263800", "규칙 지킴", "")
-    same = store.journal_text("2026-08-24", "263800")[2]
-    store.save_mirror("2026-08-24", "263800", "999", at=same)
+    store.replace_journal_text("2026-08-24", "263800", "처음", "")
+    store.save_mirror("2026-08-24", "263800", "999", "처음", "")
+    store.replace_journal_text(
+        "2026-08-24", "263800", "고친 것", ""
+    )  # 같은 초일 수 있다
 
     assert len(store.pending_mirrors()) == 1
 
@@ -232,3 +233,208 @@ def test_스레드가_없으면_밀린_목록에_잡히지_않는다(store):
     """올릴 곳이 없는데 올리려 들면 매번 실패만 쌓인다."""
     store.replace_journal_text("2026-08-24", "263800", "규칙 지킴", "")
     assert store.pending_mirrors() == []
+
+
+# ── 봇 배선 (되먹임·중복 스레드) ────────────────────────────────
+
+
+class _FakeMessage:
+    def __init__(self, mid, content, bot=False):
+        self.id = mid
+        self.content = content
+        self.author = type("A", (), {"bot": bot})()
+        self.edited = None
+
+    async def edit(self, content):
+        self.edited = content
+        self.content = content
+
+
+class _FakeThread:
+    def __init__(self, tid, messages=None):
+        self.id = tid
+        self.messages = list(messages or [])
+        self._next = 1000
+
+    async def history(self, limit=200, oldest_first=True):
+        for m in self.messages:
+            yield m
+
+    async def send(self, body):
+        self._next += 1
+        msg = _FakeMessage(self._next, body, bot=True)
+        self.messages.append(msg)
+        return msg
+
+    async def fetch_message(self, mid):
+        for m in self.messages:
+            if m.id == int(mid):
+                return m
+        raise KeyError(mid)
+
+
+class _FakeClient:
+    def __init__(self, thread):
+        self.thread = thread
+        self.intents = type("I", (), {"message_content": True})()
+
+    def get_channel(self, cid):
+        return self.thread if int(cid) == self.thread.id else None
+
+
+class _FakeCore:
+    def __init__(self, store):
+        self._store = store
+        self.updates = []
+
+    @property
+    def store(self):
+        return self._store
+
+    def on_journal_updated(self, trade_date, symbol):
+        self.updates.append((trade_date, symbol))
+
+
+@pytest.fixture
+def bot(store, monkeypatch):
+    from trader.discord_bot import BotConfig, TraderBot
+
+    thread = _FakeThread(111)
+    config = BotConfig("t", 1, frozenset({1}), journal_channel_id=2)
+    b = TraderBot(_FakeCore(store), config)
+    b._client = _FakeClient(thread)
+    store.save_thread("2026-08-24", "263800", "111")
+    return b, thread, store
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def test_스레드_답글이_일지가_된다(bot):
+    b, thread, store = bot
+    thread.messages = [
+        _FakeMessage(1, "호가가 얇았음"),
+        _FakeMessage(2, "+ 손절 규칙 지킴"),
+    ]
+
+    _run(b._rebuild_journal("111"))
+
+    good, bad, _ = store.journal_text("2026-08-24", "263800")
+    assert good == "손절 규칙 지킴"
+    assert bad == "호가가 얇았음"
+
+
+def test_답글을_지우면_일지에서도_사라진다(bot):
+    """스레드 전체를 다시 읽으므로 삭제가 그대로 반영된다."""
+    b, thread, store = bot
+    thread.messages = [_FakeMessage(1, "호가가 얇았음"), _FakeMessage(2, "+ 규칙 지킴")]
+    _run(b._rebuild_journal("111"))
+
+    thread.messages = [m for m in thread.messages if m.id != 2]
+    _run(b._rebuild_journal("111"))
+
+    good, bad, _ = store.journal_text("2026-08-24", "263800")
+    assert good == ""  # 지운 것이 되살아나지 않는다
+    assert bad == "호가가 얇았음"
+
+
+def test_봇이_올린_메시지는_답글로_세지_않는다(bot):
+    """되먹임 1층. 이것이 읽히면 UI 내용이 답글로 둔갑해 무한히 돈다."""
+    b, thread, store = bot
+    _run(b.mirror_journal("2026-08-24", "263800", "UI 에서 쓴 것", ""))
+    thread.messages.append(_FakeMessage(1, "폰에서 쓴 것"))
+
+    _run(b._rebuild_journal("111"))
+
+    good, bad, _ = store.journal_text("2026-08-24", "263800")
+    assert good == ""  # 봇 메시지가 '잘한 점' 으로 섞여 들어오지 않았다
+    assert bad == "폰에서 쓴 것"
+
+
+def test_봇_판정이_어긋나도_표식으로_걸러진다(bot):
+    """되먹임 3층. 봇 토큰을 갈면 작성자 판정이 바뀔 수 있다."""
+    from trader.journal_input import render_mirror
+
+    b, thread, store = bot
+    thread.messages = [
+        _FakeMessage(1, render_mirror("UI 에서 쓴 것", ""), bot=False),  # 사람으로 보임
+        _FakeMessage(2, "폰에서 쓴 것"),
+    ]
+
+    _run(b._rebuild_journal("111"))
+
+    good, bad, _ = store.journal_text("2026-08-24", "263800")
+    assert good == ""  # 봇이 올린 것은 무시
+    assert bad == "폰에서 쓴 것"
+
+
+def test_UI_반영은_같은_메시지를_고쳐_쓴다(bot):
+    """매번 새로 올리면 스레드가 같은 내용으로 도배된다."""
+    b, thread, store = bot
+    _run(b.mirror_journal("2026-08-24", "263800", "처음", ""))
+    first = store.mirror_of("2026-08-24", "263800")[0]
+
+    _run(b.mirror_journal("2026-08-24", "263800", "고친 것", ""))
+
+    assert store.mirror_of("2026-08-24", "263800")[0] == first  # 같은 메시지
+    assert len([m for m in thread.messages if m.author.bot]) == 1
+    assert "고친 것" in thread.messages[-1].content
+
+
+def test_스레드에서_온_내용을_다시_스레드로_올리지_않는다(bot):
+    """읽고 → 쓰고 → 그것을 다시 읽는 고리가 생기면 안 된다."""
+    b, thread, store = bot
+    thread.messages = [_FakeMessage(1, "폰에서 쓴 것")]
+
+    _run(b._rebuild_journal("111"))
+
+    assert store.pending_mirrors() == []  # 올릴 것으로 잡히지 않는다
+
+
+def test_일지가_비면_스레드에_올리지_않는다(bot):
+    b, thread, store = bot
+    assert _run(b.mirror_journal("2026-08-24", "263800", "", "")) is False
+    assert thread.messages == []
+
+
+def test_스레드가_없으면_올리지_않는다(bot):
+    b, thread, store = bot
+    assert _run(b.mirror_journal("2026-08-24", "999999", "내용", "")) is False
+
+
+def test_다른_사람의_다른_채널_메시지는_무시한다(bot):
+    """일지 채널이 아닌 곳의 대화까지 읽으면 엉뚱한 것이 일지가 된다."""
+    b, thread, store = bot
+    message = _FakeMessage(1, "잡담")
+    message.channel = type("C", (), {"id": 999})()  # 등록되지 않은 스레드
+
+    _run(b._on_journal_change(message))
+
+    assert store.journal_text("2026-08-24", "263800")[:2] == ("", "")
+
+
+def test_답글이_없으면_UI에서_쓴_일지를_지우지_않는다(bot):
+    """기동 시 밀린 것 훑기가 모든 스레드를 돈다 — 여기서 지우면 재시작마다 날아간다."""
+    b, thread, store = bot
+    store.replace_journal_text("2026-08-24", "263800", "UI 에서 쓴 것", "")
+    _run(b.mirror_journal("2026-08-24", "263800", "UI 에서 쓴 것", ""))
+
+    _run(b._rebuild_journal("111"))  # 봇 메시지만 있는 스레드
+
+    assert store.journal_text("2026-08-24", "263800")[:2] == ("UI 에서 쓴 것", "")
+
+
+def test_답글을_달면_그_스레드가_일지의_주인이_된다(bot):
+    """둘을 합치면 UI 저장 때마다 답글이 접혀 들어가 중복된다 — 한쪽이 주인이어야 한다."""
+    b, thread, store = bot
+    store.replace_journal_text("2026-08-24", "263800", "UI 에서 쓴 것", "")
+    _run(b.mirror_journal("2026-08-24", "263800", "UI 에서 쓴 것", ""))
+
+    thread.messages.append(_FakeMessage(1, "폰에서 쓴 것"))
+    _run(b._rebuild_journal("111"))
+
+    good, bad, _ = store.journal_text("2026-08-24", "263800")
+    assert (good, bad) == ("", "폰에서 쓴 것")

@@ -23,6 +23,10 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
+from trader import journal_input
+
+_BACKLOG_MAX = 30  # 기동 시 훑을 최근 스레드 수 (약 한 달치)
+
 if TYPE_CHECKING:  # 코어는 타입 표기용으로만 참조 (순환 import 방지)
     from trader.core import Core
 
@@ -41,6 +45,9 @@ class BotConfig:
     token: str
     channel_id: int
     allowed_users: "frozenset[int]"
+    # 매매일지 전용 채널. 비어 있으면(0) 스레드 기능만 꺼지고 나머지는 평소대로 돈다 —
+    # 설정을 안 채운 상태로 업데이트해도 알림이 멈추면 안 된다.
+    journal_channel_id: int = 0
 
     def allows(self, user_id: int) -> bool:
         """화이트리스트가 비어 있으면 아무도 명령을 쓸 수 없다 (안전한 기본값)."""
@@ -71,7 +78,19 @@ def load_bot_config(config_path="config.toml") -> BotConfig:
             "[discord] allowed_users 에 본인 사용자 ID 를 넣어야 합니다 "
             "(비우면 아무도 명령을 쓸 수 없습니다)."
         )
-    return BotConfig(token, channel_id, frozenset(users))
+    journal_channel = str(section.get("journal_channel_id", "")).strip()
+    try:
+        journal_channel_id = int(journal_channel) if journal_channel else 0
+    except ValueError as e:
+        raise BotConfigError(
+            f"journal_channel_id 가 숫자가 아닙니다: {journal_channel}"
+        ) from e
+    if journal_channel_id and journal_channel_id == channel_id:
+        raise BotConfigError(
+            "journal_channel_id 가 channel_id 와 같습니다 — "
+            "매매일지 스레드는 별도 채널이어야 알림과 섞이지 않습니다."
+        )
+    return BotConfig(token, channel_id, frozenset(users), journal_channel_id)
 
 
 # ── 표시용 데이터 구성 (순수 함수 — 코어 없이 테스트 가능) ─────
@@ -173,6 +192,7 @@ class TraderBot:
         self._config = config
         self._client = None
         self._channel = None
+        self._journal_channel = None
         self._dashboard_id = None
         self._blocked = {}
         self._pin_warned = False
@@ -187,7 +207,13 @@ class TraderBot:
     async def run(self) -> None:
         """봇 실행 (코어 루프의 태스크). 예외는 호출부가 로그로 남긴다."""
         intents = discord.Intents.none()
-        intents.guilds = True  # 채널 조회에 필요 (메시지 내용 권한은 불필요)
+        intents.guilds = True  # 채널 조회에 필요
+        if self._config.journal_channel_id:
+            # 매매일지 답글을 읽으려면 둘 다 필요하다. message_content 는 **특권 인텐트**라
+            # 개발자 포털에서 따로 켜야 한다 — 안 켜면 본문이 빈 문자열로 와서 일지가
+            # 조용히 비어 버린다. on_ready 에서 확인해 경고한다.
+            intents.guild_messages = True
+            intents.message_content = True
         client = discord.Client(intents=intents)
         tree = app_commands.CommandTree(client)
         self._client = client
@@ -198,8 +224,26 @@ class TraderBot:
             self._channel = client.get_channel(
                 self._config.channel_id
             ) or await client.fetch_channel(self._config.channel_id)
+            if self._config.journal_channel_id:
+                self._journal_channel = client.get_channel(
+                    self._config.journal_channel_id
+                ) or await client.fetch_channel(self._config.journal_channel_id)
+                await self._warn_if_no_message_content()
+                await self._collect_backlog()
             await tree.sync()
             self._core.on_bot_ready()
+
+        @client.event
+        async def on_message(message) -> None:
+            await self._on_journal_change(message)
+
+        @client.event
+        async def on_message_edit(_before, after) -> None:
+            await self._on_journal_change(after)
+
+        @client.event
+        async def on_message_delete(message) -> None:
+            await self._on_journal_change(message)
 
         await client.start(self._config.token)
 
@@ -236,6 +280,162 @@ class TraderBot:
         files = [discord.File(path) for path in paths]
         await self._channel.send(content=caption[:1900] or None, files=files)
         return True
+
+    # ── 매매일지 스레드 (3단계-3) ───────────────────────────────
+    #
+    # Store 는 캐시하지 않고 매번 `self._core.store` 로 가져온다. 실전/모의 모드를 바꾸면
+    # 코어가 Store 를 새로 만들기 때문에, 붙들고 있으면 옛 DB 에 쓰게 된다.
+    #
+    # 종료된 매매마다 스레드를 하나 열고, 사용자가 답글을 달면 일지가 된다. 슬래시
+    # 명령이나 버튼은 쓰지 않는다 — 봇이 켜져 있어야만 동작해서 미니PC 가 꺼져 있으면
+    # 실패한다. 일반 답글은 봇이 죽어 있어도 서버에 남아 있다가 다음 기동 때 들어온다.
+
+    async def open_journal_thread(
+        self, trade_date: str, symbol: str, name: str, result: str, embed: dict
+    ) -> bool:
+        """종료 알림을 매매일지 채널에 보내고 스레드를 연다.
+
+        이미 스레드가 있으면 아무것도 하지 않는다 — 매매당 스레드는 하나여야 답글이
+        갈라지지 않는다. 재시작·재전송으로 두 번 불려도 안전하다.
+        """
+        if self._journal_channel is None or self._core.store.thread_of(
+            trade_date, symbol
+        ):
+            return False
+        message = await self._journal_channel.send(embed=self._to_embed(embed))
+        thread = await message.create_thread(
+            name=journal_input.thread_name(trade_date, name, result),
+            auto_archive_duration=10080,  # 7일. 그 뒤 답글을 달면 Discord 가 되살린다
+        )
+        self._core.store.save_thread(trade_date, symbol, str(thread.id))
+        return True
+
+    async def _on_journal_change(self, message) -> None:
+        """스레드에 답글이 달리거나 고쳐지거나 지워지면 일지를 다시 만든다.
+
+        **되먹임 방지 1층**: 작성자가 봇인 메시지는 무시한다. 봇이 UI 내용을 올려 둔
+        메시지를 다시 읽어 DB 에 쓰면 무한히 돈다. 이 한 줄로 고리가 끊긴다.
+        """
+        if getattr(message.author, "bot", False):
+            return
+        thread_id = str(getattr(message.channel, "id", ""))
+        if not self._core.store.trade_of_thread(thread_id):
+            return
+        await self._rebuild_journal(thread_id)
+
+    async def _rebuild_journal(self, thread_id: str) -> None:
+        """스레드 **전체를 다시 읽어** 일지를 처음부터 만든다.
+
+        새 답글만 주워 담으면 수정과 삭제가 반영되지 않는다. 전체를 다시 읽으면 몇 번을
+        돌려도 결과가 같아서, 사용자는 Discord 의 기본 편집·삭제를 그대로 쓰면 된다.
+
+        **한 번이라도 답글을 달면 그 스레드가 일지의 주인이 된다.** 답글이 없는 동안은
+        UI 에서 쓴 것이 그대로 남는다. 둘을 합치려 들면 UI 에서 저장할 때마다 답글이
+        접혀 들어가 중복되므로, 어느 한쪽이 주인이어야 한다. UI 로 쓴 내용은 스레드에
+        메시지로 남아 있으니 필요하면 복사해 답글로 옮길 수 있다.
+        """
+        trade = self._core.store.trade_of_thread(thread_id)
+        if trade is None:
+            return
+        trade_date, symbol = trade
+        mirror_id, _ = self._core.store.mirror_of(trade_date, symbol)
+        try:
+            thread = self._client.get_channel(
+                int(thread_id)
+            ) or await self._client.fetch_channel(int(thread_id))
+        except (discord.HTTPException, ValueError):
+            return
+
+        texts = []
+        async for message in thread.history(limit=200, oldest_first=True):
+            if getattr(message.author, "bot", False):
+                continue  # 1층
+            if mirror_id and str(message.id) == mirror_id:
+                continue  # 2층 — 봇 판정이 어긋나도 여기서 걸린다
+            body = message.content or ""
+            if journal_input.is_mirror(body):
+                continue  # 3층 — DB 가 지워져도 본문 표식으로 걸러진다
+            texts.append(body)
+
+        if not texts:
+            # **사람이 단 답글이 하나도 없으면 DB 를 건드리지 않는다.**
+            # 봇이 올린 메시지만 남은 스레드를 '전부 지웠다' 로 읽으면 UI 에서 쓴 일지가
+            # 지워진다. 기동 시 밀린 것 훑기가 모든 스레드를 돌기 때문에, 이 한 줄이
+            # 없으면 UI 로만 쓴 일지가 재시작 때마다 날아간다(2026-08-25 테스트에서 잡음).
+            return
+
+        good, bad = journal_input.collect_replies(texts)
+        self._core.store.replace_journal_text(trade_date, symbol, good, bad)
+        # 스레드와 DB 가 지금 같은 내용이라고 새긴다. 안 새기면 방금 읽어 온 내용을
+        # 다시 스레드로 올리려 들고, 그것을 또 읽는 고리가 생긴다.
+        self._core.store.save_mirror(trade_date, symbol, mirror_id, good, bad)
+        self._core.on_journal_updated(trade_date, symbol)
+
+    async def mirror_journal(
+        self, trade_date: str, symbol: str, good: str, bad: str
+    ) -> bool:
+        """UI 에서 쓴 일지를 스레드에 올린다 (B 방식).
+
+        **메시지를 하나 두고 그것을 고쳐 쓴다.** 저장할 때마다 새로 올리면 스레드가
+        같은 내용으로 도배된다. 올린 메시지는 작성자가 봇이라 다시 읽히지 않는다.
+        """
+        thread_id = self._core.store.thread_of(trade_date, symbol)
+        if self._client is None or not thread_id or not (good or bad):
+            return False
+        body = journal_input.render_mirror(good, bad)
+        mirror_id, _ = self._core.store.mirror_of(trade_date, symbol)
+        try:
+            thread = self._client.get_channel(
+                int(thread_id)
+            ) or await self._client.fetch_channel(int(thread_id))
+            if mirror_id:
+                message = await thread.fetch_message(int(mirror_id))
+                await message.edit(content=body[:1900])
+            else:
+                message = await thread.send(body[:1900])
+                mirror_id = str(message.id)
+        except (discord.HTTPException, ValueError):
+            return False  # 다음 기동의 밀린 목록에서 다시 시도된다
+        self._core.store.save_mirror(trade_date, symbol, mirror_id, good, bad)
+        return True
+
+    async def _collect_backlog(self) -> None:
+        """기동할 때 밀린 것을 양쪽으로 정리한다.
+
+        봇이 꺼진 사이 폰에서 단 답글과, UI 에서 저장한 일지가 각각 밀려 있다. 답글을
+        먼저 읽어야 한다 — 반대로 하면 UI 내용을 올린 뒤 그것을 답글로 착각해 읽는 순서
+        문제가 생길 수 있다.
+        """
+        # 최근 것부터 일정 개수만 본다. 스레드가 수백 개가 되어도 기동이 늘어지면 안 된다.
+        for trade_date, symbol in self._core.store.threads_with_replies()[
+            :_BACKLOG_MAX
+        ]:
+            try:
+                await self._rebuild_journal(
+                    self._core.store.thread_of(trade_date, symbol)
+                )
+            except discord.HTTPException:
+                continue
+        for row in self._core.store.pending_mirrors():
+            try:
+                await self.mirror_journal(
+                    row["trade_date"], row["symbol"], row["good"], row["bad"]
+                )
+            except discord.HTTPException:
+                continue
+
+    async def _warn_if_no_message_content(self) -> None:
+        """특권 인텐트가 꺼져 있으면 알린다.
+
+        안 켜면 답글 본문이 **빈 문자열로 온다.** 그대로 두면 일지가 조용히 비워지므로
+        시작할 때 한 번 크게 알린다.
+        """
+        if self._client is not None and self._client.intents.message_content:
+            return
+        await self.send_text(
+            "⚠️ Message Content Intent 가 꺼져 있어 매매일지 답글을 읽을 수 없습니다. "
+            "Discord 개발자 포털 → Bot → Privileged Gateway Intents 에서 켜 주세요."
+        )
 
     # ── 대시보드 ───────────────────────────────────────────────
 

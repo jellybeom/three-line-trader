@@ -594,8 +594,12 @@ class Core:
             case bus.RequestJournal(since=since, until=until):
                 await self._send_journal(since, until)
             case bus.SaveJournal(trade_date=td, symbol=sym, good=good, bad=bad):
-                self._store.save_journal(td, sym, good=good, bad=bad)
+                # replace_journal_text 를 쓴다. save_journal 은 빈 값을 '건드리지 말라'
+                # 로 읽어서(차트 경로와 코멘트가 다른 시점에 같은 행을 갱신하기 때문)
+                # 일지 창에서 내용을 지워도 지워지지 않았다.
+                self._store.replace_journal_text(td, sym, good, bad)
                 self._log(sym, "일지", f"{td} 일지 저장", notify=False)
+                self._spawn(self._mirror_journal(td, sym), "매매일지 반영")
             case bus.RequestDailySummary():
                 await self.send_daily_summary()
             case bus.ChartRequest(symbol=s, to_discord=to_discord):
@@ -891,6 +895,18 @@ class Core:
                 holding=self.holding_label(symbol),
             )
             self._spawn(self._send_embed(embed), "종료 알림 발송")
+            # 매매일지 스레드. 같은 embed 를 일지 채널에도 보내 스레드를 연다 —
+            # 복기할 때 무엇을 보고 쓰는지가 바로 위에 있어야 한다.
+            net = cycle_realized - cycle_fees
+            self._spawn(
+                self._open_journal_thread(
+                    symbol,
+                    e["name"],
+                    "익절" if net > 0 else "손절" if net < 0 else "본전",
+                    embed,
+                ),
+                "매매일지 스레드 생성",
+            )
             return
         self._spawn(
             self._send_discord(
@@ -898,6 +914,36 @@ class Core:
             ),
             "체결 알림 발송",
         )
+
+    async def _open_journal_thread(
+        self, symbol: str, name: str, result: str, embed: dict
+    ) -> None:
+        """일지 채널에 스레드를 연다. 실패해도 매매에는 영향이 없다."""
+        if self._bot is None:
+            return
+        try:
+            await self._bot.open_journal_thread(self._date, symbol, name, result, embed)
+        except Exception as err:  # noqa: BLE001 — 일지 실패가 매매를 막지 않게
+            self._bus.events.put(
+                bus.LogLine(
+                    _now(), "시스템", "경고", f"매매일지 스레드 생성 실패: {err}"
+                )
+            )
+
+    async def _mirror_journal(self, trade_date: str, symbol: str) -> None:
+        """UI 에서 저장한 일지를 스레드에 올린다 (B 방식).
+
+        봇이 꺼져 있으면 지금은 못 올린다 — 다음 기동 때 밀린 목록에서 다시 시도된다.
+        """
+        if self._bot is None:
+            return
+        good, bad, _ = self._store.journal_text(trade_date, symbol)
+        try:
+            await self._bot.mirror_journal(trade_date, symbol, good, bad)
+        except Exception as err:  # noqa: BLE001
+            self._bus.events.put(
+                bus.LogLine(_now(), "시스템", "경고", f"매매일지 반영 실패: {err}")
+            )
 
     async def _send_embed(self, embed: dict) -> None:
         if self._bot is None:
@@ -2575,6 +2621,20 @@ class Core:
                 e.get("entry_ts", ""),
                 e.get("exit_ts", ""),
                 self._hold_days(symbol),
+            )
+        )
+
+    @property
+    def store(self) -> "Store":
+        """봇이 일지·스레드 연결을 직접 읽고 쓴다. 모드 전환 시 새 Store 로 바뀐다."""
+        return self._store
+
+    def on_journal_updated(self, trade_date: str, symbol: str) -> None:
+        """Discord 스레드에서 일지가 바뀌었을 때 화면에 알린다."""
+        name = (self._entries.get(symbol) or {}).get("name", symbol)
+        self._bus.events.put(
+            bus.LogLine(
+                _now(), symbol, "일지", f"{name} 일지가 Discord 에서 갱신됐습니다"
             )
         )
 
