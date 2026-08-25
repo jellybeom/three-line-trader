@@ -438,3 +438,118 @@ def test_답글을_달면_그_스레드가_일지의_주인이_된다(bot):
 
     good, bad, _ = store.journal_text("2026-08-24", "263800")
     assert (good, bad) == ("", "폰에서 쓴 것")
+
+
+# ── 스레드 생성 · 기동 시 밀린 것 훑기 ──────────────────────────
+
+
+class _FakeChannel:
+    """매매일지 채널. send 하면 메시지가 생기고 거기서 스레드를 연다."""
+
+    def __init__(self):
+        self.sent = []
+        self._next = 500
+
+    async def send(self, embed=None):
+        self._next += 1
+        thread = _FakeThread(self._next)
+        message = _FakeMessage(self._next, "")
+        message.create_thread = lambda name, auto_archive_duration=None: _made(
+            thread, name
+        )
+        self.sent.append((embed, thread))
+        return message
+
+
+async def _made(thread, name):
+    thread.name = name
+    return thread
+
+
+def test_종료된_매매마다_스레드가_하나_생긴다(store):
+    from trader.discord_bot import BotConfig, TraderBot
+
+    b = TraderBot(_FakeCore(store), BotConfig("t", 1, frozenset({1}), 2))
+    b._journal_channel = _FakeChannel()
+
+    assert _run(
+        b.open_journal_thread("2026-08-26", "263800", "데이타솔루션", "손절", {})
+    )
+
+    _, thread = b._journal_channel.sent[0]
+    assert thread.name == "08-26 데이타솔루션 손절"
+    assert store.thread_of("2026-08-26", "263800") == str(thread.id)
+
+
+def test_같은_매매에_스레드를_두_번_만들지_않는다(store):
+    """재시작·재전송으로 두 번 불려도 답글이 두 곳으로 갈라지면 안 된다."""
+    from trader.discord_bot import BotConfig, TraderBot
+
+    b = TraderBot(_FakeCore(store), BotConfig("t", 1, frozenset({1}), 2))
+    b._journal_channel = _FakeChannel()
+    _run(b.open_journal_thread("2026-08-26", "263800", "데이타솔루션", "손절", {}))
+    first = store.thread_of("2026-08-26", "263800")
+
+    assert not _run(
+        b.open_journal_thread("2026-08-26", "263800", "데이타솔루션", "손절", {})
+    )
+    assert len(b._journal_channel.sent) == 1
+    assert store.thread_of("2026-08-26", "263800") == first
+
+
+def test_일지_채널이_없으면_스레드를_만들지_않는다(store):
+    """journal_channel_id 를 비워 두면 스레드 기능만 꺼지고 나머지는 평소대로 돈다."""
+    from trader.discord_bot import BotConfig, TraderBot
+
+    b = TraderBot(_FakeCore(store), BotConfig("t", 1, frozenset({1})))
+    assert not _run(b.open_journal_thread("2026-08-26", "263800", "종목", "손절", {}))
+
+
+def test_기동할_때_봇이_꺼진_사이의_답글을_주워_담는다(bot):
+    """폰에서 단 답글은 서버에 남아 있다가 다음 기동 때 들어온다."""
+    b, thread, store = bot
+    thread.messages = [_FakeMessage(1, "폰에서 쓴 것")]
+
+    _run(b._collect_backlog())
+
+    assert store.journal_text("2026-08-24", "263800")[:2] == ("", "폰에서 쓴 것")
+
+
+def test_기동할_때_UI에서_쓴_것을_스레드에_올린다(bot):
+    """봇이 꺼진 사이 UI 에서 저장하면 그때는 올릴 수 없다."""
+    b, thread, store = bot
+    store.replace_journal_text("2026-08-24", "263800", "UI 에서 쓴 것", "")
+
+    _run(b._collect_backlog())
+
+    assert any(m.author.bot for m in thread.messages)
+    assert store.pending_mirrors() == []  # 두 번 올리지 않는다
+
+
+def test_기동_훑기를_두_번_돌려도_결과가_같다(bot):
+    """되먹임이 있으면 여기서 내용이 불어난다."""
+    b, thread, store = bot
+    thread.messages = [_FakeMessage(1, "폰에서 쓴 것")]
+
+    _run(b._collect_backlog())
+    first = store.journal_text("2026-08-24", "263800")[:2]
+    _run(b._collect_backlog())
+
+    assert store.journal_text("2026-08-24", "263800")[:2] == first
+    assert len([m for m in thread.messages if m.author.bot]) <= 1
+
+
+def test_인텐트가_꺼져_있으면_경고한다(bot):
+    """안 켜면 답글 본문이 빈 문자열로 와서 일지가 조용히 비어 버린다."""
+    b, thread, store = bot
+    b._client.intents = type("I", (), {"message_content": False})()
+    sent = []
+    b.send_text = lambda text: _noop(sent, text)
+
+    _run(b._warn_if_no_message_content())
+
+    assert sent and "Message Content Intent" in sent[0]
+
+
+async def _noop(sent, text):
+    sent.append(text)
