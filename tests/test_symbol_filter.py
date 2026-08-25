@@ -569,7 +569,20 @@ def test_보유기간이_빈_종목은_정렬에서_맨_뒤로_간다(app):
     assert app.positions._order[:2] == ["005930", "079650"]
 
 
-def test_진입_전_종목은_보유기간이_빈칸이다(app):
+def test_진입_전_종목은_보유기간이_다른_열과_같게_대시다(app):
+    """한 칸만 비어 있으면 값이 없는 건지 화면이 덜 그려진 건지 구분되지 않는다."""
     app.positions.upsert("005930", "삼성전자", Position(), _params())
     app.update()
-    assert app.positions.tree.set("005930", "hold") == ""
+    assert app.positions.tree.set("005930", "hold") == "-"
+    # 다른 열도 같은 모양이다 (오른쪽 정렬 열은 여백이 붙어 strip 해서 비교)
+    assert app.positions.tree.set("005930", "avg").strip() == "-"
+
+
+def test_보유기간을_지우면_다시_대시가_된다(app):
+    app.positions.upsert("005930", "삼성전자", Position(), _params(), holding="47분")
+    app.update()
+
+    app.positions.set_holding("005930", "")
+    app.update()
+    assert app.positions.tree.set("005930", "hold") == "-"
+    assert "005930" not in app.positions.holding_symbols()  # 갱신 대상에서 빠진다

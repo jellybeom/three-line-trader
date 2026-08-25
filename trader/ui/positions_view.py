@@ -81,7 +81,7 @@ def _holding_minutes(text: str) -> float:
     """
     import re
 
-    if not text.strip():
+    if not text.strip() or text.strip() == "-":
         return -1.0
     if m := re.match(r"(\d+)일차", text):
         return int(m.group(1)) * 390.0
@@ -225,6 +225,9 @@ class PositionsView(ttk.Frame):
         holding: str = "",
     ) -> None:
         self._avg[symbol] = pos.avg_price
+        # 빈 값은 다른 열과 같게 '-' 로 채운다. 한 칸만 비어 있으면 값이 없는 것인지
+        # 화면이 덜 그려진 것인지 구분되지 않는다.
+        holding = holding or "-"
         self._holding[symbol] = holding
         qty = f"{pos.remaining}/{pos.total_bought}" if pos.total_bought else "-"
         avg = f"{pos.avg_price:,.0f}" if pos.avg_price else "-"
@@ -289,6 +292,7 @@ class PositionsView(ttk.Frame):
         upsert 는 18칸을 통째로 다시 쓰고 필터·순서까지 손대므로, 분 단위로만 바뀌는
         값 하나 때문에 부를 일이 아니다. 값이 그대로면 아무것도 하지 않는다.
         """
+        text = text or "-"
         if self._holding.get(symbol) == text or not self.tree.exists(symbol):
             return
         self._holding[symbol] = text
@@ -296,7 +300,7 @@ class PositionsView(ttk.Frame):
 
     def holding_symbols(self) -> list[str]:
         """보유기간 시계가 도는 종목 — 30초 갱신 대상."""
-        return [s for s, text in self._holding.items() if text]
+        return [s for s, text in self._holding.items() if text and text != "-"]
 
     def tick(self, symbol: str, price: float) -> None:
         if not self.tree.exists(symbol) or symbol in _SPECIAL:

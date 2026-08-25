@@ -2577,8 +2577,12 @@ class Core:
                 "day_low": pos.day_low,
                 "day_open": pos.day_open,
                 "day_close": pos.day_close,
-                "entry_ts": spans.get(symbol, ("", ""))[0],
-                "exit_ts": spans.get(symbol, ("", ""))[1],
+                # 그날 매수한 것이 없으면 보유기간도 없다. holding_spans 는 최근 45일
+                # 안의 **마지막 사이클**을 집어 오므로, 며칠 전에 사고팔았던 종목을
+                # 오늘 관심종목으로 다시 등록하면 그때의 기간이 딸려온다
+                # (2026-08-26 실측: 대기 종목에 '26분' 이 떴다).
+                "entry_ts": spans.get(symbol, ("", ""))[0] if pos.total_bought else "",
+                "exit_ts": spans.get(symbol, ("", ""))[1] if pos.total_bought else "",
             }
 
     def _warn_restored_pending(self) -> None:
@@ -2652,9 +2656,13 @@ class Core:
         return self._calendar.days_between(entry[:10], last_day)
 
     def holding_label(self, symbol: str) -> str:
-        """이 종목의 보유기간 표기 (`3시간 12분` / `2일차`). 진입 전이면 빈 문자열."""
+        """이 종목의 보유기간 표기 (`3시간 12분` / `2일차`). 진입 전이면 빈 문자열.
+
+        그날 매수한 것이 없으면 예전 기록이 남아 있어도 쓰지 않는다 — 대기 종목에
+        지난주 매매의 기간이 뜨면 지금 들고 있는 것으로 오해한다.
+        """
         e = self._entries.get(symbol)
-        if e is None:
+        if e is None or not e["pos"].total_bought:
             return ""
         return format_holding(
             e.get("entry_ts", ""), e.get("exit_ts", ""), self._hold_days(symbol)

@@ -1330,3 +1330,40 @@ def test_접속매매_시간의_침묵은_여전히_잡는다(core, monkeypatch)
     monkeypatch.setattr(core_mod, "datetime", FakeNow)
     asyncio.run(core._check_tick_flow())
     assert calls == ["재연결"]
+
+
+def test_대기_종목에는_예전_매매의_보유기간이_뜨지_않는다(core):
+    """holding_spans 는 45일 안의 **마지막 사이클**을 집어 온다.
+
+    며칠 전에 사고팔았던 종목을 오늘 관심종목으로 다시 등록하면 그때의 기간이 딸려와
+    대기 종목에 '26분' 이 떴다(2026-08-26 실측). 지금 들고 있는 것으로 오해한다.
+    """
+    register(core)
+    asyncio.run(tick(core, 9_950))
+    asyncio.run(fill(core, "ORD1", 100, 9_950))
+    asyncio.run(tick(core, 7_900))  # 3선 이탈 → 전량 손절
+    asyncio.run(fill(core, "ORD2", 100, 7_900))
+    assert core.holding_label("005930")  # 종료 직후에는 최종값이 남는다
+
+    # 다음 매매일에 같은 종목을 다시 등록 (CSV 불러오기)
+    later = core._next_trade_date()
+    core._store.register_symbol(later, "005930", "삼성전자", P)
+    core._load_date(later)
+
+    assert core._entries["005930"]["pos"].state is State.WAITING
+    assert core._entries["005930"]["entry_ts"] == ""
+    assert core.holding_label("005930") == ""
+
+
+def test_리셋한_종목도_보유기간이_사라진다(core):
+    """종료 → 대기 리셋은 새 사이클이다."""
+    register(core)
+    asyncio.run(tick(core, 9_950))
+    asyncio.run(fill(core, "ORD1", 100, 9_950))
+    asyncio.run(tick(core, 7_900))
+    asyncio.run(fill(core, "ORD2", 100, 7_900))
+
+    asyncio.run(core._handle_command(bus.Reset("005930")))
+    core._load_date(core._date)  # 재시작해도 되살아나지 않는다
+
+    assert core.holding_label("005930") == ""
