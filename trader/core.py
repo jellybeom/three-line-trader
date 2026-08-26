@@ -56,7 +56,12 @@ from trader.state_machine import (
     mark_pending,
 )
 from trader.store import Store
-from trader.journal import cycle_timeline, format_holding, transition_path
+from trader.journal import (
+    compact_timeline,
+    cycle_timeline,
+    format_holding,
+    transition_path,
+)
 from trader.trading_calendar import TradingCalendar, load_holidays
 from trader.ui import bus
 from trader.watcher import Tick, Watcher
@@ -879,7 +884,32 @@ class Core:
             cycle_realized, cycle_fees = self._store.cycle_totals(
                 symbol, until=self._date
             )
-            embed = build_trade_embed(
+            cycle = self._store.symbol_cycle(symbol, until=self._date)
+            common = dict(
+                path=transition_path(cycle),
+                avg_price=pos.avg_price,
+                total_bought=pos.total_bought,
+                holding=self.holding_label(symbol),
+            )
+            self._spawn(
+                self._send_embed(
+                    build_trade_embed(
+                        e["name"],
+                        symbol,
+                        reason,
+                        qty,
+                        price,
+                        cycle_realized,
+                        cycle_fees,
+                        **common,
+                    )
+                ),
+                "종료 알림 발송",
+            )
+            # 일지 스레드에는 **선정 근거와 시간축을 덧붙인다.** 코멘트를 쓰려면 "왜
+            # 골랐나" 와 "얼마나 들고 있었나" 가 눈앞에 있어야 한다. 장중에 흘려보는
+            # 알림 채널 쪽은 짧게 둔다.
+            journal_embed = build_trade_embed(
                 e["name"],
                 symbol,
                 reason,
@@ -887,14 +917,12 @@ class Core:
                 price,
                 cycle_realized,
                 cycle_fees,
-                path=transition_path(
-                    self._store.symbol_cycle(symbol, until=self._date)
+                timeline=compact_timeline(
+                    cycle, e.get("base_date", ""), self._calendar
                 ),
-                avg_price=pos.avg_price,
-                total_bought=pos.total_bought,
-                holding=self.holding_label(symbol),
+                tags=e.get("tags", ""),
+                **common,
             )
-            self._spawn(self._send_embed(embed), "종료 알림 발송")
             # 매매일지 스레드. 같은 embed 를 일지 채널에도 보내 스레드를 연다 —
             # 복기할 때 무엇을 보고 쓰는지가 바로 위에 있어야 한다.
             net = cycle_realized - cycle_fees
@@ -903,7 +931,7 @@ class Core:
                     symbol,
                     e["name"],
                     "익절" if net > 0 else "손절" if net < 0 else "본전",
-                    embed,
+                    journal_embed,
                 ),
                 "매매일지 스레드 생성",
             )
@@ -1323,7 +1351,9 @@ class Core:
             and e["pos"].total_bought
             and self._bot is not None
         ):
-            self._spawn(self._chart_task(symbol, to_discord=True), "차트 생성")
+            self._spawn(
+                self._chart_task(symbol, to_discord=True, auto=True), "차트 생성"
+            )
 
     async def _no_duplicate_order(self, symbol: str, d: Decision) -> bool:
         """직전 주문이 실패했던 종목만, 주문 직전에 미체결(ka10075)을 확인한다.
@@ -1900,7 +1930,11 @@ class Core:
     # ── 복기 차트 ───────────────────────────────────────────────
 
     async def _chart_task(
-        self, symbol: str, to_ui: bool = False, to_discord: bool = False
+        self,
+        symbol: str,
+        to_ui: bool = False,
+        to_discord: bool = False,
+        auto: bool = False,  # 종료 시 자동 생성 — 차트를 매매일지 스레드로 보낸다
     ) -> None:
         """차트 생성은 느리므로(REST 2~3회 + 렌더링 1~3초) 전부 스레드에 위임한다.
         매매 루프·틱 판정은 이 작업과 무관하게 계속 돈다."""
@@ -1938,7 +1972,9 @@ class Core:
                 )
             )
         if to_discord and self._bot is not None:
-            await self._send_chart_images(symbol, (daily_path, minute_path))
+            await self._send_chart_images(
+                symbol, (daily_path, minute_path), to_thread=auto
+            )
         if to_discord:  # 종료 자동 차트 — 일지 폴더에 보관하고 경로를 남긴다
             self._archive_charts(symbol, daily_path, minute_path)
 
@@ -2055,10 +2091,22 @@ class Core:
             self._date, symbol, daily_path=saved[0], minute_path=saved[1]
         )
 
-    async def _send_chart_images(self, symbol: str, paths: tuple[str, ...]) -> None:
+    async def _send_chart_images(
+        self, symbol: str, paths: tuple[str, ...], to_thread: bool = False
+    ) -> None:
+        """일봉·3분봉을 한 메시지로 (요청 1회, 사진 2장 나란히).
+
+        종료 자동 차트는 **매매일지 스레드 안으로** 보낸다. 복기할 때 보는 것이라
+        답글을 다는 자리 바로 위에 있어야 채널을 오가지 않는다. `/차트` 로 직접 부른
+        것은 지금 보려는 것이므로 평소대로 알림 채널로 간다.
+        """
         name = self._entries[symbol]["name"] if symbol in self._entries else symbol
-        try:  # 일봉·3분봉을 한 메시지로 (요청 1회, 사진 2장 나란히)
-            await self._bot.send_images(list(paths), f"📈 {name}({symbol}) 차트")
+        try:
+            await self._bot.send_images(
+                list(paths),
+                f"📈 {name}({symbol}) 차트",
+                thread_key=(self._date, symbol) if to_thread else None,
+            )
         except Exception as e:  # noqa: BLE001
             self._log(symbol, "경고", f"차트 전송 실패: {e}", notify=False)
 

@@ -493,8 +493,8 @@ def test_종료_체결시_Discord_로_차트가_자동_전송된다(tmp_path):
             sent.append(("embed", [embed]))
             return True
 
-        async def send_images(self, paths, caption=""):
-            sent.append(("images", list(paths)))  # 한 메시지에 여러 장
+        async def send_images(self, paths, caption="", thread_key=None):
+            sent.append(("images", list(paths), thread_key))  # 한 메시지에 여러 장
             return True
 
     class Broker(ChartStubBroker):
@@ -547,11 +547,11 @@ def test_종료_체결시_Discord_로_차트가_자동_전송된다(tmp_path):
         )
         for _ in range(50):  # 백그라운드 차트 작업 완료 대기
             await asyncio.sleep(0.1)
-            if any(kind == "images" for kind, _ in sent):
+            if any(kind == "images" for kind, *_ in sent):
                 break
 
     asyncio.run(scenario())
-    batches = [paths for kind, paths in sent if kind == "images"]
+    batches = [p for kind, p, *_ in sent if kind == "images"]
     assert len(batches) == 1, sent  # 사진 2장이 '한 번의' 발송으로
     assert len(batches[0]) == 2
     assert any("daily" in p for p in batches[0]) and any(
@@ -583,8 +583,8 @@ def test_Discord_명령으로_요청하면_Discord로_전송된다(tmp_path):
     sent = []
 
     class FakeBot:
-        async def send_images(self, paths, caption=""):
-            sent.append((list(paths), caption))
+        async def send_images(self, paths, caption="", thread_key=None):
+            sent.append((list(paths), caption, thread_key))
             return True
 
         def set_blocked(self, *a):
@@ -620,7 +620,7 @@ def test_Discord_명령으로_요청하면_Discord로_전송된다(tmp_path):
 
     asyncio.run(scenario())
     assert sent, "Discord 로 전송되지 않음"
-    paths, caption = sent[0]
+    paths, caption, thread_key = sent[0]
     assert len(paths) == 2 and "삼성전자" in caption
 
     events = []
@@ -685,3 +685,31 @@ def test_계단_지표는_당일_저가_대비_3_5_7퍼센트다():
     ]
     lows = day_low_steps(bars)
     assert lows == [100, 90]  # 계단의 바닥은 '그날 누적 최저가' 이지 평단이 아니다
+
+
+def test_종료_차트는_매매일지_스레드로_간다(tmp_path):
+    """복기할 때 보는 것이라 답글 다는 자리 바로 위에 있어야 채널을 오가지 않는다.
+
+    `/차트` 로 직접 부른 것은 지금 보려는 것이므로 평소대로 알림 채널로 간다.
+    """
+    sent = []
+
+    class Bot:
+        async def send_images(self, paths, caption="", thread_key=None):
+            sent.append(thread_key)
+            return True
+
+    from trader.core import Core
+    from trader.store import Store
+    from trader.ui import bus
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._date = "2026-08-27"
+    core._store = Store(str(tmp_path / "t.db"))
+    core._bot = Bot()
+    asyncio.run(core._send_chart_images("005930", ("a.png", "b.png"), to_thread=True))
+    asyncio.run(core._send_chart_images("005930", ("a.png", "b.png")))
+
+    assert sent[0] == (core._date, "005930")  # 자동 차트 → 스레드
+    assert sent[1] is None  # 직접 요청 → 알림 채널
+    core._store.close()

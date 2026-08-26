@@ -1435,3 +1435,53 @@ def test_일지_타임라인에_진입_시각과_보유기간이_붙는다():
     assert "진입 2026-08-19 09:14" in text
     assert "청산 2026-08-19 12:26" in text
     assert "보유 3시간 12분" in text
+
+
+# ── 스레드용 짧은 타임라인 ──────────────────────────────────────
+
+
+def test_하루에_끝난_매매는_시각만_적는다():
+    """폰에서 한 줄에 들어가야 한다."""
+    from trader.journal import compact_timeline
+
+    cycle = [
+        {"ts": "2026-08-26 09:05:40", "side": "매수", "to_state": "1차 매수"},
+        {"ts": "2026-08-26 09:41:39", "side": "매도", "to_state": "종료"},
+    ]
+    assert compact_timeline(cycle) == "진입 09:05 · 청산 09:41"
+
+
+def test_날짜를_넘긴_매매는_날짜까지_적는다():
+    from trader.journal import compact_timeline
+
+    cycle = [
+        {"ts": "2026-08-24 13:41:00", "side": "매수", "to_state": "1차 매수"},
+        {"ts": "2026-08-26 10:38:00", "side": "매도", "to_state": "종료"},
+    ]
+    assert compact_timeline(cycle) == "진입 08-24 13:41 · 청산 08-26 10:38"
+
+
+def test_기준봉과_경과_거래일이_붙는다():
+    from trader.journal import compact_timeline
+    from trader.trading_calendar import TradingCalendar
+
+    cycle = [{"ts": "2026-08-26 09:05:40", "side": "매수", "to_state": "1차 매수"}]
+    text = compact_timeline(cycle, "2026-08-19", TradingCalendar())
+    assert "기준봉 08-19" in text and "D+" in text
+
+
+def test_보유기간은_넣지_않는다():
+    """embed 의 가격대 줄에 이미 있어 중복된다."""
+    from trader.journal import compact_timeline
+
+    cycle = [
+        {"ts": "2026-08-26 09:05:40", "side": "매수", "to_state": "1차 매수"},
+        {"ts": "2026-08-26 09:41:39", "side": "매도", "to_state": "종료"},
+    ]
+    assert "보유" not in compact_timeline(cycle)
+
+
+def test_매수_기록이_없으면_빈_문자열이다():
+    from trader.journal import compact_timeline
+
+    assert compact_timeline([]) == ""

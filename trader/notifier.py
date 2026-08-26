@@ -125,6 +125,8 @@ def build_trade_embed(
     avg_price: float = 0.0,
     total_bought: int = 0,
     holding: str = "",
+    timeline: str = "",
+    tags: str = "",
 ) -> dict:
     """종목이 '종료' 될 때의 결산 embed — 색 띠로 이익/손실이 한눈에 들어온다.
 
@@ -139,6 +141,15 @@ def build_trade_embed(
       많아 절대액이 커 보인다.
     - 청산가는 마지막 체결가가 아니라 **평균 청산가**다. 3단 익절을 하면 판 가격이
       제각각이라 마지막 한 건만으로는 "결국 얼마에 팔았나" 를 답하지 못한다.
+
+    매매일지 스레드로 갈 때는 timeline(진입·청산 시각과 기준봉 D±n)과 tags 를 함께
+    받는다. **선정 근거와 시간축이 있어야 코멘트를 쓸 수 있다** — "왜 골랐나" 와
+    "얼마나 들고 있었나" 가 복기의 첫 두 질문이다. 알림 채널로 갈 때는 비워 두어
+    장중에 흘려보는 알림이 길어지지 않게 한다.
+
+    최고/최저(MFE/MAE)는 **일부러 넣지 않는다.** 숫자가 늘수록 무엇을 보고 쓸지
+    흐려진다. 스레드는 무엇을 쓸지 떠올리게 하는 자리이지 결산표가 아니고, 그 값들은
+    문서에서 차분히 본다.
     """
     net = realized - fees
     if net > 0:
@@ -160,6 +171,10 @@ def build_trade_embed(
             f" · 투입 {_short_won(invested)}"
             + (f" · 보유 {holding}" if holding else "")
         )
+    if timeline:
+        lines.append(timeline)
+    if tags:
+        lines.append(" ".join(f"`#{t.strip()}`" for t in tags.split(",") if t.strip()))
     return {
         "title": f"{icon} {name}({symbol}) 종료",
         "description": "\n".join(lines),

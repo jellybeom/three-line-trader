@@ -275,13 +275,38 @@ class TraderBot:
         await self._channel.send(embed=self._to_embed(data))
         return True
 
-    async def send_images(self, paths: list[str], caption: str = "") -> bool:
-        """이미지 여러 장을 한 메시지로 (복기 차트 일봉·3분봉)."""
-        if self._channel is None:
+    async def send_images(
+        self, paths: list[str], caption: str = "", thread_key: tuple | None = None
+    ) -> bool:
+        """이미지 여러 장을 한 메시지로 (복기 차트 일봉·3분봉).
+
+        thread_key 가 (매매일, 종목) 이고 그 매매의 스레드가 있으면 **스레드 안으로**
+        보낸다. 종료 차트는 복기할 때 보는 것이라, 답글을 다는 자리 바로 위에 있어야
+        채널을 오가지 않는다. 스레드가 없으면(일지 채널 미설정 · 생성 실패) 알림
+        채널로 물러난다 — 차트가 아예 사라지는 것보다 낫다.
+
+        스레드로 보낸 차트는 작성자가 봇이라 답글로 세지 않는다 (되먹임 방지 1층).
+        """
+        channel = self._channel
+        if thread_key and (thread := await self._thread_for(*thread_key)) is not None:
+            channel = thread
+        if channel is None:
             return False
         files = [discord.File(path) for path in paths]
-        await self._channel.send(content=caption[:1900] or None, files=files)
+        await channel.send(content=caption[:1900] or None, files=files)
         return True
+
+    async def _thread_for(self, trade_date: str, symbol: str):
+        """그 매매의 스레드 객체. 없거나 접근할 수 없으면 None."""
+        thread_id = self._core.store.thread_of(trade_date, symbol)
+        if not thread_id or self._client is None:
+            return None
+        try:
+            return self._client.get_channel(
+                int(thread_id)
+            ) or await self._client.fetch_channel(int(thread_id))
+        except (discord.HTTPException, ValueError):
+            return None
 
     # ── 매매일지 스레드 (3단계-3) ───────────────────────────────
     #
@@ -350,11 +375,8 @@ class TraderBot:
             return
         trade_date, symbol = trade
         mirror_id, _ = self._core.store.mirror_of(trade_date, symbol)
-        try:
-            thread = self._client.get_channel(
-                int(thread_id)
-            ) or await self._client.fetch_channel(int(thread_id))
-        except (discord.HTTPException, ValueError):
+        thread = await self._thread_for(trade_date, symbol)
+        if thread is None:
             return
 
         texts = []
@@ -395,10 +417,10 @@ class TraderBot:
             return False
         body = journal_input.render_mirror(good, bad)
         mirror_id, _ = self._core.store.mirror_of(trade_date, symbol)
+        thread = await self._thread_for(trade_date, symbol)
+        if thread is None:
+            return False
         try:
-            thread = self._client.get_channel(
-                int(thread_id)
-            ) or await self._client.fetch_channel(int(thread_id))
             if mirror_id:
                 message = await thread.fetch_message(int(mirror_id))
                 await message.edit(content=body[:1900])
@@ -424,7 +446,7 @@ class TraderBot:
             embed = build_trade_embed(
                 row["name"],
                 row["symbol"],
-                f"{row['trade_date']} 매매 (뒤늦게 만든 스레드)",
+                f"{row['trade_date']} 매매",
                 row["total_bought"],
                 row["avg_price"],
                 row["realized_pnl"] or 0,

@@ -148,6 +148,43 @@ def cycle_holding(
     return format_holding(entry, until, days)
 
 
+def compact_timeline(
+    transitions: list[dict],
+    base_date: str = "",
+    calendar: TradingCalendar | None = None,
+) -> str:
+    """Discord 스레드용 한 줄. `진입 09:05 · 청산 09:41 · 기준봉 08-19 (D+5)`
+
+    cycle_timeline 과 달리 **보유기간을 넣지 않는다** — embed 의 가격대 줄에 이미 있어
+    중복된다. 하루 안에 끝난 매매는 시각만, 날짜를 넘긴 매매는 날짜까지 적는다.
+    폰에서 한 줄에 들어가야 하므로 연도는 생략한다.
+    """
+    buys = [r for r in transitions if r.get("side") == "매수"]
+    closed = [r for r in transitions if (r.get("to_state") or "") == _CLOSED]
+    if not buys:
+        return ""
+    entry, exit_ts = buys[0].get("ts") or "", (
+        (closed[-1].get("ts") or "") if closed else ""
+    )
+    same_day = bool(entry and exit_ts and entry[:10] == exit_ts[:10])
+
+    def stamp(ts: str) -> str:
+        if len(ts) < 16:
+            return ts[:10]
+        return ts[11:16] if same_day else f"{ts[5:10]} {ts[11:16]}"
+
+    parts = [f"진입 {stamp(entry)}"] if entry else []
+    if exit_ts:
+        parts.append(f"청산 {stamp(exit_ts)}")
+    if base_date:
+        text = f"기준봉 {base_date[5:]}"
+        if calendar is not None and entry:
+            if days := format_days(calendar.days_between(base_date, entry[:10])):
+                text += f" ({days})"
+        parts.append(text)
+    return " · ".join(parts)
+
+
 def cycle_timeline(
     transitions: list[dict],
     base_date: str = "",
