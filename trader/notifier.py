@@ -213,10 +213,6 @@ _KIND_STYLE = {
 }
 
 
-def kind_icon(kind: str) -> str:
-    return _KIND_STYLE.get(kind, ("ℹ️", _COLOR_INFO))[0]
-
-
 def build_alert_embed(kind: str, label: str, text: str) -> dict:
     """단건 알림 embed — 종류별 색 띠가 있어야 흐름 속에서 눈에 띈다."""
     icon, color = _KIND_STYLE.get(kind, ("ℹ️", _COLOR_INFO))

@@ -491,6 +491,54 @@ class Core:
                 self._log("시스템", "에러", f"{type(cmd).__name__} 처리 실패: {e}")
 
     async def _handle_command(self, cmd) -> None:
+        """UI·Discord 에서 온 명령을 묶음별 처리기로 넘긴다.
+
+        예전에는 이 함수 하나에 21 가지가 다 들어 있어 303줄이었다. 일지 기능을
+        붙일 때마다 매수/매도 판정이 있는 자리를 함께 건드려야 했다. 묶음을 나눠
+        두면 손댈 곳이 분명해진다 — 포지션에 닿는 것은 _handle_position_command
+        하나뿐이다.
+
+        명령은 모두 서로 다른 dataclass 라 분기 순서가 결과를 바꾸지 않는다.
+        어디에도 맞지 않는 명령은 조용히 무시한다(종전과 같다).
+        """
+        match cmd:
+            case bus.ManualSell() | bus.CarryPosition() | bus.CarryOver() | bus.Reset():
+                await self._handle_position_command(cmd)
+            case (
+                bus.LookupSymbol()
+                | bus.RegistrationNotice()
+                | bus.Register()
+                | bus.Delete()
+            ):
+                await self._handle_symbol_command(cmd)
+            case (
+                bus.Notice()
+                | bus.RequestJournal()
+                | bus.SaveJournal()
+                | bus.RequestDailySummary()
+                | bus.ChartRequest()
+                | bus.SendChartDiscord()
+            ):
+                await self._handle_journal_command(cmd)
+            case (
+                bus.ConnectKiwoom()
+                | bus.RefreshAccount()
+                | bus.SetNotifyLevel()
+                | bus.SetRunning()
+                | bus.SetFunds()
+                | bus.SetMode()
+                | bus.SetTradeDate()
+            ):
+                await self._handle_system_command(cmd)
+
+    # ── 포지션 명령 ───────────────────────────────────────────
+
+    async def _handle_position_command(self, cmd) -> None:
+        """보유·이월·리셋 — **포지션에 닿는 명령**.
+
+        여기만 잔량과 평단을 바꾼다. 다른 묶음을 고칠 때 이 파일을 열더라도 이 메서드는
+        건드리지 않는다는 뜻이기도 하다. 감시 중 금지 규칙이 대부분 여기 있다.
+        """
         match cmd:
             case bus.ManualSell(symbol=s):
                 await self._manual_sell(s)
@@ -566,10 +614,27 @@ class Core:
                     f"{target} 리스트로 이월 (상태: {e['pos'].state.value}, "
                     f"잔량 {e['pos'].remaining}주)",
                 )
-            case bus.ConnectKiwoom():
-                await self._connect()
-            case bus.RefreshAccount():
-                await self._refresh_account()
+            case bus.Reset(symbol=s) if s in self._entries:
+                try:
+                    new_pos = self._store.admin_reset(
+                        self._date, s, self._entries[s]["pos"]
+                    )
+                except ValueError as e:
+                    self._log(s, "에러", str(e))
+                else:
+                    self._entries[s]["pos"] = new_pos
+                    # 새 사이클이므로 보유기간 시계도 처음으로 되돌린다
+                    self._entries[s]["entry_ts"] = ""
+                    self._entries[s]["exit_ts"] = ""
+                    self._clear_block(s)
+                    self._emit_position(s)
+                    self._log(s, "리셋", "관리자 수동 초기화 (종료 → 대기)")
+
+    # ── 종목 명령 ───────────────────────────────────────────
+
+    async def _handle_symbol_command(self, cmd) -> None:
+        """등록·삭제·조회 — 관심종목 목록을 바꾸는 명령."""
+        match cmd:
             case bus.LookupSymbol(symbol=s):
                 if self._broker is None:
                     self._log(s, "에러", "종목명 조회는 키움 연결 후 가능합니다")
@@ -595,6 +660,123 @@ class Core:
                             self._date, list(rows), list(warns), staged, skipped
                         )
                     )
+            case bus.Register(
+                symbol=s,
+                name=n,
+                params=p,
+                position=pos,
+                edit=edit,
+                memo=memo,
+                tags=tags,
+                base_date=base_date,
+                quiet=quiet,
+            ):
+                await self._register(
+                    s,
+                    n,
+                    p,
+                    pos,
+                    edit,
+                    memo,
+                    tags,
+                    base_date,
+                    quiet,
+                )
+            case bus.Delete(symbol=s):
+                if self._running:
+                    self._log(
+                        s, "에러", "감시 중에는 삭제할 수 없습니다 — 먼저 중지하세요"
+                    )
+                    return
+                name = self._entries.get(s, {}).get("name", "")
+                self._store.delete_symbol(self._date, s)
+                self._entries.pop(s, None)
+                self._clear_block(s)
+                self._bus.events.put(bus.SymbolRemoved(s))
+                self._log(s, "삭제", "관심종목 제외", name=name)
+                await self._sync_watcher_symbols()
+
+    async def _register(
+        self,
+        s,
+        n,
+        p,
+        pos,
+        edit,
+        memo,
+        tags,
+        base_date,
+        quiet,
+    ) -> None:
+        """관심종목 등록·편집. 검증이 길어 분배표에서 떼어 두었다.
+
+        인자 이름은 명령의 패턴에서 묶인 이름을 **그대로** 쓴다. 옮기면서 이름을
+        바꾸면 본문의 문자열 안까지 함께 바뀌어 조용히 깨진다(2026-08-27 실측:
+        e["pos"] 가 e["position"] 이 되어 12개 테스트가 무너졌다).
+
+        감시 중에는 막는다 — 진입 시점의 조건으로 끝까지 가야 하므로 도중에 3선이나
+        매수 금액이 바뀌면 안 된다.
+        """
+        if self._running:
+            self._log(
+                s,
+                "에러",
+                "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
+            )
+            return
+        if pos is not None and not edit and s in self._entries:
+            self._log(
+                s,
+                "에러",
+                "이미 등록된 종목입니다 — 수정하려면 편집(✎)을 사용하세요",
+            )
+            return
+        if pos is None:  # 편집(설정만): 현재 포지션 유지
+            if s not in self._entries:
+                self._log(s, "에러", "편집 대상 종목이 없습니다")
+                return
+            pos = self._entries[s]["pos"]
+        if s in self._entries:  # 편집에서 비워 보내면 기존 값을 유지한다
+            tags = tags or self._entries[s].get("tags", "")
+            base_date = base_date or self._entries[s].get("base_date", "")
+        self._store.register_symbol(
+            self._date, s, n, p, pos, memo=memo, tags=tags, base_date=base_date
+        )
+        price = self._entries[s]["price"] if s in self._entries else pos.avg_price
+        self._entries[s] = {
+            "name": n,
+            "params": p,
+            "pos": pos,
+            "price": price,
+            "memo": memo,
+            "tags": tags,
+            "base_date": base_date,
+            "high": pos.high_price,
+            "low": pos.low_price,
+            "day_low": pos.day_low,
+            "day_open": pos.day_open,
+            "day_close": pos.day_close,
+        }
+        self._clear_block(s)
+        self._emit_position(s)
+        self._log(
+            s,
+            "등록" if not edit else "편집",
+            f"{n} (상태: {pos.state.value}, 잔량 {pos.remaining}주)",
+            notify=not quiet,
+        )
+        if not quiet:  # 일괄 등록은 결과 알림에 소량 경고가 이미 담겨 있다
+            self._warn_small_qty(s, n, p)
+        await self._sync_watcher_symbols()
+
+    # ── 일지·차트 명령 ───────────────────────────────────────────
+
+    async def _handle_journal_command(self, cmd) -> None:
+        """기록·일지·차트·요약 — **매매 판단과 무관한** 명령.
+
+        일지 기능을 붙일 때 매수/매도 경로가 있는 곳을 건드리지 않게 떼어 두었다.
+        """
+        match cmd:
             case bus.Notice(kind=kind, text=text, symbol=sym):
                 self._log(sym, kind, text)
             case bus.RequestJournal(since=since, until=until):
@@ -628,103 +810,21 @@ class Core:
                     self._log(s, "에러", "Discord 연결 후 전송할 수 있습니다")
                     return
                 self._spawn(self._send_chart_images(s, paths), "차트 전송")
+
+    # ── 연결·설정 명령 ───────────────────────────────────────────
+
+    async def _handle_system_command(self, cmd) -> None:
+        """연결·감시·자금·모드·매매일 — 설정과 상태 전환."""
+        match cmd:
+            case bus.ConnectKiwoom():
+                await self._connect()
+            case bus.RefreshAccount():
+                await self._refresh_account()
             case bus.SetNotifyLevel(level=lv):
                 self._notify_level = lv
                 self._store.set_setting("notify_level", lv)
                 self._bus.events.put(bus.NotifyLevel(lv))
                 self._log("시스템", "설정", f"Discord 알림 수준: {lv}")
-            case bus.Register(
-                symbol=s,
-                name=n,
-                params=p,
-                position=pos,
-                edit=edit,
-                memo=memo,
-                tags=tags,
-                base_date=base_date,
-                quiet=quiet,
-            ):
-                if self._running:
-                    self._log(
-                        s,
-                        "에러",
-                        "감시 중에는 등록/편집할 수 없습니다 — 먼저 중지하세요",
-                    )
-                    return
-                if pos is not None and not edit and s in self._entries:
-                    self._log(
-                        s,
-                        "에러",
-                        "이미 등록된 종목입니다 — 수정하려면 편집(✎)을 사용하세요",
-                    )
-                    return
-                if pos is None:  # 편집(설정만): 현재 포지션 유지
-                    if s not in self._entries:
-                        self._log(s, "에러", "편집 대상 종목이 없습니다")
-                        return
-                    pos = self._entries[s]["pos"]
-                if s in self._entries:  # 편집에서 비워 보내면 기존 값을 유지한다
-                    tags = tags or self._entries[s].get("tags", "")
-                    base_date = base_date or self._entries[s].get("base_date", "")
-                self._store.register_symbol(
-                    self._date, s, n, p, pos, memo=memo, tags=tags, base_date=base_date
-                )
-                price = (
-                    self._entries[s]["price"] if s in self._entries else pos.avg_price
-                )
-                self._entries[s] = {
-                    "name": n,
-                    "params": p,
-                    "pos": pos,
-                    "price": price,
-                    "memo": memo,
-                    "tags": tags,
-                    "base_date": base_date,
-                    "high": pos.high_price,
-                    "low": pos.low_price,
-                    "day_low": pos.day_low,
-                    "day_open": pos.day_open,
-                    "day_close": pos.day_close,
-                }
-                self._clear_block(s)
-                self._emit_position(s)
-                self._log(
-                    s,
-                    "등록" if not edit else "편집",
-                    f"{n} (상태: {pos.state.value}, 잔량 {pos.remaining}주)",
-                    notify=not quiet,
-                )
-                if not quiet:  # 일괄 등록은 결과 알림에 소량 경고가 이미 담겨 있다
-                    self._warn_small_qty(s, n, p)
-                await self._sync_watcher_symbols()
-            case bus.Delete(symbol=s):
-                if self._running:
-                    self._log(
-                        s, "에러", "감시 중에는 삭제할 수 없습니다 — 먼저 중지하세요"
-                    )
-                    return
-                name = self._entries.get(s, {}).get("name", "")
-                self._store.delete_symbol(self._date, s)
-                self._entries.pop(s, None)
-                self._clear_block(s)
-                self._bus.events.put(bus.SymbolRemoved(s))
-                self._log(s, "삭제", "관심종목 제외", name=name)
-                await self._sync_watcher_symbols()
-            case bus.Reset(symbol=s) if s in self._entries:
-                try:
-                    new_pos = self._store.admin_reset(
-                        self._date, s, self._entries[s]["pos"]
-                    )
-                except ValueError as e:
-                    self._log(s, "에러", str(e))
-                else:
-                    self._entries[s]["pos"] = new_pos
-                    # 새 사이클이므로 보유기간 시계도 처음으로 되돌린다
-                    self._entries[s]["entry_ts"] = ""
-                    self._entries[s]["exit_ts"] = ""
-                    self._clear_block(s)
-                    self._emit_position(s)
-                    self._log(s, "리셋", "관리자 수동 초기화 (종료 → 대기)")
             case bus.SetRunning(running=r):
                 if r and self._broker is None:
                     self._log(
@@ -2863,7 +2963,3 @@ class Core:
             await self._send_embed(build_alert_embed(kind, label, text))
             return
         await self._send_embed(build_batch_embed(items))
-
-    def _notify(self, symbol: str, text: str) -> None:
-        """중요 이벤트 — '알림' 종류로 기록되며 알림 수준 필터를 거쳐 Discord 로 발송된다."""
-        self._log(symbol, "알림", text)

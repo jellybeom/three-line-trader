@@ -1367,3 +1367,68 @@ def test_리셋한_종목도_보유기간이_사라진다(core):
     core._load_date(core._date)  # 재시작해도 되살아나지 않는다
 
     assert core.holding_label("005930") == ""
+
+
+# ── 명령 분배 구조 ──────────────────────────────────────────────
+
+
+def _command_types():
+    """bus 에 정의된 '명령' dataclass 이름 전부 (이벤트는 제외)."""
+    import inspect
+
+    handled = set()
+    for name in dir(bus):
+        obj = getattr(bus, name)
+        if inspect.isclass(obj) and obj.__module__ == bus.__name__:
+            handled.add(name)
+    return handled
+
+
+def test_모든_명령이_어느_묶음엔가_속한다(core):
+    """분배표에서 빠진 명령은 조용히 무시된다 — 눌러도 아무 일이 안 일어난다.
+
+    _handle_command 는 21 가지를 한 함수에서 처리하다 303줄이 됐다. 묶음을 나눈 뒤로는
+    새 명령을 추가할 때 어느 묶음인지 정하지 않으면 여기서 걸린다.
+    """
+    import inspect
+    import re
+
+    source = inspect.getsource(core._handle_command)
+    routed = set(re.findall(r"bus\.(\w+)\(\)", source))
+
+    groups = {}
+    for method in (
+        core._handle_position_command,
+        core._handle_symbol_command,
+        core._handle_journal_command,
+        core._handle_system_command,
+    ):
+        groups[method.__name__] = set(
+            re.findall(r"case bus\.(\w+)", inspect.getsource(method))
+        )
+
+    # 분배표에 적힌 것과 각 묶음이 실제로 처리하는 것이 일치해야 한다
+    assert routed == set().union(*groups.values())
+    # 한 명령이 두 묶음에 있으면 뒤엣것은 절대 실행되지 않는다
+    seen = [n for names in groups.values() for n in names]
+    assert len(seen) == len(set(seen)), "두 묶음에 중복된 명령이 있습니다"
+
+
+def test_포지션을_바꾸는_명령은_한_묶음에만_있다(core):
+    """잔량·평단에 닿는 명령이 흩어지면 어디를 조심해야 할지 알 수 없다."""
+    import inspect
+    import re
+
+    position_commands = {"ManualSell", "CarryPosition", "CarryOver", "Reset"}
+    for method in (
+        core._handle_symbol_command,
+        core._handle_journal_command,
+        core._handle_system_command,
+    ):
+        names = set(re.findall(r"case bus\.(\w+)", inspect.getsource(method)))
+        assert not (names & position_commands), method.__name__
+
+    handled = set(
+        re.findall(r"case bus\.(\w+)", inspect.getsource(core._handle_position_command))
+    )
+    assert position_commands <= handled
