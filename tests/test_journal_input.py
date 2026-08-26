@@ -553,3 +553,90 @@ def test_인텐트가_꺼져_있으면_경고한다(bot):
 
 async def _noop(sent, text):
     sent.append(text)
+
+
+# ── 채널 권한 (2026-08-26 50001 Missing Access) ──────────────────
+
+
+class _Perms:
+    def __init__(self, **granted):
+        self._granted = granted
+
+    def __getattr__(self, name):
+        return self._granted.get(name, False)
+
+
+def _channel_with(**granted):
+    channel = _FakeChannel()
+    channel.guild = type("G", (), {"me": object()})()
+    channel.permissions_for = lambda _me: _Perms(**granted)
+    return channel
+
+
+def test_권한이_없으면_시작할_때_알린다(bot):
+    """청산할 때마다 실패하면 이미 장중이라 고치기 어렵고 그날 매매가 다 빠진다."""
+    b, _thread, _store = bot
+    b._journal_channel = _channel_with(view_channel=True)
+    sent = []
+    b.send_text = lambda text: _noop(sent, text)
+
+    _run(b._warn_if_missing_permissions())
+
+    assert sent and "공개 스레드 만들기" in sent[0]
+    assert "메시지 보내기" in sent[0]
+
+
+def test_권한이_충분하면_알리지_않는다(bot):
+    b, _thread, _store = bot
+    b._journal_channel = _channel_with(
+        view_channel=True,
+        send_messages=True,
+        create_public_threads=True,
+        send_messages_in_threads=True,
+        read_message_history=True,
+        embed_links=True,
+    )
+    sent = []
+    b.send_text = lambda text: _noop(sent, text)
+
+    _run(b._warn_if_missing_permissions())
+
+    assert sent == []
+
+
+def test_스레드가_없는_청산_매매를_뒤늦게_메운다(store):
+    """청산 순간에 실패하면 그 매매는 영영 스레드가 없다."""
+    from trader.discord_bot import BotConfig, TraderBot
+    from trader.state_machine import Decision, Params, Position, Side, State
+
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=200_000, buy2_amount=200_000
+    )
+    store.register_symbol("2026-08-26", "263800", "데이타솔루션", params)
+    store.save_transition(
+        "2026-08-26",
+        "263800",
+        State.BUY1,
+        Position(State.CLOSED, 10_000, 10, 0, realized_pnl=-500, fees=30),
+        Decision(State.CLOSED, Side.SELL, 10, "3선 이탈 → 전량 손절"),
+        9_950,
+        9_950,
+    )
+    b = TraderBot(_FakeCore(store), BotConfig("t", 1, frozenset({1}), 2))
+    b._journal_channel = _FakeChannel()
+
+    assert _run(b.backfill_threads()) == 1
+    assert store.thread_of("2026-08-26", "263800")
+    assert _run(b.backfill_threads()) == 0  # 두 번 만들지 않는다
+
+
+def test_진입하지_않은_종목은_메우지_않는다(store):
+    """등록만 하고 매수하지 않은 종목에 스레드를 만들 이유가 없다."""
+    from trader.state_machine import Params
+
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=200_000, buy2_amount=200_000
+    )
+    store.register_symbol("2026-08-26", "263800", "데이타솔루션", params)
+
+    assert store.closed_without_thread() == []

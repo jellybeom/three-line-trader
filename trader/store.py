@@ -781,6 +781,30 @@ class Store:
         ).fetchone()
         return (row["trade_date"], row["symbol"]) if row else None
 
+    def closed_without_thread(self, limit: int = 20) -> list[dict]:
+        """스레드가 아직 없는 **청산된** 매매. 최근 것부터.
+
+        스레드는 청산 순간에만 만든다. 그때 실패하면(채널 권한이 없거나 봇이 꺼져
+        있으면) 그 매매는 영영 스레드가 없다 — 2026-08-26 에 `50001 Missing Access`
+        로 그날 청산된 종목이 전부 빠졌다. 기동할 때 이것을 메운다.
+
+        한 번에 만드는 개수를 제한한다. 몇 달치를 한꺼번에 만들면 Discord 가 속도
+        제한을 걸고, 채널이 옛날 매매로 도배된다.
+        """
+        rows = self._conn.execute(
+            """SELECT p.trade_date, p.symbol, s.name,
+                      p.realized_pnl, p.fees, p.avg_price, p.total_bought
+               FROM positions p JOIN symbols s USING(trade_date, symbol)
+               LEFT JOIN journal_sync js
+                 ON js.trade_date = p.trade_date AND js.symbol = p.symbol
+               WHERE p.state = '종료' AND p.total_bought > 0
+                 AND COALESCE(js.thread_id, '') = ''
+               ORDER BY p.trade_date DESC, p.symbol
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def threads_with_replies(self) -> list[tuple[str, str]]:
         """스레드가 열린 매매 전부. 기동할 때 밀린 답글을 훑는 대상이다.
 

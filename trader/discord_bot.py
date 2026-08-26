@@ -24,6 +24,7 @@ import discord
 from discord import app_commands
 
 from trader import journal_input
+from trader.notifier import build_trade_embed
 
 _BACKLOG_MAX = 30  # 기동 시 훑을 최근 스레드 수 (약 한 달치)
 
@@ -229,6 +230,7 @@ class TraderBot:
                     self._config.journal_channel_id
                 ) or await client.fetch_channel(self._config.journal_channel_id)
                 await self._warn_if_no_message_content()
+                await self._warn_if_missing_permissions()
                 await self._collect_backlog()
             await tree.sync()
             self._core.on_bot_ready()
@@ -302,7 +304,16 @@ class TraderBot:
             trade_date, symbol
         ):
             return False
-        message = await self._journal_channel.send(embed=self._to_embed(embed))
+        try:
+            message = await self._journal_channel.send(embed=self._to_embed(embed))
+        except discord.Forbidden as err:
+            # 50001 Missing Access. 비공개 채널은 역할별로 접근을 따로 허용해야 한다 —
+            # 채널은 보이는데 전송만 막혀 청산할 때마다 같은 오류가 난다(2026-08-26).
+            raise BotConfigError(
+                "매매일지 채널에 글을 쓸 권한이 없습니다. 채널 편집 → 권한에서 봇에게 "
+                "'채널 보기 · 메시지 보내기 · 공개 스레드 만들기 · 스레드에서 메시지 "
+                "보내기 · 메시지 기록 보기' 를 허용해 주세요."
+            ) from err
         thread = await message.create_thread(
             name=journal_input.thread_name(trade_date, name, result),
             auto_archive_duration=10080,  # 7일. 그 뒤 답글을 달면 Discord 가 되살린다
@@ -399,6 +410,41 @@ class TraderBot:
         self._core.store.save_mirror(trade_date, symbol, mirror_id, good, bad)
         return True
 
+    async def backfill_threads(self) -> int:
+        """스레드가 없는 청산 매매에 뒤늦게 스레드를 만든다. 만든 개수를 돌려준다.
+
+        청산 순간에 실패하면(채널 권한이 없거나 봇이 꺼져 있으면) 그 매매는 영영
+        스레드가 없다. 기동할 때 메워 두면 권한을 고친 뒤 재시작만으로 복구된다.
+        """
+        if self._journal_channel is None:
+            return 0
+        made = 0
+        for row in self._core.store.closed_without_thread():
+            net = (row["realized_pnl"] or 0) - (row["fees"] or 0)
+            embed = build_trade_embed(
+                row["name"],
+                row["symbol"],
+                f"{row['trade_date']} 매매 (뒤늦게 만든 스레드)",
+                row["total_bought"],
+                row["avg_price"],
+                row["realized_pnl"] or 0,
+                row["fees"] or 0,
+                avg_price=row["avg_price"],
+                total_bought=row["total_bought"],
+            )
+            try:
+                if await self.open_journal_thread(
+                    row["trade_date"],
+                    row["symbol"],
+                    row["name"],
+                    "익절" if net > 0 else "손절" if net < 0 else "본전",
+                    embed,
+                ):
+                    made += 1
+            except (discord.HTTPException, BotConfigError):
+                break  # 권한이 없으면 나머지도 마찬가지다 — 같은 오류를 쌓지 않는다
+        return made
+
     async def _collect_backlog(self) -> None:
         """기동할 때 밀린 것을 양쪽으로 정리한다.
 
@@ -407,6 +453,8 @@ class TraderBot:
         문제가 생길 수 있다.
         """
         # 최근 것부터 일정 개수만 본다. 스레드가 수백 개가 되어도 기동이 늘어지면 안 된다.
+        if made := await self.backfill_threads():
+            await self.send_text(f"매매일지 스레드 {made}개를 뒤늦게 만들었습니다.")
         for trade_date, symbol in self._core.store.threads_with_replies()[
             :_BACKLOG_MAX
         ]:
@@ -423,6 +471,39 @@ class TraderBot:
                 )
             except discord.HTTPException:
                 continue
+
+    _NEEDED = (
+        ("view_channel", "채널 보기"),
+        ("send_messages", "메시지 보내기"),
+        ("create_public_threads", "공개 스레드 만들기"),
+        ("send_messages_in_threads", "스레드에서 메시지 보내기"),
+        ("read_message_history", "메시지 기록 보기"),
+        ("embed_links", "링크 첨부"),
+    )
+
+    async def _warn_if_missing_permissions(self) -> None:
+        """일지 채널 권한을 **시작할 때** 확인한다.
+
+        없으면 청산할 때마다 `50001 Missing Access` 가 나는데, 그때는 이미 장중이라
+        고치기 어렵고 그날 청산된 종목이 전부 스레드 없이 지나간다(2026-08-26 실측).
+        비공개 채널은 역할별로 접근을 따로 허용해야 해서 흔히 빠뜨린다.
+        """
+        channel = self._journal_channel
+        if channel is None or not hasattr(channel, "permissions_for"):
+            return
+        me = getattr(getattr(channel, "guild", None), "me", None)
+        if me is None:
+            return
+        have = channel.permissions_for(me)
+        missing = [
+            label for attr, label in self._NEEDED if not getattr(have, attr, False)
+        ]
+        if missing:
+            await self.send_text(
+                f"⚠️ 매매일지 채널 권한이 부족합니다: {' · '.join(missing)}. "
+                "채널 편집 → 권한에서 봇에게 허용해 주세요. "
+                "그때까지 종료된 매매의 스레드가 만들어지지 않습니다."
+            )
 
     async def _warn_if_no_message_content(self) -> None:
         """특권 인텐트가 꺼져 있으면 알린다.
