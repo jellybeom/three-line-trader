@@ -703,3 +703,40 @@ async def _found(message):
 
 async def _edit_embed(self, embed=None, content=None):
     self.edited = embed if embed is not None else content
+
+
+def test_내용이_그대로면_갱신_로그를_남기지_않는다(bot):
+    """기동할 때마다 스레드를 다시 읽는다 — 답글 단 종목 수만큼 로그가 쌓이면 안 된다."""
+    b, thread, store = bot
+    thread.messages = [_FakeMessage(1, "호가가 얇았음")]
+    _run(b._rebuild_journal("111"))
+    assert b._core.updates == [("2026-08-24", "263800")]  # 처음 한 번은 남는다
+
+    _run(b._rebuild_journal("111"))
+    _run(b._rebuild_journal("111"))
+
+    assert b._core.updates == [("2026-08-24", "263800")]  # 더 늘지 않는다
+
+
+def test_내용이_바뀌면_그때는_갱신된다(bot):
+    b, thread, store = bot
+    thread.messages = [_FakeMessage(1, "호가가 얇았음")]
+    _run(b._rebuild_journal("111"))
+
+    thread.messages.append(_FakeMessage(2, "+ 규칙 지킴"))
+    _run(b._rebuild_journal("111"))
+
+    assert len(b._core.updates) == 2
+    assert store.journal_text("2026-08-24", "263800")[0] == "규칙 지킴"
+
+
+def test_기동_훑기는_바뀐_것만_알린다(bot):
+    """여러 종목에 코멘트가 있어도 재시작할 때 조용해야 한다."""
+    b, thread, store = bot
+    thread.messages = [_FakeMessage(1, "호가가 얇았음")]
+    _run(b._collect_backlog())
+    b._core.updates.clear()
+
+    _run(b._collect_backlog())
+
+    assert b._core.updates == []

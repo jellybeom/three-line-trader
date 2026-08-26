@@ -691,8 +691,11 @@ def dialog(rows):
     tk = pytest.importorskip("tkinter")
     try:
         root = tk.Tk()
-    except tk.TclError:  # 화면이 없는 환경
-        pytest.skip("no display")
+    except tk.TclError as err:
+        # 화면이 없는 환경. 다만 **창이 만들어지는 환경에서도** 여기 걸릴 수 있다 —
+        # 앞선 테스트가 Tk 루트를 정리하지 않으면 두 번째 생성이 거부된다. 그때
+        # "no display" 만 남으면 원인을 찾을 수 없으므로 실제 오류를 함께 적는다.
+        pytest.skip(f"Tk 루트를 만들 수 없음: {err}")
     root.withdraw()
     from trader.ui.journal_dialog import JournalDialog
 
@@ -912,8 +915,8 @@ def period_dialog(rows):
     tk = pytest.importorskip("tkinter")
     try:
         root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display")
+    except tk.TclError as err:
+        pytest.skip(f"Tk 루트를 만들 수 없음: {err}")
     root.withdraw()
     from trader.ui.journal_dialog import JournalDialog
 

@@ -399,6 +399,13 @@ class TraderBot:
             return
 
         good, bad = journal_input.collect_replies(texts)
+        if (good, bad) == self._core.store.journal_text(trade_date, symbol)[:2]:
+            # 내용이 그대로면 아무것도 하지 않는다. 기동할 때마다 스레드를 다시 읽으므로,
+            # 여기서 걸러 내지 않으면 답글을 단 종목 수만큼 "일지가 갱신됐습니다" 로그가
+            # 매번 쌓인다(2026-08-26 실측). 수정 시각도 괜히 밀려 밀린 목록 판정이
+            # 흔들린다.
+            return
+
         self._core.store.replace_journal_text(trade_date, symbol, good, bad)
         # 스레드와 DB 가 지금 같은 내용이라고 새긴다. 안 새기면 방금 읽어 온 내용을
         # 다시 스레드로 올리려 들고, 그것을 또 읽는 고리가 생긴다.
