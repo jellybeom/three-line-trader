@@ -27,6 +27,7 @@ from trader import journal_input
 from trader.notifier import build_trade_embed
 
 _BACKLOG_MAX = 30  # 기동 시 훑을 최근 스레드 수 (약 한 달치)
+_BACKFILL_DAYS = 5  # 스레드를 뒤늦게 만들 대상 기간 (최근 매매일 수)
 
 if TYPE_CHECKING:  # 코어는 타입 표기용으로만 참조 (순환 import 방지)
     from trader.core import Core
@@ -433,39 +434,80 @@ class TraderBot:
         return True
 
     async def backfill_threads(self) -> int:
-        """스레드가 없는 청산 매매에 뒤늦게 스레드를 만든다. 만든 개수를 돌려준다.
+        """스레드가 없는 **최근** 청산 매매에 스레드를 만든다. 만든 개수를 돌려준다.
 
         청산 순간에 실패하면(채널 권한이 없거나 봇이 꺼져 있으면) 그 매매는 영영
         스레드가 없다. 기동할 때 메워 두면 권한을 고친 뒤 재시작만으로 복구된다.
+
+        대상은 **최근 며칠**로 자른다 — 자세한 이유는 store.closed_without_thread 참고.
         """
         if self._journal_channel is None:
             return 0
+        dates = self._core.store.recent_trade_dates(limit=_BACKFILL_DAYS)
         made = 0
-        for row in self._core.store.closed_without_thread():
+        for row in self._core.store.closed_without_thread(
+            since=dates[-1] if dates else ""
+        ):
             net = (row["realized_pnl"] or 0) - (row["fees"] or 0)
-            embed = build_trade_embed(
-                row["name"],
-                row["symbol"],
-                f"{row['trade_date']} 매매",
-                row["total_bought"],
-                row["avg_price"],
-                row["realized_pnl"] or 0,
-                row["fees"] or 0,
-                avg_price=row["avg_price"],
-                total_bought=row["total_bought"],
-            )
             try:
                 if await self.open_journal_thread(
                     row["trade_date"],
                     row["symbol"],
                     row["name"],
                     "익절" if net > 0 else "손절" if net < 0 else "본전",
-                    embed,
+                    self._core.journal_embed(row["trade_date"], row["symbol"]),
                 ):
                     made += 1
+                    await self._attach_charts(row["trade_date"], row["symbol"])
             except (discord.HTTPException, BotConfigError):
                 break  # 권한이 없으면 나머지도 마찬가지다 — 같은 오류를 쌓지 않는다
         return made
+
+    async def refresh_thread_embeds(self) -> int:
+        """이미 만들어진 스레드의 첫 메시지를 최신 형식으로 고쳐 쓴다.
+
+        스레드는 청산 순간에 한 번 만들어지고 그대로 남는다. embed 에 담는 내용을
+        바꿔도 예전 스레드는 옛 모습 그대로라, 며칠 전 매매를 복기하려면 정보가 빠져
+        있다. 메시지에서 스레드를 만들면 **스레드 ID 가 그 메시지 ID 와 같아서** 부모
+        채널에서 바로 찾아 고칠 수 있다.
+
+        내용이 같으면 건드리지 않는다 — 재시작할 때마다 편집 표시가 붙으면 지저분하다.
+        """
+        if self._journal_channel is None:
+            return 0
+        fixed = 0
+        for trade_date, symbol in self._core.store.threads_with_replies()[
+            :_BACKLOG_MAX
+        ]:
+            thread_id = self._core.store.thread_of(trade_date, symbol)
+            embed = self._core.journal_embed(trade_date, symbol)
+            if not embed:
+                continue
+            try:
+                message = await self._journal_channel.fetch_message(int(thread_id))
+                current = message.embeds[0].description if message.embeds else ""
+                if current == embed["description"]:
+                    continue
+                await message.edit(embed=self._to_embed(embed))
+                fixed += 1
+                await self._attach_charts(trade_date, symbol)
+            except (discord.HTTPException, ValueError, IndexError):
+                continue
+        return fixed
+
+    async def _attach_charts(self, trade_date: str, symbol: str) -> None:
+        """보관해 둔 복기 차트를 스레드에 올린다. 이미 올라가 있으면 건너뛴다."""
+        paths = [p for p in self._core.store.chart_paths(trade_date, symbol) if p]
+        thread = await self._thread_for(trade_date, symbol)
+        if not paths or thread is None:
+            return
+        async for message in thread.history(limit=50, oldest_first=True):
+            if getattr(message, "attachments", None):
+                return  # 이미 있다
+        try:
+            await thread.send(files=[discord.File(p) for p in paths])
+        except (discord.HTTPException, OSError):
+            pass  # 차트가 없어도 복기는 된다
 
     async def _collect_backlog(self) -> None:
         """기동할 때 밀린 것을 양쪽으로 정리한다.
@@ -476,7 +518,8 @@ class TraderBot:
         """
         # 최근 것부터 일정 개수만 본다. 스레드가 수백 개가 되어도 기동이 늘어지면 안 된다.
         if made := await self.backfill_threads():
-            await self.send_text(f"매매일지 스레드 {made}개를 뒤늦게 만들었습니다.")
+            await self.send_text(f"매매일지 스레드 {made}개를 만들었습니다.")
+        await self.refresh_thread_embeds()
         for trade_date, symbol in self._core.store.threads_with_replies()[
             :_BACKLOG_MAX
         ]:

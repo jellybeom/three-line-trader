@@ -58,6 +58,7 @@ from trader.state_machine import (
 from trader.store import Store
 from trader.journal import (
     compact_timeline,
+    cycle_holding,
     cycle_timeline,
     format_holding,
     transition_path,
@@ -2680,6 +2681,37 @@ class Core:
     def store(self) -> "Store":
         """봇이 일지·스레드 연결을 직접 읽고 쓴다. 모드 전환 시 새 Store 로 바뀐다."""
         return self._store
+
+    def journal_embed(self, trade_date: str, symbol: str) -> dict:
+        """매매일지 스레드에 실을 embed. 기록만으로 만들 수 있어 과거 매매도 된다.
+
+        청산 순간에 만드는 것과 **같은 함수를 쓰지 않으면** 두 경로가 서서히 갈라진다.
+        여기 하나로 모아 두고, 스레드를 뒤늦게 만들 때도 최신 형식으로 고쳐 쓸 때도
+        이것을 부른다.
+        """
+        rows = self._store.journal_entries(since=trade_date, until=trade_date)
+        entry = next((e for e in rows if e["symbol"] == symbol), None)
+        if entry is None:
+            return {}
+        cycle = self._store.symbol_cycle(symbol, until=trade_date)
+        realized, fees = self._store.cycle_totals(symbol, trade_date)
+        return build_trade_embed(
+            entry["name"],
+            symbol,
+            trade_date,
+            entry["total_bought"],
+            entry["avg_price"],
+            realized,
+            fees,
+            path=transition_path(cycle),
+            avg_price=entry["avg_price"],
+            total_bought=entry["total_bought"],
+            holding=cycle_holding(cycle, self._calendar),
+            timeline=compact_timeline(
+                cycle, entry.get("base_date", ""), self._calendar
+            ),
+            tags=entry.get("tags", ""),
+        )
 
     def on_journal_updated(self, trade_date: str, symbol: str) -> None:
         """Discord 스레드에서 일지가 바뀌었을 때 화면에 알린다."""

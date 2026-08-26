@@ -781,15 +781,18 @@ class Store:
         ).fetchone()
         return (row["trade_date"], row["symbol"]) if row else None
 
-    def closed_without_thread(self, limit: int = 20) -> list[dict]:
+    def closed_without_thread(self, since: str = "", limit: int = 20) -> list[dict]:
         """스레드가 아직 없는 **청산된** 매매. 최근 것부터.
 
         스레드는 청산 순간에만 만든다. 그때 실패하면(채널 권한이 없거나 봇이 꺼져
         있으면) 그 매매는 영영 스레드가 없다 — 2026-08-26 에 `50001 Missing Access`
         로 그날 청산된 종목이 전부 빠졌다. 기동할 때 이것을 메운다.
 
-        한 번에 만드는 개수를 제한한다. 몇 달치를 한꺼번에 만들면 Discord 가 속도
-        제한을 걸고, 채널이 옛날 매매로 도배된다.
+        **날짜로 자른다.** 개수만 제한하면 재시작할 때마다 그다음 오래된 20개를 만들어
+        몇 달 전까지 거슬러 올라간다(2026-08-27 실측: 두 번째 재시작에 7월 매매까지
+        스레드가 생겼다). 며칠 지난 매매는 이미 복기가 끝났거나 문서로 보는 것이지
+        스레드에 답글을 달 대상이 아니다. 개수 제한은 하루에 청산이 몰린 날의 안전장치로
+        남긴다.
         """
         rows = self._conn.execute(
             """SELECT p.trade_date, p.symbol, s.name,
@@ -799,11 +802,21 @@ class Store:
                  ON js.trade_date = p.trade_date AND js.symbol = p.symbol
                WHERE p.state = '종료' AND p.total_bought > 0
                  AND COALESCE(js.thread_id, '') = ''
+                 AND p.trade_date >= ?
                ORDER BY p.trade_date DESC, p.symbol
                LIMIT ?""",
-            (limit,),
+            (since, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def chart_paths(self, trade_date: str, symbol: str) -> tuple[str, str]:
+        """보관해 둔 (일봉, 3분봉) 경로. 없으면 빈 문자열."""
+        row = self._conn.execute(
+            """SELECT COALESCE(daily_path,'') d, COALESCE(minute_path,'') m
+               FROM journal WHERE trade_date=? AND symbol=?""",
+            (trade_date, symbol),
+        ).fetchone()
+        return (row["d"], row["m"]) if row else ("", "")
 
     def threads_with_replies(self) -> list[tuple[str, str]]:
         """스레드가 열린 매매 전부. 기동할 때 밀린 답글을 훑는 대상이다.

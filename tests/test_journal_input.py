@@ -245,9 +245,10 @@ class _FakeMessage:
         self.author = type("A", (), {"bot": bot})()
         self.edited = None
 
-    async def edit(self, content):
-        self.edited = content
-        self.content = content
+    async def edit(self, content=None, embed=None):
+        self.edited = embed if embed is not None else content
+        if content is not None:
+            self.content = content
 
 
 class _FakeThread:
@@ -293,6 +294,9 @@ class _FakeCore:
 
     def on_journal_updated(self, trade_date, symbol):
         self.updates.append((trade_date, symbol))
+
+    def journal_embed(self, trade_date, symbol):
+        return {"title": f"{symbol} 종료", "description": "테스트", "color": 0}
 
 
 @pytest.fixture
@@ -640,3 +644,62 @@ def test_진입하지_않은_종목은_메우지_않는다(store):
     store.register_symbol("2026-08-26", "263800", "데이타솔루션", params)
 
     assert store.closed_without_thread() == []
+
+
+def test_뒤늦게_만들_대상은_최근_며칠로_자른다(store):
+    """개수만 제한하면 재시작할 때마다 그다음 오래된 20개를 만들어 몇 달 전까지 간다.
+
+    2026-08-27 실측: 두 번째 재시작에 7월 매매까지 스레드가 생겼다.
+    """
+    from trader.state_machine import Decision, Params, Position, Side, State
+
+    params = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=200_000, buy2_amount=200_000
+    )
+    for date in ("2026-07-20", "2026-08-25", "2026-08-26"):
+        store.register_symbol(date, "263800", "데이타솔루션", params)
+        store.save_transition(
+            date,
+            "263800",
+            State.BUY1,
+            Position(State.CLOSED, 10_000, 10, 0, realized_pnl=100, fees=10),
+            Decision(State.CLOSED, Side.SELL, 10, "청산"),
+            10_100,
+            10_100,
+        )
+
+    recent = store.closed_without_thread(since="2026-08-25")
+    assert {r["trade_date"] for r in recent} == {"2026-08-25", "2026-08-26"}
+    assert len(store.closed_without_thread(since="")) == 3  # 자르지 않으면 전부
+
+
+def test_스레드_첫_메시지를_최신_형식으로_고쳐_쓴다(bot):
+    """embed 에 담는 내용을 바꿔도 예전 스레드는 옛 모습 그대로 남는다."""
+    b, thread, store = bot
+    old = _FakeMessage(111, "", bot=True)
+    old.embeds = [type("E", (), {"description": "옛날 내용"})()]
+    b._journal_channel = _FakeChannel()
+    b._journal_channel.fetch_message = lambda mid: _found(old)
+
+    assert _run(b.refresh_thread_embeds()) == 1
+    assert old.edited is not None
+
+
+def test_내용이_같으면_고쳐_쓰지_않는다(bot):
+    """재시작할 때마다 편집 표시가 붙으면 지저분하다."""
+    b, thread, store = bot
+    same = _FakeMessage(111, "", bot=True)
+    same.embeds = [type("E", (), {"description": "테스트"})()]  # FakeCore 와 같은 값
+    b._journal_channel = _FakeChannel()
+    b._journal_channel.fetch_message = lambda mid: _found(same)
+
+    assert _run(b.refresh_thread_embeds()) == 0
+    assert same.edited is None
+
+
+async def _found(message):
+    return message
+
+
+async def _edit_embed(self, embed=None, content=None):
+    self.edited = embed if embed is not None else content
