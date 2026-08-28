@@ -1432,3 +1432,65 @@ def test_포지션을_바꾸는_명령은_한_묶음에만_있다(core):
         re.findall(r"case bus\.(\w+)", inspect.getsource(core._handle_position_command))
     )
     assert position_commands <= handled
+
+
+def test_매수만_한_종목은_실현손익_대조에서_뺀다(core):
+    """실현손익이 없는 게 당연한데 `증권사 없음` 으로 찍혀 어긋난 것처럼 보였다.
+
+    2026-08-27 실측: 그날 유일한 대조 줄이 매수만 한 SK바이오팜의 `증권사 없음` 이었다.
+    """
+    symbols = [
+        {
+            "symbol": "005930",
+            "name": "삼성전자",
+            "realized_pnl": 0,
+            "fees": 13,
+            "avg_price": 88_400,
+        },
+        {
+            "symbol": "035420",
+            "name": "네이버",
+            "realized_pnl": 5_000,
+            "fees": 100,
+            "avg_price": 200_000,
+        },
+    ]
+    realized = [
+        {
+            "symbol": "035420",
+            "pnl": 4_900.0,
+            "qty": 1,
+            "buy_price": 200_000.0,
+            "sell_price": 205_000.0,
+        }
+    ]
+
+    core._reconcile_pnl(symbols, realized, sold={"035420"})
+
+    logged = core._store._conn.execute(
+        "SELECT reason FROM events WHERE kind='대조'"
+    ).fetchall()
+    text = " ".join(r["reason"] for r in logged)
+    assert "네이버" in text
+    assert "삼성전자" not in text  # 매수만 한 종목은 빠진다
+    assert "증권사 없음" not in text
+
+
+def test_매도가_있었으면_증권사에_없어도_알린다(core):
+    """팔았는데 증권사 기록이 없으면 그건 진짜 이상한 것이다."""
+    symbols = [
+        {
+            "symbol": "005930",
+            "name": "삼성전자",
+            "realized_pnl": 1_000,
+            "fees": 50,
+            "avg_price": 88_400,
+        }
+    ]
+
+    core._reconcile_pnl(symbols, [], sold={"005930"})
+
+    logged = core._store._conn.execute(
+        "SELECT reason FROM events WHERE kind='대조'"
+    ).fetchall()
+    assert "증권사 없음" in " ".join(r["reason"] for r in logged)

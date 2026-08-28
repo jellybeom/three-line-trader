@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS journal_sync (  -- 매매 ↔ Discord 스레드 연�
     mirror_message_id TEXT NOT NULL DEFAULT '',  -- 봇이 UI 내용을 올려 두고 고쳐 쓰는 메시지
     mirrored_at       TEXT NOT NULL DEFAULT '',  -- 마지막으로 올린 시각 (표시용)
     mirrored_hash     TEXT NOT NULL DEFAULT '',  -- 마지막으로 올린 본문의 지문
+    replied           INTEGER NOT NULL DEFAULT 0,  -- 답글이 달린 적 있는가 (주인 판정)
     PRIMARY KEY (trade_date, symbol)
 );
 
@@ -203,7 +204,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 14  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 15  # 스키마 변경 시 1 증가.
 
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
@@ -274,6 +275,9 @@ _MIGRATIONS: dict[int, tuple] = {
     ),
     14: (  # 올린 내용을 시각이 아니라 **지문**으로 판정한다 (되먹임 방지)
         "ALTER TABLE journal_sync ADD COLUMN mirrored_hash TEXT NOT NULL DEFAULT ''",
+    ),
+    15: (  # 답글이 달린 적 있는지 — 일지의 주인이 UI 인지 스레드인지 가른다
+        "ALTER TABLE journal_sync ADD COLUMN replied INTEGER NOT NULL DEFAULT 0",
     ),
 }
 
@@ -748,6 +752,34 @@ class Store:
         return (row["good"], row["bad"], row["updated_at"]) if row else ("", "", "")
 
     # ── Discord 스레드 연결 (3단계-3) ───────────────────────────
+
+    def mark_replied(self, trade_date: str, symbol: str) -> bool:
+        """첫 답글 표시. **처음 다는 것이면 True.**
+
+        일지의 주인이 UI 에서 스레드로 넘어가는 순간이 여기다. 답글이 없는 동안은 UI 가
+        주인이고, 한 번이라도 달리면 그 뒤로는 스레드가 주인이다 — 그래야 답글을 전부
+        지웠을 때 '처음부터 없던 것' 과 구분해 일지를 비울 수 있다.
+
+        표시가 없으면 답글을 지워도 되돌릴 근거가 없어, 지운 내용이 그대로 남는다
+        (2026-08-27 실측).
+        """
+        first = not self.has_replies(trade_date, symbol)
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO journal_sync (trade_date, symbol, replied)
+                   VALUES (?,?,1)
+                   ON CONFLICT(trade_date, symbol) DO UPDATE SET replied=1""",
+                (trade_date, symbol),
+            )
+        return first
+
+    def has_replies(self, trade_date: str, symbol: str) -> bool:
+        """이 매매의 스레드에 답글이 달린 적 있는가 = 스레드가 일지의 주인인가."""
+        row = self._conn.execute(
+            "SELECT replied FROM journal_sync WHERE trade_date=? AND symbol=?",
+            (trade_date, symbol),
+        ).fetchone()
+        return bool(row and row["replied"])
 
     def save_thread(self, trade_date: str, symbol: str, thread_id: str) -> None:
         """매매 ↔ 스레드 연결. 이미 있으면 덮어쓰지 않는다.

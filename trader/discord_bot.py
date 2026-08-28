@@ -367,9 +367,13 @@ class TraderBot:
         돌려도 결과가 같아서, 사용자는 Discord 의 기본 편집·삭제를 그대로 쓰면 된다.
 
         **한 번이라도 답글을 달면 그 스레드가 일지의 주인이 된다.** 답글이 없는 동안은
-        UI 에서 쓴 것이 그대로 남는다. 둘을 합치려 들면 UI 에서 저장할 때마다 답글이
-        접혀 들어가 중복되므로, 어느 한쪽이 주인이어야 한다. UI 로 쓴 내용은 스레드에
-        메시지로 남아 있으니 필요하면 복사해 답글로 옮길 수 있다.
+        UI 에서 쓴 것이 그대로 남고, 첫 답글이 달리는 순간 UI 내용을 일지 **앞으로
+        흡수**한 뒤 주인이 넘어간다. 흡수는 그 한 번뿐이라 중복될 일이 없다.
+
+        둘을 계속 합치는 쪽은 택하지 않았다. UI 창에는 늘 '합쳐진 전체' 가 보이는데
+        거기서 저장하면 답글 내용까지 봇 메시지로 들어가고, 다음에 읽을 때 같은 문장이
+        두 번 세어진다. 막으려면 문장마다 출처를 추적해야 하고 그러면 자유롭게 고칠 수
+        없게 된다 — 자유 서술로 정한 취지와 어긋난다.
         """
         trade = self._core.store.trade_of_thread(thread_id)
         if trade is None:
@@ -380,36 +384,53 @@ class TraderBot:
         if thread is None:
             return
 
-        texts = []
+        # 봇이 올린 UI 내용(mirror)과 사람이 단 답글을 나눠 담는다. 되먹임 방지 3층은
+        # 그대로다 — mirror 를 '답글' 로 세지 않는 것이 핵심이고, 아래에서 **읽기 전용
+        # 으로만** 앞에 붙인다.
+        mirror_text, texts = "", []
         async for message in thread.history(limit=200, oldest_first=True):
-            if getattr(message.author, "bot", False):
-                continue  # 1층
-            if mirror_id and str(message.id) == mirror_id:
-                continue  # 2층 — 봇 판정이 어긋나도 여기서 걸린다
             body = message.content or ""
-            if journal_input.is_mirror(body):
-                continue  # 3층 — DB 가 지워져도 본문 표식으로 걸러진다
+            is_mirror = (mirror_id and str(message.id) == mirror_id) or (
+                journal_input.is_mirror(body)
+            )
+            if is_mirror:
+                mirror_text = body
+                continue
+            if getattr(message.author, "bot", False):
+                continue  # 차트 등 봇이 올린 나머지
             texts.append(body)
 
-        if not texts:
-            # **사람이 단 답글이 하나도 없으면 DB 를 건드리지 않는다.**
-            # 봇이 올린 메시지만 남은 스레드를 '전부 지웠다' 로 읽으면 UI 에서 쓴 일지가
-            # 지워진다. 기동 시 밀린 것 훑기가 모든 스레드를 돌기 때문에, 이 한 줄이
-            # 없으면 UI 로만 쓴 일지가 재시작 때마다 날아간다(2026-08-25 테스트에서 잡음).
+        store = self._core.store
+        if not texts and not store.has_replies(trade_date, symbol):
+            # 답글이 **한 번도 없었으면** DB 를 건드리지 않는다. 봇이 올린 메시지만 남은
+            # 스레드를 '전부 지웠다' 로 읽으면 UI 에서 쓴 일지가 지워진다 — 기동 시 밀린
+            # 것 훑기가 모든 스레드를 돌기 때문에 재시작마다 날아간다(2026-08-25).
             return
 
-        good, bad = journal_input.collect_replies(texts)
-        if (good, bad) == self._core.store.journal_text(trade_date, symbol)[:2]:
+        if texts:
+            store.mark_replied(trade_date, symbol)
+        # **일지 = 스레드에 보이는 그대로.** 봇이 올린 UI 내용이 맨 위, 그 뒤에 답글이
+        # 순서대로다. UI 내용을 일지에만 옮겨 두면 다음 갱신에서 사라진다 — 스레드에
+        # 답글로 없기 때문이다(2026-08-28 테스트에서 잡음). 스레드에 남아 있는 것을
+        # 매번 그대로 읽으면 몇 번을 돌려도 결과가 같다.
+        #
+        # 답글이 달린 뒤로는 mirror_journal 이 이 메시지를 더 고치지 않으므로, 이 부분은
+        # 넘어가는 시점의 UI 내용으로 고정된다. 중복될 일이 없다.
+        good, bad = journal_input.collect_replies(
+            ([journal_input.strip_mirror_mark(mirror_text)] if mirror_text else [])
+            + texts
+        )
+        if (good, bad) == store.journal_text(trade_date, symbol)[:2]:
             # 내용이 그대로면 아무것도 하지 않는다. 기동할 때마다 스레드를 다시 읽으므로,
             # 여기서 걸러 내지 않으면 답글을 단 종목 수만큼 "일지가 갱신됐습니다" 로그가
             # 매번 쌓인다(2026-08-26 실측). 수정 시각도 괜히 밀려 밀린 목록 판정이
             # 흔들린다.
             return
 
-        self._core.store.replace_journal_text(trade_date, symbol, good, bad)
+        store.replace_journal_text(trade_date, symbol, good, bad)
         # 스레드와 DB 가 지금 같은 내용이라고 새긴다. 안 새기면 방금 읽어 온 내용을
         # 다시 스레드로 올리려 들고, 그것을 또 읽는 고리가 생긴다.
-        self._core.store.save_mirror(trade_date, symbol, mirror_id, good, bad)
+        store.save_mirror(trade_date, symbol, mirror_id, good, bad)
         self._core.on_journal_updated(trade_date, symbol)
 
     async def mirror_journal(
@@ -422,6 +443,10 @@ class TraderBot:
         """
         thread_id = self._core.store.thread_of(trade_date, symbol)
         if self._client is None or not thread_id or not (good or bad):
+            return False
+        if self._core.store.has_replies(trade_date, symbol):
+            # 답글이 달린 뒤로는 스레드가 일지의 주인이다. 계속 고쳐 쓰면 답글에서 읽은
+            # 내용이 이 메시지로 되돌아와 같은 문장이 두 번 세어진다.
             return False
         body = journal_input.render_mirror(good, bad)
         mirror_id, _ = self._core.store.mirror_of(trade_date, symbol)

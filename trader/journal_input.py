@@ -98,6 +98,14 @@ def is_mirror(text: str) -> bool:
     return text.lstrip().startswith(_MIRROR_MARK)
 
 
+def strip_mirror_mark(text: str) -> str:
+    """봇이 올린 메시지에서 표식 줄만 떼어 낸다. 나머지는 답글과 같은 문법이다."""
+    lines = text.splitlines()
+    if lines and lines[0].lstrip().startswith(_MIRROR_MARK):
+        lines = lines[1:]
+    return "\n".join(lines)
+
+
 def render_mirror(good: str, bad: str) -> str:
     """UI 에서 쓴 일지를 스레드에 올릴 본문.
 

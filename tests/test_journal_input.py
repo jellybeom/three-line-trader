@@ -345,16 +345,17 @@ def test_답글을_지우면_일지에서도_사라진다(bot):
     assert bad == "호가가 얇았음"
 
 
-def test_봇이_올린_메시지는_답글로_세지_않는다(bot):
-    """되먹임 1층. 이것이 읽히면 UI 내용이 답글로 둔갑해 무한히 돈다."""
+def test_봇이_올린_UI_내용은_맨_위에_한_번만_들어간다(bot):
+    """일지 = 스레드에 보이는 그대로. 봇 메시지가 답글로 '둔갑' 하지는 않는다."""
     b, thread, store = bot
     _run(b.mirror_journal("2026-08-24", "263800", "UI 에서 쓴 것", ""))
     thread.messages.append(_FakeMessage(1, "폰에서 쓴 것"))
 
     _run(b._rebuild_journal("111"))
+    _run(b._rebuild_journal("111"))  # 몇 번을 돌려도 같아야 한다
 
     good, bad, _ = store.journal_text("2026-08-24", "263800")
-    assert good == ""  # 봇 메시지가 '잘한 점' 으로 섞여 들어오지 않았다
+    assert good == "UI 에서 쓴 것"  # 잘한 점 자리를 지킨다 (표식 줄은 떨어져 나갔다)
     assert bad == "폰에서 쓴 것"
 
 
@@ -371,7 +372,7 @@ def test_봇_판정이_어긋나도_표식으로_걸러진다(bot):
     _run(b._rebuild_journal("111"))
 
     good, bad, _ = store.journal_text("2026-08-24", "263800")
-    assert good == ""  # 봇이 올린 것은 무시
+    assert good == "UI 에서 쓴 것"  # 표식으로 알아보고 맨 위에 붙인다
     assert bad == "폰에서 쓴 것"
 
 
@@ -431,17 +432,68 @@ def test_답글이_없으면_UI에서_쓴_일지를_지우지_않는다(bot):
     assert store.journal_text("2026-08-24", "263800")[:2] == ("UI 에서 쓴 것", "")
 
 
-def test_답글을_달면_그_스레드가_일지의_주인이_된다(bot):
-    """둘을 합치면 UI 저장 때마다 답글이 접혀 들어가 중복된다 — 한쪽이 주인이어야 한다."""
+def test_답글을_달아도_UI_내용이_밀려나지_않는다(bot):
+    """2026-08-27 실측: 답글 '.' 하나에 앞서 UI 로 쓴 문장이 사라졌다."""
     b, thread, store = bot
-    store.replace_journal_text("2026-08-24", "263800", "UI 에서 쓴 것", "")
-    _run(b.mirror_journal("2026-08-24", "263800", "UI 에서 쓴 것", ""))
+    store.replace_journal_text("2026-08-24", "263800", "UI 에서 쓴 것", "박스 못 찾음")
+    _run(b.mirror_journal("2026-08-24", "263800", "UI 에서 쓴 것", "박스 못 찾음"))
 
     thread.messages.append(_FakeMessage(1, "폰에서 쓴 것"))
     _run(b._rebuild_journal("111"))
 
     good, bad, _ = store.journal_text("2026-08-24", "263800")
-    assert (good, bad) == ("", "폰에서 쓴 것")
+    assert good == "UI 에서 쓴 것"  # 살아남았다
+    assert bad == "박스 못 찾음\n폰에서 쓴 것"  # 앞에 붙고 답글이 뒤에
+
+
+def test_UI_내용은_답글이_늘어도_불어나지_않는다(bot):
+    """스레드에 있는 것을 매번 그대로 읽으므로 몇 번을 돌려도 결과가 같다."""
+    b, thread, store = bot
+    _run(b.mirror_journal("2026-08-24", "263800", "", "UI 에서 쓴 것"))
+    thread.messages.append(_FakeMessage(1, "답글 하나"))
+    _run(b._rebuild_journal("111"))
+
+    thread.messages.append(_FakeMessage(2, "답글 둘"))
+    _run(b._rebuild_journal("111"))
+    _run(b._rebuild_journal("111"))
+
+    assert store.journal_text("2026-08-24", "263800")[1] == (
+        "UI 에서 쓴 것\n답글 하나\n답글 둘"
+    )
+
+
+def test_답글이_달린_뒤에는_UI_내용을_더_올리지_않는다(bot):
+    """계속 고쳐 쓰면 답글에서 읽은 내용이 되돌아와 두 번 세어진다."""
+    b, thread, store = bot
+    _run(b.mirror_journal("2026-08-24", "263800", "처음", ""))
+    thread.messages.append(_FakeMessage(1, "답글"))
+    _run(b._rebuild_journal("111"))
+
+    assert _run(b.mirror_journal("2026-08-24", "263800", "고친 것", "")) is False
+    assert "처음" in thread.messages[0].content  # 넘어간 시점 그대로 고정
+
+
+def test_답글을_전부_지우면_일지도_비운다(bot):
+    """지운 내용이 남아 있는 쪽이 더 놀랍다(2026-08-27 실측)."""
+    b, thread, store = bot
+    thread.messages.append(_FakeMessage(1, "폰에서 쓴 것"))
+    _run(b._rebuild_journal("111"))
+    assert store.journal_text("2026-08-24", "263800")[1]
+
+    thread.messages.clear()
+    _run(b._rebuild_journal("111"))
+
+    assert store.journal_text("2026-08-24", "263800")[:2] == ("", "")
+
+
+def test_답글이_없었으면_지우지_않는다(bot):
+    """'처음부터 없던 것' 과 '전부 지운 것' 을 구분한다."""
+    b, thread, store = bot
+    store.replace_journal_text("2026-08-24", "263800", "UI 에서만 쓴 것", "")
+
+    _run(b._rebuild_journal("111"))
+
+    assert store.journal_text("2026-08-24", "263800")[0] == "UI 에서만 쓴 것"
 
 
 # ── 스레드 생성 · 기동 시 밀린 것 훑기 ──────────────────────────
@@ -740,3 +792,21 @@ def test_기동_훑기는_바뀐_것만_알린다(bot):
     _run(b._collect_backlog())
 
     assert b._core.updates == []
+
+
+def test_답글을_전부_지우면_UI_내용만_남는다(bot):
+    """지운 답글은 사라지고, 봇 메시지에 남아 있는 UI 내용은 그대로다.
+
+    일지 = 스레드에 보이는 그대로이므로, 화면과 일지가 어긋나지 않는다. 2026-08-27 에
+    답글 '.' 을 지웠는데 '.' 이 그대로 남고 원래 문장은 안 돌아오던 문제가 이걸로 사라진다.
+    """
+    b, thread, store = bot
+    _run(b.mirror_journal("2026-08-24", "263800", "", "박스를 잘 못찾은건 아닐까"))
+    thread.messages.append(_FakeMessage(1, "."))
+    _run(b._rebuild_journal("111"))
+    assert store.journal_text("2026-08-24", "263800")[1].endswith(".")
+
+    thread.messages = [m for m in thread.messages if m.content != "."]
+    _run(b._rebuild_journal("111"))
+
+    assert store.journal_text("2026-08-24", "263800")[1] == "박스를 잘 못찾은건 아닐까"

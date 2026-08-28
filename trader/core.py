@@ -2368,7 +2368,11 @@ class Core:
         if broker_fills is not None:
             lines += self._reconcile_cost(symbols, fills, broker_fills)
         if realized is not None:
-            lines += self._reconcile_pnl(symbols, realized)
+            lines += self._reconcile_pnl(
+                symbols,
+                realized,
+                {f["symbol"] for f in fills if f.get("side") == "매도"},
+            )
         return lines
 
     async def _realized_by_symbol(self, fills: list[dict]) -> list[dict] | None:
@@ -2450,11 +2454,18 @@ class Core:
             lines.append(f"거래비용 추정 {estimated:,.0f}원 · 실측 {cost:,.0f}원")
         return lines
 
-    def _reconcile_pnl(self, symbols: list[dict], realized: list[dict]) -> list[str]:
+    def _reconcile_pnl(
+        self, symbols: list[dict], realized: list[dict], sold: set[str] | None = None
+    ) -> list[str]:
         """세후 실현손익 대조 — **종목별로** 비교해 어긋난 곳을 특정한다.
 
         ka10077 은 매입단가(buy_uv)까지 주므로, 프로그램 평단과 나란히 찍어 두면
         '증권사가 매수 수수료를 평단에 포함시켜서' 인지 아닌지 바로 가려진다.
+
+        sold 는 오늘 매도가 있었던 종목이다. 매수만 한 종목은 실현손익이 없는 것이
+        당연한데 매수 수수료 때문에 프로그램 쪽에 몇 원이 잡혀, `증권사 없음` 으로
+        찍히며 어긋난 것처럼 보였다(2026-08-27 실측: 그날 유일한 대조 줄이 그것이었다).
+        비교할 대상이 없는 종목은 아예 빼는 것이 맞다.
         """
         by_symbol: dict[str, dict] = {}
         for row in realized:  # 같은 종목이 여러 줄로 올 수 있다 (분할 매도)
@@ -2475,6 +2486,8 @@ class Core:
             their_net = theirs["pnl"] if theirs else 0.0
             if abs(my_net) < 1 and abs(their_net) < 1:
                 continue  # 오늘 청산이 없던 종목
+            if sold is not None and symbol not in sold and not theirs:
+                continue  # 매수만 한 종목 — 증권사에 실현손익이 있을 리 없다
             note = f"{ours['name'] if ours else symbol}({symbol})"
             note += f" 프로그램 {my_net:+,.0f}"
             note += f" · 증권사 {their_net:+,.0f}" if theirs else " · 증권사 없음"
