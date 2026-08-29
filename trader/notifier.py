@@ -391,64 +391,21 @@ def build_watchlist_embed(
     }
 
 
-def build_registration_embed(
-    trade_date: str,
-    rows: list[dict],
-    warnings: list[str] | None = None,
-    staged: int = 0,
-    skipped: int = 0,
+def build_registration_warning_embed(
+    trade_date: str, warnings: list[str], total: int
 ) -> dict:
-    """관심종목 등록 알림 — 종목마다 선정 근거(태그·기준봉)를 함께 보여준다.
+    """CSV 불러오기에서 **고쳐야 할 것만** 담는 embed.
 
-    rows: {symbol, name, tags, base_date, memo, qty(1차 예상 수량)} 목록.
-    등록은 '무엇을 왜 골랐는지' 를 남기는 자리이므로 상태·잔량 같은 기계적 정보 대신
-    선정 근거를 싣는다.
+    편성 결과 전체는 08:55 개장 브리핑이 맡는다. 경고 한 건 때문에 80종목 목록이
+    폰으로 쏟아지면, 정작 고쳐야 할 한 줄이 그 안에 묻힌다(2026-08-31 실측).
+    등록이 몇 종목인지는 제목에 숫자로만 남긴다.
     """
-    lines = []
-    for r in rows[:40]:
-        if lines:  # 종목 사이에 옅은 구분선 — 목록이 길어도 경계가 보인다
-            lines.append("─" * 18)
-        head = f"▸ **{r['name']}**(`{r['symbol']}`)"
-        meta = []
-        if tags := r.get("tags"):
-            meta.append(" ".join(f"`#{t}`" for t in tags.split(",") if t))
-        if label := base_date_label(r.get("base_date", ""), trade_date):
-            meta.append(f"기준봉 {label}")
-        if meta:
-            head += " · " + " · ".join(meta)
-        lines.append(head)
-        detail = []
-        if (qty := r.get("qty")) is not None and qty < 3:
-            detail.append(f"⚠️ 1차 {qty}주 — 단계 익절 어려움")
-        if memo := r.get("memo"):
-            detail.append(f"📝 {memo}")
-        if detail:
-            lines.append("　" + " · ".join(detail))
-    if len(rows) > 40:
-        lines.append(f"…외 {len(rows) - 40}종목")
-
-    extra = []
-    if staged:
-        extra.append(f"3선 미입력 {staged}종목")
-    if skipped:
-        extra.append(f"중복 제외 {skipped}종목")
-    embed = {
-        "title": f"➕ 관심종목 등록 {len(rows)}종목 · {trade_date}",
-        "description": "\n".join(lines)[:4000] or "\u200b",
-        "color": _COLOR_INFO,
+    return {
+        "title": f"⚠️ 관심종목 확인 필요 {len(warnings)}건 · {trade_date}",
+        "description": "\n".join(f"• {w}" for w in warnings[:10])[:4000],
+        "color": _COLOR_WARN,
+        "footer": {"text": f"등록 {total}종목 — 나머지는 정상입니다"},
     }
-    if extra:
-        embed["footer"] = {"text": " · ".join(extra)}
-    if warnings:
-        embed["fields"] = [
-            {
-                "name": f"⚠️ 확인 필요 {len(warnings)}건",
-                "value": "\n".join(warnings[:10])[:1024],
-                "inline": False,
-            }
-        ]
-        embed["color"] = _COLOR_WARN
-    return embed
 
 
 def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:

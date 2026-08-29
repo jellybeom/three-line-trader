@@ -756,7 +756,8 @@ def test_등록_실패가_있으면_즉시_알린다(core):
     )
     asyncio.run(core._flush_notices())
     assert len(bot.sent) == 1
-    assert "해성디에스" in bot.sent[0]["fields"][0]["value"]
+    assert "해성디에스" in bot.sent[0]["description"]
+    assert "삼성전자" not in bot.sent[0]["description"]  # 정상 종목은 딸려 오지 않는다
 
 
 def test_CSV_등록_알림은_한_번만_발송된다(core):
@@ -796,9 +797,9 @@ def test_CSV_등록_알림은_한_번만_발송된다(core):
     asyncio.run(core._flush_notices())
 
     assert len(sent) == 1
-    assert "등록 1종목" in sent[0]["title"]
-    assert "3선 미입력 2종목" in sent[0]["footer"]["text"]
-    assert "중복 제외 1종목" in sent[0]["footer"]["text"]
+    assert "확인 필요 1건" in sent[0]["title"]
+    assert "실패 1건" in sent[0]["description"]
+    assert "1종목" in sent[0]["footer"]["text"]  # 나머지는 정상이라는 안심만
 
 
 # ── 관심종목 편성은 조용히, 개장 브리핑으로 대체 (2026-08-08) ──
