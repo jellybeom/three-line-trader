@@ -586,3 +586,67 @@ def test_보유기간을_지우면_다시_대시가_된다(app):
     app.update()
     assert app.positions.tree.set("005930", "hold") == "-"
     assert "005930" not in app.positions.holding_symbols()  # 갱신 대상에서 빠진다
+
+
+# ── 감시 시작/중지 확인창 (2026-09-02) ──────────────────────────
+
+
+def test_시작_중지_버튼은_확인창을_거친다(app, monkeypatch):
+    """바로 옆이 '매매일지' 라 오클릭이 난다 — 장중에 실수로 중지되면 매매가 멈춘다."""
+    asked = []
+    monkeypatch.setattr(
+        "trader.ui.app.messagebox.askyesno",
+        lambda *a, **k: asked.append((a, k)) or False,
+    )
+
+    app._toggle_run()
+
+    assert asked, "확인창 없이 명령이 나갔다"
+    assert app._bus.commands.empty()  # '아니오' 면 아무 일도 없다
+
+
+def test_확인하면_명령이_나간다(app, monkeypatch):
+    monkeypatch.setattr("trader.ui.app.messagebox.askyesno", lambda *a, **k: True)
+
+    app._toggle_run()
+
+    assert not app._bus.commands.empty()
+
+
+def test_자동_스케줄은_확인창을_거치지_않는다(app, monkeypatch):
+    """08:55 자동 시작과 15:30 자동 중지는 코어가 스스로 한다.
+
+    사람이 없을 때 확인창이 떠서 스케줄이 막히면 곤란하다. 확인창은 **UI 버튼**에만
+    달려 있고 코어는 이 코드를 지나지 않는다.
+    """
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core)
+    assert "askyesno" not in source
+    assert "messagebox" not in source
+
+
+def test_트레이가_없는_환경에서도_창이_뜬다(app):
+    """트레이는 편의 기능이다 — 이것 때문에 매매 프로그램이 안 뜨면 본말이 뒤바뀐다."""
+    from trader.ui.tray import Tray
+
+    tray = Tray(app, app.destroy)
+    assert tray.start() in (True, False)  # 예외를 내보내지 않는다
+    tray.stop()
+
+
+def test_트레이가_동작하면_X는_숨김이_된다(app, monkeypatch):
+    """✕ 로 종료되면 그날 매매가 통째로 멈춘다. 종료는 트레이 메뉴에만 둔다."""
+    monkeypatch.setattr("trader.ui.tray.Tray.start", lambda self: True)
+    app._setup_tray()
+
+    assert app.protocol("WM_DELETE_WINDOW")  # 기본 종료 동작을 가로챈다
+
+    hidden = []
+    monkeypatch.setattr(
+        "trader.ui.tray.Tray.hide_window", lambda self: hidden.append(1)
+    )
+    app._hide_to_tray()
+    assert hidden  # 종료가 아니라 숨김

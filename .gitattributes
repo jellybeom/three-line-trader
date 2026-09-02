@@ -6,6 +6,7 @@
 # `'.' is not recognized as an internal or external command` 가 뜬다(2026-08-23 실측).
 # 실행 자체는 되지만 조용히 어긋나는 자리가 생기므로 고정해 둔다.
 *.bat text eol=crlf
+*.vbs text eol=crlf
 
 # 나머지는 저장소에 LF 로 두고 체크아웃할 때 OS 에 맡긴다.
 * text=auto

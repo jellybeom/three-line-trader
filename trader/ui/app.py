@@ -27,6 +27,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 from trader.journal import format_holding
 from trader.state_machine import State
 from trader.ui import bus
+from trader.ui.tray import Tray
 
 try:
     import warnings
@@ -258,8 +259,38 @@ class App(tk.Tk):
         self._build_status_bar()
 
         self.bind_all("<Button-1>", self._maybe_deselect, add="+")
+        self._setup_tray()
         self.after(_POLL_MS, self._poll)
         self.after(1000, self._refresh_clock)
+
+    # ── 트레이 ─────────────────────────────────────────────────
+
+    def _setup_tray(self) -> None:
+        """✕ 를 누르면 종료 대신 트레이로 내린다.
+
+        모니터가 없는 미니PC 를 원격으로 조작하다 ✕ 를 잘못 누르면 그날 매매가 통째로
+        멈춘다(2026-09-02 실제로 겪음). 트레이를 못 만드는 환경에서는 ✕ 가 평소대로
+        종료로 남는다 — 트레이가 없다고 프로그램이 안 뜨면 본말이 뒤바뀐다.
+        """
+        self._tray = Tray(self, self.destroy)
+        if self._tray.start():
+            self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+
+    def _hide_to_tray(self) -> None:
+        self._tray.hide_window()
+        self.events.append(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "시스템",
+            "-",
+            "알림",
+            "트레이로 내려갔습니다 — 매매는 계속됩니다. "
+            "작업 표시줄 아이콘에서 '열기' 로 돌아옵니다.",
+        )
+
+    def destroy(self) -> None:  # noqa: D102
+        if getattr(self, "_tray", None) is not None:
+            self._tray.stop()
+        super().destroy()
 
     # ── 화면 조립 ───────────────────────────────────────────────
 
@@ -640,6 +671,15 @@ class App(tk.Tk):
     # ── 사용자 조작 → 명령 큐 ───────────────────────────────────
 
     def _toggle_run(self) -> None:
+        """감시 시작/중지 버튼. **누르면 한 번 묻는다.**
+
+        바로 옆이 '매매일지' 라 오클릭이 난다. 원격 접속에서 터치로 조작하면 더 그렇고,
+        장중에 실수로 중지되면 그날 매매가 멈춘다(2026-09-02 요청).
+
+        묻는 것은 **사람이 이 버튼을 누른 경우뿐**이다. 08:55 자동 시작과 15:30 자동
+        중지는 코어가 스스로 하는 것이라 여기를 지나지 않고, Discord `/시작`·`/중지` 도
+        마찬가지다. 사람이 없을 때 확인창이 떠서 스케줄이 막히면 안 된다.
+        """
         if not self._running and self._staged:
             messagebox.showwarning(
                 "감시 시작 불가",
@@ -647,7 +687,35 @@ class App(tk.Tk):
                 "각 종목의 ✎ 를 눌러 가격을 입력하거나 ✕ 로 제외한 뒤 시작하세요.",
             )
             return
+        if not self._confirm_toggle():
+            return
         self._bus.commands.put(bus.SetRunning(not self._running))
+
+    def _confirm_toggle(self) -> bool:
+        """시작/중지 확인창. 보유 종목이 있으면 몇 종목인지 함께 알린다."""
+        watched = len(self._registry)
+        held = sum(
+            1
+            for _name, _params, pos, *_rest in self._registry.values()
+            if getattr(pos, "remaining", 0)
+        )
+        if self._running:
+            detail = f"보유 중인 {held}종목이 감시에서 빠집니다." if held else ""
+            return messagebox.askyesno(
+                "감시 중지",
+                "감시를 중지할까요?\n"
+                "중지하면 진입·익절·손절 판정이 멈춥니다.\n"
+                + (f"\n{detail}" if detail else ""),
+                icon="warning",
+                default="no",  # 실수로 엔터를 쳐도 중지되지 않는다
+                parent=self,
+            )
+        return messagebox.askyesno(
+            "감시 시작",
+            f"{watched}종목 감시를 시작할까요?\n"
+            "시작하면 3선 판정에 따라 자동으로 주문이 나갑니다.",
+            parent=self,
+        )
 
     def _open_register(self) -> None:
         if self._running:

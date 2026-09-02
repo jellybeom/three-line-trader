@@ -8,6 +8,7 @@ dependencies = [
     "discord-py>=2.7.1",
     "matplotlib>=3.11.1",
     "pillow>=11.0",
+    "pystray>=0.19.5",
     "requests>=2.34.2",
     "tkcalendar>=1.6.1",
     "websockets>=16.1",
