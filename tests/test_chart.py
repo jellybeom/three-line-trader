@@ -713,3 +713,59 @@ def test_종료_차트는_매매일지_스레드로_간다(tmp_path):
     assert sent[0] == (core._date, "005930")  # 자동 차트 → 스레드
     assert sent[1] is None  # 직접 요청 → 알림 채널
     core._store.close()
+
+
+def test_차트_제목의_손익은_사이클_전체다(tmp_path):
+    """차트는 사이클에 한 번 나온다 — "이 매매로 최종 얼마를 벌었나" 를 답해야 한다.
+
+    스키마 v12 에서 손익을 날짜별로 쪼갠 뒤라 pos.realized_pnl 은 청산일 하루치뿐이다.
+    화요일 1차 익절 +4,000, 수요일 전량 매도 +6,000 이면 차트에 +6,000 만 찍혀
+    성적을 과소평가하게 된다(2026-09-03 발견). 문서·종료 알림과 같은 값이어야 한다.
+    """
+    from trader.core import Core
+    from trader.state_machine import Decision, Params, Position, Side, State
+    from trader.store import Store
+    from trader.ui import bus
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._store = Store(str(tmp_path / "t.db"))
+    params = Params(
+        line1=5_000, line2=4_500, line3=4_000, buy1_amount=500_000, buy2_amount=500_000
+    )
+    for date in ("2026-09-01", "2026-09-02"):
+        core._store.register_symbol(date, "005930", "삼성전자", params)
+    core._store.save_transition(  # 화: 1차 익절 +4,000
+        "2026-09-01",
+        "005930",
+        State.BUY1,
+        Position(State.BUY1_TP1, 5_000, 100, 60, realized_pnl=4_000, fees=100),
+        Decision(State.BUY1_TP1, Side.SELL, 40, "1차 익절"),
+        5_100,
+        5_100,
+    )
+    core._store.save_transition(  # 수: 전량 매도 +6,000
+        "2026-09-02",
+        "005930",
+        State.BUY1_TP1,
+        Position(State.CLOSED, 5_000, 100, 0, realized_pnl=6_000, fees=150),
+        Decision(State.CLOSED, Side.SELL, 60, "본절 이탈"),
+        5_100,
+        5_100,
+    )
+    core._date = "2026-09-02"
+
+    realized, fees = core._store.cycle_totals("005930", core._date)
+
+    assert realized - fees == 9_750  # 4,000+6,000 − 250, 하루치 5,850 이 아니다
+    core._store.close()
+
+
+def test_차트_손익은_워커_스레드에서_계산하지_않는다():
+    """_build_charts 는 워커 스레드에서 돈다 — SQLite 는 스레드 전용이다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core._build_charts)
+    assert "self._store" not in source
+    assert "cycle_net" in source  # 호출부가 넘겨준 값을 그대로 쓴다

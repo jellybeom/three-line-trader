@@ -2052,9 +2052,15 @@ class Core:
             (f["ts"], f["side"], f["price"])
             for f in self._store.symbol_fills(symbol, until=self._date)
         ]
+        # 손익도 여기서 뽑아 넘긴다. **사이클 전체 합산**이라야 한다 — 스키마 v12 에서
+        # 손익을 날짜별로 쪼갠 뒤라 pos.realized_pnl 은 청산일 하루치뿐이고, 전날 낸
+        # 1차 익절이 통째로 빠진다. 차트는 사이클에 한 번 나오므로 "이 매매로 최종 얼마를
+        # 벌었나" 를 답해야 하고, 그 값은 문서·종료 알림과 같아야 한다(2026-09-03).
+        cycle_realized, cycle_fees = self._store.cycle_totals(symbol, self._date)
+        cycle_net = cycle_realized - cycle_fees
         try:
             daily_path, minute_path, kospi_error = await asyncio.to_thread(
-                self._build_charts, symbol, fills
+                self._build_charts, symbol, fills, cycle_net
             )
         except Exception as e:  # noqa: BLE001 — 차트 실패가 매매에 영향 주지 않게
             self._log(symbol, "에러", f"차트 생성 실패: {e}")
@@ -2082,7 +2088,10 @@ class Core:
             self._archive_charts(symbol, daily_path, minute_path)
 
     def _build_charts(
-        self, symbol: str, fills_raw: list[tuple[str, str, float]]
+        self,
+        symbol: str,
+        fills_raw: list[tuple[str, str, float]],
+        cycle_net: float = 0.0,
     ) -> tuple[str, str, str]:
         """(워커 스레드에서 실행) REST 조회 → 일봉·3분봉 PNG 생성.
 
@@ -2128,10 +2137,11 @@ class Core:
         minute = minute_all[max(0, start_idx - 8) :]
 
         lines = (params.line1, params.line2, params.line3)
-        net = pos.realized_pnl - pos.fees
         title = f"{e['name']}({symbol}) 일봉"
         if pos.total_bought:
-            title += f" · {pos.state.value} · 세후 {net:+,.0f}원"
+            # cycle_net 은 호출부가 사이클 전체로 합산해 넘긴 값이다. 여기서 다시
+            # 계산하지 않는다 — 이 함수는 워커 스레드에서 돌고 SQLite 는 스레드 전용이다.
+            title += f" · {pos.state.value} · 세후 {cycle_net:+,.0f}원"
             if pos.avg_price and pos.high_price:
                 title += (
                     f" · 최고 {(pos.high_price - pos.avg_price) / pos.avg_price:+.1%}"
