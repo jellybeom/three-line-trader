@@ -1488,3 +1488,106 @@ def test_매수_기록이_없으면_빈_문자열이다():
     from trader.journal import compact_timeline
 
     assert compact_timeline([]) == ""
+
+
+# ── 사이클 하나에 일지 한 줄 (2026-09-03) ───────────────────────
+
+
+def _cycle_store(tmp_path):
+    """8월에 사서 9월에 판 종목 + 같은 종목 9월 재진입."""
+    from trader.state_machine import Decision, Params, Position, Side, State
+
+    store = Store(tmp_path / "t.db")
+    params = Params(
+        line1=90_000,
+        line2=85_000,
+        line3=80_000,
+        buy1_amount=200_000,
+        buy2_amount=200_000,
+    )
+
+    def step(date, from_state, pos, to, side, qty):
+        store.register_symbol(date, "326030", "SK바이오팜", params)
+        store.save_transition(
+            date,
+            "326030",
+            from_state,
+            pos,
+            Decision(to, side, qty, "t"),
+            86_950,
+            86_950,
+        )
+
+    step(
+        "2026-08-27",
+        State.WAITING,
+        Position(State.BUY1, 86_950, 1, 1),
+        State.BUY1,
+        Side.BUY,
+        1,
+    )
+    step(
+        "2026-08-31",
+        State.BUY1,
+        Position(State.BUY2, 86_950, 2, 2, fees=25),
+        State.BUY2,
+        Side.BUY,
+        1,
+    )
+    step(
+        "2026-09-01",
+        State.BUY2,
+        Position(State.CLOSED, 86_950, 2, 0, realized_pnl=3_000, fees=80),
+        State.CLOSED,
+        Side.SELL,
+        2,
+    )
+    step(
+        "2026-09-02",
+        State.CLOSED,
+        Position(State.BUY1, 86_000, 1, 1),
+        State.BUY1,
+        Side.BUY,
+        1,
+    )
+    return store
+
+
+def test_이월된_매매는_일지_목록에_한_줄만_나온다(tmp_path):
+    """8월에 사서 9월에 판 종목이 8월에 하나 9월에 하나로 보였다(2026-09-03 실측)."""
+    store = _cycle_store(tmp_path)
+
+    rows = store.journal_cycles()
+
+    # 최신 순이다 — 화면에서 최근 매매가 위에 온다
+    assert [(r["trade_date"], r["state"]) for r in rows] == [
+        ("2026-09-02", "1차 매수"),  # 재진입은 별개 사이클
+        ("2026-09-01", "종료"),  # 08-27~09-01 사이클은 청산일 한 줄
+    ]
+    store.close()
+
+
+def test_청산일이_속한_달에만_나온다(tmp_path):
+    """9월에 청산했으면 8월 목록에는 없어야 한다 — 날짜 거르기는 묶은 뒤에 한다."""
+    store = _cycle_store(tmp_path)
+
+    assert store.journal_cycles("2026-08-01", "2026-08-31") == []
+    assert len(store.journal_cycles("2026-09-01", "2026-09-30")) == 2
+    store.close()
+
+
+def test_일지를_지워도_매매_기록은_남는다(tmp_path):
+    """체결과 손익은 실제로 일어난 일이다 — 지우면 집계와 증권사 대조가 어긋난다."""
+    store = _cycle_store(tmp_path)
+    store.save_thread("2026-09-01", "326030", "111")
+    store.replace_journal_text("2026-09-01", "326030", "잘함", "아쉬움")
+
+    store.delete_journal("2026-09-01", "326030")
+
+    assert store.journal_text("2026-09-01", "326030")[:2] == ("", "")
+    assert store.thread_of("2026-09-01", "326030") == ""  # 스레드 연결도 끊는다
+    rows = store.journal_cycles()
+    assert len(rows) == 2  # 매매는 그대로 목록에 있다
+    closed = next(r for r in rows if r["state"] == "종료")
+    assert closed["realized_pnl"] == 3_000
+    store.close()

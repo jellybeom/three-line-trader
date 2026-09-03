@@ -1140,7 +1140,13 @@ class App(tk.Tk):
             select=getattr(self, "_journal_select", None),
             on_period=self._request_journal_period,
             months=months,
+            on_delete=self._delete_journal,
         )
+
+    def _delete_journal(self, trade_date: str, symbol: str) -> None:
+        """일지 삭제 후 목록을 다시 받는다. 확인창은 다이얼로그가 이미 띄웠다."""
+        self._bus.commands.put(bus.DeleteJournal(trade_date, symbol))
+        self._bus.commands.put(bus.RequestJournal())
 
     def _save_journal(self, trade_date: str, symbol: str, good: str, bad: str) -> None:
         self._bus.commands.put(bus.SaveJournal(trade_date, symbol, good, bad))

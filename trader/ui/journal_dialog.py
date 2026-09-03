@@ -367,6 +367,7 @@ class JournalDialog(tk.Toplevel):
         select: tuple[str, str] | None = None,
         on_period: Callable[[str, str], None] | None = None,
         months: tuple = (),
+        on_delete: Callable[[str, str], None] | None = None,
     ):
         super().__init__(master)
         self.title("매매일지")
@@ -377,6 +378,7 @@ class JournalDialog(tk.Toplevel):
         self._visible = entries  # 검색·필터를 통과해 지금 목록에 보이는 것
         self._on_save = on_save
         self._on_period_change = on_period
+        self._on_delete = on_delete
         self._current: dict | None = None
         self._views: dict[str, ChartView] = {}
 
@@ -479,6 +481,11 @@ class JournalDialog(tk.Toplevel):
         )
         self._list.pack(fill="both", expand=True)
         self._list.bind("<<ListboxSelect>>", self._on_select)
+        # 삭제는 오른쪽 클릭 메뉴에만 둔다. 버튼으로 두면 저장 옆에 놓이게 되는데,
+        # 되돌릴 수 없는 조작을 매일 누르는 버튼 옆에 두면 안 된다.
+        self._menu = tk.Menu(self, tearoff=0, **theme.classic(self, "menu"))
+        self._menu.add_command(label="일지 삭제", command=self._delete_current)
+        self._list.bind("<Button-3>", self._popup_menu)
         # 성적 요약 — 목록 폭에 맞춰 줄바꿈한다 (칸을 좁히면 두 줄이 된다).
         # wraplength 를 처음부터 정해둔다. 안 그러면 이 줄이 긴 글자 그대로 폭을 요구해
         # 왼쪽 칸이 통째로 넓어지고 차트가 밀린다(2026-08-12).
@@ -638,6 +645,42 @@ class JournalDialog(tk.Toplevel):
                 self._list.see(i)
                 self._show(entry)
                 return
+
+    def _popup_menu(self, event) -> None:
+        """오른쪽 클릭한 줄을 먼저 고르고 메뉴를 연다.
+
+        고르지 않고 열면 방금 클릭한 것과 다른 줄이 지워진다 — 되돌릴 수 없는 조작에서
+        가장 흔한 사고다.
+        """
+        index = self._list.nearest(event.y)
+        if index < 0 or index >= len(self._visible):
+            return
+        self._list.selection_clear(0, "end")
+        self._list.selection_set(index)
+        self._on_select()
+        self._menu.tk_popup(event.x_root, event.y_root)
+
+    def _delete_current(self) -> None:
+        """선택한 일지를 지운다. **매매 기록은 남는다.**"""
+        entry = self._current
+        if not entry:
+            return
+        if not messagebox.askyesno(
+            "일지 삭제",
+            f"{entry['trade_date']} {entry['name']}({entry['symbol']}) 의 일지를\n"
+            "삭제할까요?\n\n"
+            "잘한 점·아쉬운 점과 Discord 스레드 연결이 지워집니다.\n"
+            "체결 기록과 손익은 그대로 남습니다.\n\n"
+            "되돌릴 수 없습니다.",
+            icon="warning",
+            default="no",
+            parent=self,
+        ):
+            return
+        if self._on_delete is not None:
+            # 목록 갱신은 앱이 맡는다. 지운 뒤 코어가 새 목록을 보내오면 set_entries 로
+            # 갈아끼워지므로, 여기서 창을 닫거나 목록을 직접 손대지 않는다.
+            self._on_delete(entry["trade_date"], entry["symbol"])
 
     def _on_select(self, _event=None) -> None:
         sel = self._list.curselection()

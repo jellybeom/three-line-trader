@@ -961,6 +961,45 @@ class Store:
                WHERE p.total_bought > 0 ORDER BY ym DESC""").fetchall()
         return [r["ym"] for r in rows]
 
+    def delete_journal(self, trade_date: str, symbol: str) -> None:
+        """일지 본문과 Discord 스레드 연결을 지운다. **매매 기록은 건드리지 않는다.**
+
+        positions·events 는 그대로 둔다 — 체결과 손익은 실제로 일어난 일이고, 지우면
+        손익 집계와 증권사 대조가 어긋난다. 지우는 것은 사람이 쓴 코멘트와 그 매매가
+        어느 스레드에 붙어 있었는지뿐이다.
+
+        스레드 연결을 함께 지우는 이유는, 남겨 두면 그 스레드의 답글을 다시 읽어 일지가
+        되살아나기 때문이다. Discord 스레드 자체는 지우지 않는다 — 봇에게 남의 메시지를
+        지울 권한을 주지 않았고, 줄 이유도 없다.
+        """
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM journal WHERE trade_date=? AND symbol=?",
+                (trade_date, symbol),
+            )
+            self._conn.execute(
+                "DELETE FROM journal_sync WHERE trade_date=? AND symbol=?",
+                (trade_date, symbol),
+            )
+
+    def journal_cycles(self, since: str = "", until: str = "") -> list[dict]:
+        """일지 목록 — **매매 사이클 하나에 한 줄**. 날짜 거르기는 묶은 뒤에 한다.
+
+        journal_entries 도 _collapse_cycles 로 묶기는 하는데, **날짜를 SQL 단계에서
+        먼저 자른다.** 그러면 8월만 조회했을 때 8월 안의 행들끼리만 묶여, 9월에 청산한
+        매매가 8월 목록에 '보유 중' 으로 한 줄 더 남는다 — 같은 매매가 8월에 하나
+        9월에 하나로 보였다(2026-09-03 실측).
+
+        그래서 여기서는 전체를 읽어 묶고 나서 **대표 날짜(사이클의 마지막 날)** 로
+        거른다. 조회는 6개월치 1,200행에 30ms 남짓이라 부담이 없다.
+        """
+        return [
+            row
+            for row in self.journal_entries()
+            if (not since or row["trade_date"] >= since)
+            and (not until or row["trade_date"] <= until)
+        ]
+
     def journal_entries(self, since: str = "", until: str = "") -> list[dict]:
         """일지 대상 목록 — 매매가 있었던 종목과 그 코멘트 작성 여부.
 

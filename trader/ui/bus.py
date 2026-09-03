@@ -324,6 +324,14 @@ class SaveJournal:
 
 
 @dataclass(frozen=True)
+class DeleteJournal:
+    """일지 삭제 — 코멘트와 스레드 연결만. 매매 기록은 남는다."""
+
+    trade_date: str
+    symbol: str
+
+
+@dataclass(frozen=True)
 class RequestDailySummary:
     """오늘 매매 요약을 Discord 로 즉시 발송 (스케줄과 별개로 수동 확인용)."""
 

@@ -515,6 +515,7 @@ class Core:
                 bus.Notice()
                 | bus.RequestJournal()
                 | bus.SaveJournal()
+                | bus.DeleteJournal()
                 | bus.RequestDailySummary()
                 | bus.ChartRequest()
                 | bus.SendChartDiscord()
@@ -783,6 +784,11 @@ class Core:
                 self._log(sym, kind, text)
             case bus.RequestJournal(since=since, until=until):
                 await self._send_journal(since, until)
+            case bus.DeleteJournal(trade_date=td, symbol=sym):
+                # 코멘트와 스레드 연결만 지운다 — 체결과 손익은 실제로 일어난 일이라
+                # 지우면 집계와 증권사 대조가 어긋난다(store.delete_journal 참고).
+                self._store.delete_journal(td, sym)
+                self._log(sym, "일지", f"{td} 일지 삭제", notify=False)
             case bus.SaveJournal(trade_date=td, symbol=sym, good=good, bad=bad):
                 # replace_journal_text 를 쓴다. save_journal 은 빈 값을 '건드리지 말라'
                 # 로 읽어서(차트 경로와 코멘트가 다른 시점에 같은 행을 갱신하기 때문)
@@ -2569,7 +2575,7 @@ class Core:
         )
         # 일지 미작성 안내 — 늦어도 주말에는 쓰기로 한 약속을 상기시킨다
         pending = [
-            e for e in self._store.journal_entries() if not (e["good"] or e["bad"])
+            e for e in self._store.journal_cycles() if not (e["good"] or e["bad"])
         ]
         if pending:
             recent = ", ".join(
@@ -2665,7 +2671,8 @@ class Core:
 
     def _build_journal(self, since: str, until: str) -> tuple[list[dict], list[str]]:
         """일지 목록 + 기록이 있는 달."""
-        rows = self._store.journal_entries(since=since, until=until)
+        # 사이클 하나에 한 줄. 이월된 매매가 날짜 수만큼 늘어나면 안 된다.
+        rows = self._store.journal_cycles(since=since, until=until)
         cycles = self._store.cycles_for(
             [(e["symbol"], e.get("trade_date", "")) for e in rows]
         )
