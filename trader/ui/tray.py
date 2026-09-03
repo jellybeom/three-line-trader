@@ -28,37 +28,78 @@ pystray 가 없거나 트레이를 못 만드는 환경(리눅스 CI 등)에서�
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     import tkinter as tk
 
 _TITLE = "three-line-trader"
+_ICON = Path(__file__).resolve().parents[2] / "assets" / "three-line-trader-512.png"
+
+# 상태 점 색. 작업 표시줄에서 아이콘은 16~32px 로 그려지므로, 글자나 모양이 아니라
+# **색**으로만 구분해야 알아볼 수 있다.
+_DOT = {
+    "감시 중": (46, 204, 113),  # 초록
+    "중지": (127, 133, 140),  # 회색
+    "미연결": (231, 76, 60),  # 빨강
+}
 
 
-def _make_image():
-    """아이콘 그림. 3선 전략이 보이도록 가로선 세 개를 그린다."""
+def _fallback_image(size: int):
+    """아이콘 파일이 없을 때의 대비책 — 3선을 그린다."""
     from PIL import Image, ImageDraw
 
-    size = 64
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle(
-        [2, 2, size - 3, size - 3], radius=12, fill=(32, 34, 38, 255)
-    )
+    unit = size / 64
     for y, color in ((20, (231, 76, 60)), (32, (241, 196, 15)), (44, (52, 152, 219))):
-        draw.line([12, y, size - 12, y], fill=color, width=4)
+        draw.line(
+            [12 * unit, y * unit, size - 12 * unit, y * unit],
+            fill=color,
+            width=max(2, int(4 * unit)),
+        )
     return image
+
+
+def make_image(state: str = "중지", size: int = 128):
+    """트레이 아이콘 그림. 오른쪽 아래에 **상태 점**을 얹는다.
+
+    점을 쓰는 이유는 트레이 아이콘이 16~32px 로 줄어들기 때문이다. 그 크기에서는 글자도
+    모양도 구분되지 않아 색만 남는다. 흰 테두리를 두르는 것은 밝은 작업 표시줄과 어두운
+    작업 표시줄 양쪽에서 점이 묻히지 않게 하기 위해서다.
+    """
+    from PIL import Image, ImageDraw
+
+    try:
+        base = Image.open(_ICON).convert("RGBA").resize((size, size), Image.LANCZOS)
+    except (OSError, ValueError):
+        base = _fallback_image(size)
+
+    r = size * 0.30  # 점 지름
+    pad = size * 0.02
+    box = [size - r - pad, size - r - pad, size - pad, size - pad]
+    draw = ImageDraw.Draw(base)
+    draw.ellipse(box, fill=(255, 255, 255, 255))  # 흰 테두리
+    inset = size * 0.035
+    draw.ellipse(
+        [box[0] + inset, box[1] + inset, box[2] - inset, box[3] - inset],
+        fill=_DOT.get(state, _DOT["중지"]) + (255,),
+    )
+    return base
 
 
 class Tray:
     """앱에 붙는 트레이 아이콘. 만들 수 없으면 조용히 비활성 상태로 남는다."""
 
-    def __init__(self, root: "tk.Misc", on_quit) -> None:
+    def __init__(self, root: "tk.Misc", on_quit, on_open_folder=None) -> None:
         self._root = root
         self._on_quit = on_quit
+        self._on_open_folder = on_open_folder
         self._icon = None
         self._thread = None
+        self._state = "중지"
+        self._tooltip = _TITLE
 
     @property
     def active(self) -> bool:
@@ -77,15 +118,36 @@ class Tray:
         try:
             menu = pystray.Menu(
                 pystray.MenuItem("열기", self._show, default=True),
+                pystray.MenuItem("폴더 열기", self._open_folder),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem("종료", self._quit),
             )
-            self._icon = pystray.Icon(_TITLE, _make_image(), _TITLE, menu)
+            self._icon = pystray.Icon(
+                _TITLE, make_image(self._state), self._tooltip, menu
+            )
             self._thread = threading.Thread(target=self._icon.run, daemon=True)
             self._thread.start()
         except Exception:  # noqa: BLE001 — 트레이 실패가 프로그램을 막지 않게
             self._icon = None
             return False
         return True
+
+    def update(self, state: str, tooltip: str) -> None:
+        """상태 점과 툴팁을 갱신한다. 바뀐 것이 없으면 아무것도 하지 않는다.
+
+        pystray 는 아이콘을 새로 그릴 때마다 OS 에 갱신을 요청하므로, 틱마다 부르면
+        낭비다. 호출부가 주기를 정하고 여기서 같은 값을 걸러 낸다.
+        """
+        if self._icon is None or (state, tooltip) == (self._state, self._tooltip):
+            return
+        redraw = state != self._state
+        self._state, self._tooltip = state, tooltip
+        try:
+            self._icon.title = tooltip
+            if redraw:
+                self._icon.icon = make_image(state)
+        except Exception:  # noqa: BLE001
+            pass
 
     def hide_window(self) -> None:
         """창을 트레이로 내린다."""
@@ -100,8 +162,11 @@ class Tray:
         self._root.lift()
         self._root.focus_force()
 
+    def _open_folder(self, _icon=None, _item=None) -> None:
+        if self._on_open_folder is not None:
+            self._root.after(0, self._on_open_folder)
+
     def _quit(self, _icon=None, _item=None) -> None:
-        self.stop()
         self._root.after(0, self._on_quit)
 
     def stop(self) -> None:

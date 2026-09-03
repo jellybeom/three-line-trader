@@ -21,6 +21,7 @@ import re
 import sys
 import tkinter as tk
 import traceback
+from pathlib import Path
 from datetime import datetime, time as dtime, timedelta
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
@@ -241,6 +242,7 @@ class App(tk.Tk):
         self._current_date: str = datetime.now().strftime("%Y-%m-%d")
 
         self.title("three-line-trader")
+        self._set_window_icon()
         # 위젯을 만들기 **전에** 테마를 적용한다. 고전 tk 위젯(목록·코멘트·메뉴)은
         # 만들 때 색을 넣으므로, 뒤늦게 적용하면 그것들만 옛 색으로 남는다.
         self._theme_mode = theme.read_mode()
@@ -272,9 +274,71 @@ class App(tk.Tk):
         멈춘다(2026-09-02 실제로 겪음). 트레이를 못 만드는 환경에서는 ✕ 가 평소대로
         종료로 남는다 — 트레이가 없다고 프로그램이 안 뜨면 본말이 뒤바뀐다.
         """
-        self._tray = Tray(self, self.destroy)
+        self._tray = Tray(self, self.destroy, self._open_data_folder)
         if self._tray.start():
             self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
+
+    def _set_window_icon(self) -> None:
+        """제목 표시줄과 작업 표시줄 아이콘. 없거나 실패해도 그냥 넘어간다."""
+        assets = Path(__file__).resolve().parents[2] / "assets"
+        try:
+            if sys.platform == "win32" and (assets / "three-line-trader.ico").exists():
+                self.iconbitmap(str(assets / "three-line-trader.ico"))
+                return
+            png = assets / "three-line-trader-512.png"
+            if png.exists():
+                self._icon_image = tk.PhotoImage(file=str(png))
+                self.iconphoto(True, self._icon_image)
+        except tk.TclError:
+            pass  # 아이콘이 없다고 프로그램이 안 뜨면 안 된다
+
+    def _open_data_folder(self) -> None:
+        """기록 폴더를 탐색기로 연다.
+
+        창을 트레이에 내려 둔 채로도 로그·DB·문서를 볼 수 있어야 한다. 창을 다시 띄우고
+        메뉴를 찾아 들어가는 것보다 여기서 바로 여는 편이 빠르다.
+        """
+        import subprocess
+
+        folder = Path(__file__).resolve().parents[2]
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", str(folder)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except OSError:
+            pass  # 탐색기를 못 열어도 프로그램은 계속 돈다
+
+    def _tray_status(self) -> "tuple[str, str]":
+        """(상태, 툴팁). 창이 숨겨져 있을 때 **아이콘만 보고 알아야 할 것**만 담는다.
+
+        고른 것은 넷이다.
+        - **감시 중인지** — 점 색으로도 보이지만 글자로 한 번 더
+        - **실전/모의** — 모의로 돌고 있는 줄 모르고 하루를 보내면 그날이 통째로 날아간다
+        - **감시·보유 종목 수** — 지금 무엇을 들고 있는지
+        - **마지막 틱 시각** — 켜져 있어도 시세가 끊기면 판정이 멈춘다.
+          '살아 있는가' 를 한 값으로 답하는 것은 이것뿐이다
+
+        손익은 넣지 않는다. 툴팁은 마우스를 올릴 때마다 뜨는 자리라 금액이 계속 눈에
+        들어오면 복기가 아니라 조바심이 된다 — 그 숫자는 화면과 요약에 이미 있다.
+        """
+        mode = "실전투자" if self._mode_real else "모의투자"
+        held = sum(
+            1
+            for _name, _params, pos, *_rest in self._registry.values()
+            if getattr(pos, "remaining", 0)
+        )
+        state = "감시 중" if self._running else "중지"
+        if self._running and self._last_tick == "--:--:--":
+            state = "미연결"  # 감시 중인데 시세가 한 번도 안 왔다
+        lines = [
+            f"three-line-trader — {state}",
+            f"{mode} · 감시 {len(self._registry)} · 보유 {held}",
+            f"마지막 틱 {self._last_tick}",
+        ]
+        return state, "\n".join(lines)
 
     def _hide_to_tray(self) -> None:
         self._tray.hide_window()
@@ -1376,6 +1440,8 @@ class App(tk.Tk):
             phase = "장 마감"
         self._market_label.configure(text=phase)
         self._refresh_holding()
+        if getattr(self, "_tray", None) is not None:
+            self._tray.update(*self._tray_status())
         self.after(1000, self._refresh_clock)
 
     def _refresh_holding(self) -> None:

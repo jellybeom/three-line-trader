@@ -650,3 +650,63 @@ def test_트레이가_동작하면_X는_숨김이_된다(app, monkeypatch):
     )
     app._hide_to_tray()
     assert hidden  # 종료가 아니라 숨김
+
+
+# ── 트레이 상태 점 · 툴팁 · 메뉴 (2026-09-03) ───────────────────
+
+
+def test_상태_점은_감시_여부와_시세를_구분한다(app):
+    """트레이 아이콘은 16~32px 로 줄어든다 — 글자도 모양도 안 보이고 색만 남는다."""
+    state, _tip = app._tray_status()
+    assert state == "중지"
+
+    app._running = True
+    assert app._tray_status()[0] == "미연결"  # 감시 중인데 시세가 한 번도 안 왔다
+
+    app._last_tick = "09:01:23"
+    assert app._tray_status()[0] == "감시 중"
+
+
+def test_툴팁은_창을_안_보고도_알아야_할_것만_담는다(app):
+    """모의로 돌고 있는 줄 모르고 하루를 보내면 그날이 통째로 날아간다."""
+    app._running = True
+    app._last_tick = "09:01:23"
+    app.positions.upsert("005930", "삼성전자", Position(), _params())
+    app._registry["005930"] = ("삼성전자", _params(), Position(), "", "", "")
+
+    _state, tip = app._tray_status()
+
+    assert "모의투자" in tip  # 실전/모의가 한눈에
+    assert "감시 1" in tip
+    assert "09:01:23" in tip
+
+
+def test_툴팁에_손익은_넣지_않는다(app):
+    """마우스를 올릴 때마다 금액이 눈에 들어오면 복기가 아니라 조바심이 된다."""
+    app._running = True
+    _state, tip = app._tray_status()
+    assert "원" not in tip and "손익" not in tip
+
+
+def test_상태가_같으면_아이콘을_다시_그리지_않는다(app, monkeypatch):
+    """1초마다 도는 자리라 매번 OS 에 갱신을 요청하면 낭비다."""
+    from trader.ui.tray import Tray
+
+    drawn = []
+    monkeypatch.setattr("trader.ui.tray.make_image", lambda *a, **k: drawn.append(1))
+    tray = Tray(app, app.destroy)
+    tray._icon = type("I", (), {"title": "", "icon": None})()
+
+    tray.update("감시 중", "첫 상태")
+    tray.update("감시 중", "첫 상태")  # 같은 값 — 무시
+    tray.update("감시 중", "툴팁만 바뀜")  # 점 색은 그대로
+
+    assert len(drawn) == 1
+
+
+def test_트레이_아이콘은_준비된_그림을_쓴다():
+    """assets 에 아이콘이 있는데 코드가 안 쓰고 있었다."""
+    from trader.ui.tray import _ICON, make_image
+
+    assert _ICON.exists()
+    assert make_image("감시 중", 64).size == (64, 64)
