@@ -521,11 +521,22 @@ def build_daily_summary_embed(
     account: dict | None = None,
     index_rate: float | None = None,
     holdings: dict[str, str] | None = None,
+    cycle_pnl: dict[str, tuple[float, float]] | None = None,
 ) -> dict:
     """일일 요약 Discord embed — 왼쪽 색 띠와 항목 분리로 한눈에 읽히게 만든다.
 
     같은 내용을 줄글로 보내면 색·구분이 없어 눈에 들어오지 않는다(2026-07-27 피드백).
     embed 는 손익 부호에 따라 초록/빨강 띠가 붙고, 종목마다 필드로 분리된다.
+
+    **손익 기준이 머리글과 종목별 줄에서 다르다.** 답하는 질문이 다르기 때문이다.
+
+    - 머리글 = **오늘 실현된 것의 합계**. "오늘 계좌에 얼마가 들어왔나" 다. 날짜별로
+      더했을 때 총합이 맞아야 하므로 그날 몫만 센다.
+    - 종목별 줄(종료) = **그 매매의 최종 성적**. 이월된 매매는 며칠에 걸쳐 있어 하루치만
+      적으면 전날 낸 익절이 통째로 빠진다. 문서·차트·종료 알림과 같은 값이다.
+
+    cycle_pnl 은 {종목: (세전, 비용)} 로 호출부(코어)가 사이클 전체를 합산해 넘긴다 —
+    notifier 는 DB 를 모른다. 보유 중인 종목은 아직 끝나지 않았으므로 손익을 적지 않는다.
     """
     import datetime as _dt
 
@@ -533,6 +544,7 @@ def build_daily_summary_embed(
     traded = [s for s in symbols if s["total_bought"] > 0]
     closed = [s for s in traded if s["state"] == "종료"]
     holding = [s for s in traded if s["state"] != "종료"]
+    # 머리글은 **오늘 실현분**이다 (positions 의 그날 행 = 스키마 v12 이후 하루치).
     realized = sum(s["realized_pnl"] for s in traded)
     fees = sum(s["fees"] for s in traded)
     net = realized - fees
@@ -544,7 +556,8 @@ def build_daily_summary_embed(
     else:
         sign = "📈" if net > 0 else ("📉" if net < 0 else "➖")
         head = (
-            f"{sign}  **{net:+,.0f}원**  (세전 {realized:+,.0f} · 비용 {fees:,.0f})\n"
+            f"{sign}  오늘 실현 **{net:+,.0f}원**"
+            f"  (세전 {realized:+,.0f} · 비용 {fees:,.0f})\n"
             f"체결 {len(fills)}건 · 진입 {len(traded)}종목 · 청산 {len(closed)}종목"
         )
         if invested:
@@ -556,7 +569,12 @@ def build_daily_summary_embed(
         own = [f for f in fills if f["symbol"] == s["symbol"]]
         bought = sum(f["qty"] for f in own if f["side"] == "매수")
         sold = sum(f["qty"] for f in own if f["side"] == "매도")
-        s_net = s["realized_pnl"] - s["fees"]
+        # 종료된 매매는 **사이클 전체**로 적는다. 호출부가 넘긴 값이 없으면 그날 행으로
+        # 물러난다 — 요약이 통째로 빠지는 것보다 낫다.
+        s_realized, s_fees = (cycle_pnl or {}).get(
+            s["symbol"], (s["realized_pnl"], s["fees"])
+        )
+        s_net = s_realized - s_fees
         if s["state"] != "종료":
             icon = "⚠️"
         elif s_net > 0:
@@ -570,8 +588,13 @@ def build_daily_summary_embed(
             + (f" · 매도 `{sold}`주" if sold else "")
             + (f" · 잔량 `{s['remaining']}`주" if s["remaining"] else "")
         ]
-        if s["realized_pnl"]:
-            lines.append(f"실현 **{s_net:+,.0f}원** (세전 {s['realized_pnl']:+,.0f})")
+        if s["state"] == "종료" and (s_realized or s_fees):
+            # 보유 중인 종목에는 손익을 적지 않는다 — 아직 끝나지 않은 매매의 중간 손익은
+            # 오해를 부른다. 오늘 실현한 몫은 머리글 합계에 이미 들어가 있다.
+            # '매매 손익' 이라고 적는다. 머리글의 '오늘 실현' 과 기준이 달라서, 같은
+            # 단어를 쓰면 두 숫자가 안 맞을 때 오류로 보인다. 이월된 매매는 여기 값이
+            # 머리글보다 클 수 있고 그게 정상이다.
+            lines.append(f"매매 손익 **{s_net:+,.0f}원** (세전 {s_realized:+,.0f})")
         if s["avg_price"] and s["high_price"]:
             high = (s["high_price"] - s["avg_price"]) / s["avg_price"]
             low = (s["low_price"] - s["avg_price"]) / s["avg_price"]

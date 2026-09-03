@@ -575,3 +575,106 @@ def test_경고가_많아도_열_건까지만_보낸다():
         "2026-08-31", [f"종목{i} 경고" for i in range(30)], total=80
     )
     assert embed["description"].count("•") == 10
+
+
+# ── 요약 손익 기준 (2026-09-03) ─────────────────────────────────
+
+
+def _summary_rows():
+    """이월돼 오늘 청산한 종목 하나 + 오늘 부분 익절만 하고 이월되는 종목 하나."""
+    return [
+        {
+            "symbol": "038680",
+            "name": "에스넷",
+            "state": "종료",
+            "avg_price": 3_908.0,
+            "total_bought": 70,
+            "remaining": 0,
+            "realized_pnl": 2_822.0,
+            "fees": 593.0,  # 오늘 몫
+            "high_price": 4_135.0,
+            "low_price": 3_880.0,
+            "day_open": 3_900.0,
+            "day_close": 3_880.0,
+            "memo": "",
+            "tags": "",
+            "base_date": "",
+            "line1": 0,
+            "day_low": 0,
+        },
+        {
+            "symbol": "134580",
+            "name": "탑코미디어",
+            "state": "2차 매수",
+            "avg_price": 3_287.0,
+            "total_bought": 83,
+            "remaining": 83,
+            "realized_pnl": 1_500.0,
+            "fees": 100.0,  # 오늘 부분 익절
+            "high_price": 3_400.0,
+            "low_price": 3_200.0,
+            "day_open": 3_360.0,
+            "day_close": 3_215.0,
+            "memo": "",
+            "tags": "",
+            "base_date": "",
+            "line1": 0,
+            "day_low": 0,
+        },
+    ]
+
+
+def test_종료된_매매는_사이클_전체_손익을_적는다():
+    """이월된 매매는 며칠에 걸쳐 있다 — 하루치만 적으면 전날 익절이 통째로 빠진다."""
+    from trader.notifier import build_daily_summary_embed
+
+    embed = build_daily_summary_embed(
+        "2026-09-03",
+        _summary_rows(),
+        [],
+        cycle_pnl={"038680": (6_822.0, 613.0)},  # 어제 익절 4,000 포함
+    )
+    field = next(f for f in embed["fields"] if "에스넷" in f["name"])
+
+    assert "매매 손익 **+6,209원**" in field["value"]  # 6,822 − 613
+    assert "세전 +6,822" in field["value"]
+    assert "+2,229" not in field["value"]  # 하루치가 아니다
+
+
+def test_보유_중인_종목에는_손익을_적지_않는다():
+    """아직 끝나지 않은 매매의 중간 손익은 오해를 부른다."""
+    from trader.notifier import build_daily_summary_embed
+
+    embed = build_daily_summary_embed("2026-09-03", _summary_rows(), [])
+    field = next(f for f in embed["fields"] if "탑코미디어" in f["name"])
+
+    assert "손익" not in field["value"]
+    assert "다음 매매일로 이월하세요" in field["value"]
+
+
+def test_머리글은_오늘_실현분_합계다():
+    """날짜별로 더했을 때 총합이 맞아야 하므로 그날 몫만 센다.
+
+    보유 종목의 오늘 익절도 계좌에 들어온 돈이라 합계에는 들어간다 — 종목별 줄에서만
+    안 보일 뿐이다.
+    """
+    from trader.notifier import build_daily_summary_embed
+
+    embed = build_daily_summary_embed(
+        "2026-09-03", _summary_rows(), [], cycle_pnl={"038680": (6_822.0, 613.0)}
+    )
+    head = embed["description"]
+
+    # (2,822−593) + (1,500−100) = 3,629 — 사이클 합산이 섞여 들지 않았다
+    assert "오늘 실현 **+3,629원**" in head
+    assert "기준이 다르다" not in head  # 군더더기 없이 라벨로만 구분
+
+
+def test_사이클_손익이_없으면_그날_행으로_물러난다():
+    """요약이 통째로 빠지는 것보다 하루치라도 보이는 편이 낫다."""
+    from trader.notifier import build_daily_summary_embed
+
+    embed = build_daily_summary_embed("2026-09-03", _summary_rows(), [])
+    field = next(f for f in embed["fields"] if "에스넷" in f["name"])
+
+    assert "매매 손익 **+2,229원**" in field["value"]

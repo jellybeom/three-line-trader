@@ -1896,9 +1896,14 @@ class Core:
                 deposit,
                 await self.refresh_account(),
                 holdings=self._holding_labels(date),
+                cycle_pnl=self._cycle_pnl(date, symbols),
             )
         return build_daily_summary_embed(  # 과거는 기록만
-            date, symbols, fills, holdings=self._holding_labels(date)
+            date,
+            symbols,
+            fills,
+            holdings=self._holding_labels(date),
+            cycle_pnl=self._cycle_pnl(date, symbols),
         )
 
     def trade_dates(self, limit: int = 10) -> list[str]:
@@ -2560,6 +2565,7 @@ class Core:
             deposit,
             account,
             holdings=self._holding_labels(self._date),
+            cycle_pnl=self._cycle_pnl(self._date, symbols),
         )
         # 일지 미작성 안내 — 늦어도 주말에는 쓰기로 한 약속을 상기시킨다
         pending = [
@@ -2872,6 +2878,22 @@ class Core:
         return format_holding(
             e.get("entry_ts", ""), e.get("exit_ts", ""), self._hold_days(symbol)
         )
+
+    def _cycle_pnl(self, trade_date: str, symbols: list[dict]) -> dict[str, tuple]:
+        """{종목: (세전, 비용)} — **종료된 매매만**, 사이클 전체로 합산해 돌려준다.
+
+        스키마 v12 에서 손익을 날짜별로 쪼갠 뒤라 positions 의 그날 행은 하루치뿐이다.
+        이월된 매매는 전날 낸 1차 익절이 통째로 빠지므로, 요약의 종목별 줄이 그 매매의
+        최종 성적을 답하려면 여기서 다시 더해야 한다(2026-09-03).
+
+        보유 중인 종목은 담지 않는다 — 아직 끝나지 않은 매매의 중간 손익은 오해를 부르고,
+        오늘 실현한 몫은 요약 머리글에 이미 들어가 있다.
+        """
+        return {
+            s["symbol"]: self._store.cycle_totals(s["symbol"], trade_date)
+            for s in symbols
+            if s.get("state") == State.CLOSED.value and s.get("total_bought")
+        }
 
     def _holding_labels(self, trade_date: str) -> dict[str, str]:
         """일일 요약용 {종목: 보유기간}. 과거 날짜도 기록에서 그대로 만들 수 있다."""

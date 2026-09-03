@@ -290,3 +290,70 @@ def test_이관_전에_DB_를_복사해_둔다(tmp_path):
 
     Store(path).close()  # 열면서 이관된다
     assert Path(f"{path}.v11.bak").exists()
+
+
+# ── 요약 종목별 줄은 사이클 전체 (2026-09-03) ───────────────────
+
+
+def test_종료된_매매만_사이클_손익으로_넘긴다(tmp_path):
+    """보유 중인 종목은 담지 않는다 — 오늘 실현분은 머리글 합계에 이미 있다."""
+    from trader.core import Core
+    from trader.state_machine import Decision, Params, Position, Side, State
+    from trader.store import Store
+    from trader.ui import bus
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._store = Store(str(tmp_path / "t.db"))
+    params = Params(
+        line1=5_000, line2=4_500, line3=4_000, buy1_amount=500_000, buy2_amount=500_000
+    )
+    for date in ("2026-09-02", "2026-09-03"):
+        for sym, name in (("005930", "삼성전자"), ("035420", "네이버")):
+            core._store.register_symbol(date, sym, name, params)
+    # 삼성전자: 어제 1차 익절 +4,000 → 오늘 전량 매도 +6,000 (종료)
+    core._store.save_transition(
+        "2026-09-02",
+        "005930",
+        State.BUY1,
+        Position(State.BUY1_TP1, 5_000, 100, 60, realized_pnl=4_000, fees=100),
+        Decision(State.BUY1_TP1, Side.SELL, 40, "1차 익절"),
+        5_100,
+        5_100,
+    )
+    core._store.save_transition(
+        "2026-09-03",
+        "005930",
+        State.BUY1_TP1,
+        Position(State.CLOSED, 5_000, 100, 0, realized_pnl=6_000, fees=150),
+        Decision(State.CLOSED, Side.SELL, 60, "본절 이탈"),
+        5_100,
+        5_100,
+    )
+    # 네이버: 오늘 부분 익절만 하고 이월 (보유 중)
+    core._store.save_transition(
+        "2026-09-03",
+        "035420",
+        State.BUY1,
+        Position(State.BUY1_TP1, 200_000, 10, 6, realized_pnl=1_500, fees=100),
+        Decision(State.BUY1_TP1, Side.SELL, 4, "1차 익절"),
+        206_000,
+        206_000,
+    )
+    core._date = "2026-09-03"
+    symbols, _fills = core._store.daily_report("2026-09-03")
+
+    pnl = core._cycle_pnl("2026-09-03", symbols)
+
+    assert set(pnl) == {"005930"}  # 종료된 것만
+    assert pnl["005930"] == (10_000, 250)  # 어제 4,000 + 오늘 6,000
+    core._store.close()
+
+
+def test_요약이_사이클_손익을_실제로_받는다(tmp_path):
+    """세 호출부 중 하나라도 빠뜨리면 그 경로만 조용히 하루치로 남는다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core)
+    assert source.count("build_daily_summary_embed(") == source.count("cycle_pnl=")
