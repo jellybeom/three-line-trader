@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import re
+
 
 class NotifierError(RuntimeError):
     """알림 구성·발송 실패."""
@@ -447,23 +449,90 @@ def build_batch_embed(items: list[tuple[str, str, str]]) -> dict:
     return embed
 
 
-def proximity_rows(symbols: list[dict]) -> list[tuple[float, dict]]:
+def block_reason(text: str) -> str:
+    """보류 사유를 묶을 수 있는 짧은 이름으로. `최대 종목 수(7) 도달 — …` → `최대 종목 수`
+
+    괄호 안의 숫자를 떼는 이유는 그것이 설정값이라 같은 사유가 갈라지기 때문이다.
+    """
+    head = text.split("—")[0].strip()
+    return re.sub(r"\s*\(.*?\)\s*", " ", head).replace(" 도달", "").strip() or "기타"
+
+
+def proximity_rows(
+    symbols: list[dict], exclude: "set[str] | None" = None
+) -> list[tuple[float, dict]]:
     """미진입 종목의 (1선 대비 최저가 괴리율, 종목) — 가까운 순.
 
     진입이 없는 날이 '설정이 보수적' 인지 '시장이 안 맞는' 것인지 구분하는 근거다.
+
+    exclude 는 보류된 종목이다. 이 목록은 **'내일 볼 만한 종목'** 을 보는 자리인데,
+    보류 종목은 이미 1선을 지나 괴리율이 음수라 맨 위를 차지해 버린다. 그것들은 따로
+    떼어 사유와 함께 보여주는 편이 답을 더 잘 준다.
     """
+    skip = exclude or set()
     rows = [
         ((s["day_low"] - s["line1"]) / s["line1"], s)
         for s in symbols
-        if not s["total_bought"] and s.get("day_low") and s.get("line1")
+        if not s["total_bought"]
+        and s.get("day_low")
+        and s.get("line1")
+        and s["symbol"] not in skip
     ]
     rows.sort(key=lambda x: x[0])
     return rows
 
 
-def build_proximity_field(symbols: list[dict], top: int = 5) -> dict | None:
-    """일일 요약에 붙일 근접도 필드 (없으면 None)."""
-    rows = proximity_rows(symbols)
+def build_blocked_fields(symbols: list[dict], blocked: dict[str, str]) -> list[dict]:
+    """보류 종목 필드 — **사유별로 나누고, 전부 보여준다.**
+
+    사유가 섞이면 자금을 늘려야 할지 종목 수를 늘려야 할지 알 수 없다. 사유마다 필드를
+    나누면 Discord 가 제목을 굵게 그려 줘서, 사유가 하나뿐인 날에도 지저분해지지 않는다.
+
+    개수를 자르지 않는 이유는 이 목록 자체가 '몇 개나 놓쳤나' 에 답하기 때문이다 —
+    5개만 보여주면 그 답이 사라진다. Discord 필드 한도(1024자)에 걸릴 때만 줄인다.
+    """
+    if not blocked:
+        return []
+    by_symbol = {s["symbol"]: s for s in symbols}
+    groups: dict[str, list] = {}
+    for symbol, reason in blocked.items():
+        s = by_symbol.get(symbol)
+        if s is None:
+            continue
+        gap = (
+            (s["day_low"] - s["line1"]) / s["line1"]
+            if s.get("day_low") and s.get("line1")
+            else 0.0
+        )
+        groups.setdefault(block_reason(reason), []).append((gap, s))
+
+    fields = []
+    for reason, rows in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        rows.sort(key=lambda x: x[0], reverse=True)  # 1선에 가까웠던 것부터
+        lines = [
+            f"`{gap:+6.1%}` {s['name']}({s['symbol']}) · 최저 {s['day_low']:,.0f} "
+            f"/ 1선 {s['line1']:,.0f}"
+            for gap, s in rows
+        ]
+        fields.append(
+            {
+                "name": f"⏸️ 진입 못 함 · {reason} {len(rows)}종목",
+                "value": "\n".join(lines)[:1024],
+                "inline": False,
+            }
+        )
+    return fields
+
+
+def build_proximity_field(
+    symbols: list[dict], top: int = 5, exclude: "set[str] | None" = None
+) -> dict | None:
+    """일일 요약에 붙일 근접도 필드 (없으면 None).
+
+    보류된 종목은 뺀다 — 그것들은 사유와 함께 따로 보여준다(build_blocked_fields).
+    여기는 '내일 볼 만한 종목' 을 보는 자리라 5개면 충분하다.
+    """
+    rows = proximity_rows(symbols, exclude)
     if not rows:
         return None
     lines = [
@@ -522,6 +591,7 @@ def build_daily_summary_embed(
     index_rate: float | None = None,
     holdings: dict[str, str] | None = None,
     cycle_pnl: dict[str, tuple[float, float]] | None = None,
+    blocked: dict[str, str] | None = None,
 ) -> dict:
     """일일 요약 Discord embed — 왼쪽 색 띠와 항목 분리로 한눈에 읽히게 만든다.
 
@@ -537,6 +607,9 @@ def build_daily_summary_embed(
 
     cycle_pnl 은 {종목: (세전, 비용)} 로 호출부(코어)가 사이클 전체를 합산해 넘긴다 —
     notifier 는 DB 를 모른다. 보유 중인 종목은 아직 끝나지 않았으므로 손익을 적지 않는다.
+
+    blocked 는 {종목: 보류 사유} 로, **1선에 닿았는데 끝내 못 산 종목**이다. 사유별로
+    나눠 전부 보여주고 근접도 목록에서는 뺀다 — 자세한 이유는 build_blocked_fields 참고.
     """
     import datetime as _dt
 
@@ -619,7 +692,12 @@ def build_daily_summary_embed(
             {"name": f"외 {len(traded) - 20}종목", "value": "\u200b", "inline": False}
         )
 
-    if field := build_proximity_field(symbols):  # 미진입 종목의 1선 근접도
+    # 보류 종목을 근접도보다 **먼저** 놓는다. '살 수 있었는데 못 산 것' 이 '내일 볼 만한
+    # 것' 보다 급한 정보다.
+    fields += build_blocked_fields(symbols, blocked or {})
+    if field := build_proximity_field(  # 미진입 종목의 1선 근접도
+        symbols, exclude=set(blocked or {})
+    ):
         fields.append(field)
 
     if field := build_benchmark_field(symbols, index_rate):

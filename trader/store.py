@@ -559,6 +559,28 @@ class Store:
         with self._conn:
             self._insert_event(trade_date, symbol, kind=kind, reason=reason)
 
+    def blocked_symbols(self, trade_date: str) -> dict[str, str]:
+        """{종목: 사유} — 그날 **1선에 닿았는데 결국 진입하지 못한** 종목.
+
+        일일 요약의 '1선 근접도' 만으로는 알 수 없다. 보류된 종목은 1선을 이미 지났으니
+        근접도가 음수라 목록 맨 위를 차지하는데, 정작 '살 수 있었는데 못 샀다' 는 사실이
+        드러나지 않는다. 자리가 모자랐던 날을 알아야 자금 배분을 고칠 수 있다
+        (2026-09-02 실측: 최대 종목 수에 막혀 5종목을 놓쳤다).
+
+        나중에 자리가 나서 실제로 들어간 종목은 뺀다 — 총량이 부족했던 것이 아니다.
+        사유는 마지막 것을 쓴다. 사유가 바뀌며 여러 번 보류될 수 있는데, 하루가 끝난
+        시점에서 답해야 할 것은 '왜 끝내 못 샀나' 이기 때문이다.
+        """
+        rows = self._conn.execute(
+            """SELECT e.symbol, e.reason
+               FROM events e JOIN positions p
+                 ON p.trade_date = e.trade_date AND p.symbol = e.symbol
+               WHERE e.trade_date = ? AND e.kind = '보류' AND p.total_bought = 0
+               ORDER BY e.ts""",
+            (trade_date,),
+        ).fetchall()
+        return {r["symbol"]: r["reason"] for r in rows}
+
     def daily_report(self, trade_date: str) -> tuple[list[dict], list[dict]]:
         """일일 요약용 원자료 — (종목 스냅샷 목록, 체결 목록).
 

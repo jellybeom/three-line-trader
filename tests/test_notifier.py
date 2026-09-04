@@ -678,3 +678,118 @@ def test_사이클_손익이_없으면_그날_행으로_물러난다():
     field = next(f for f in embed["fields"] if "에스넷" in f["name"])
 
     assert "매매 손익 **+2,229원**" in field["value"]
+
+
+# ── 보류 종목 (2026-09-04) ──────────────────────────────────────
+
+
+def _blocked_rows():
+    def sym(code, name, low, line1, bought=0):
+        return {
+            "symbol": code,
+            "name": name,
+            "state": "대기" if not bought else "종료",
+            "avg_price": 0.0,
+            "total_bought": bought,
+            "remaining": 0,
+            "realized_pnl": 0.0,
+            "fees": 0.0,
+            "high_price": 0.0,
+            "low_price": 0.0,
+            "day_open": 0.0,
+            "day_close": 0.0,
+            "memo": "",
+            "tags": "",
+            "base_date": "",
+            "line1": line1,
+            "day_low": low,
+        }
+
+    return [
+        sym("066970", "엘앤에프", 68_200, 68_750),
+        sym("189860", "서전기전", 4_010, 4_060),
+        sym("241710", "코스메카코리아", 139_000, 142_000),
+        sym("019010", "베뉴지", 4_335, 4_275),  # 1선에 안 닿음
+    ]
+
+
+_MAX = "최대 종목 수(7) 도달 — 자리가 나면 재시도합니다"
+_QTY = "매수 수량 0주 — 매수 금액으로 142,000원에 1주도 살 수 없습니다"
+
+
+def test_보류_사유를_묶는_이름은_설정값을_떼어_낸다():
+    """괄호 안 숫자를 그대로 두면 같은 사유가 갈라진다."""
+    from trader.notifier import block_reason
+
+    assert block_reason(_MAX) == "최대 종목 수"
+    assert (
+        block_reason("예수금 부족(1,509,883 < 137,857) — 자금이 생기면")
+        == "예수금 부족"
+    )
+    assert block_reason(_QTY) == "매수 수량 0주"
+
+
+def test_보류_종목을_사유별로_나눠_전부_보여준다():
+    """사유가 섞이면 자금을 늘려야 할지 종목 수를 늘려야 할지 알 수 없다."""
+    from trader.notifier import build_blocked_fields
+
+    fields = build_blocked_fields(
+        _blocked_rows(), {"066970": _MAX, "189860": _MAX, "241710": _QTY}
+    )
+
+    assert [f["name"] for f in fields] == [
+        "⏸️ 진입 못 함 · 최대 종목 수 2종목",  # 많은 사유가 먼저
+        "⏸️ 진입 못 함 · 매수 수량 0주 1종목",
+    ]
+    assert "엘앤에프" in fields[0]["value"] and "서전기전" in fields[0]["value"]
+    assert "-0.8%" in fields[0]["value"]  # 근접도도 함께
+
+
+def test_보류_종목은_개수를_자르지_않는다():
+    """이 목록 자체가 '몇 개나 놓쳤나' 에 답한다 — 5개만 보이면 그 답이 사라진다."""
+    from trader.notifier import build_blocked_fields
+
+    rows = [
+        {
+            "symbol": f"{i:06d}",
+            "name": f"종목{i}",
+            "total_bought": 0,
+            "line1": 1_000,
+            "day_low": 990,
+        }
+        for i in range(12)
+    ]
+    fields = build_blocked_fields(rows, {f"{i:06d}": _MAX for i in range(12)})
+
+    assert "12종목" in fields[0]["name"]
+    assert fields[0]["value"].count("\n") == 11  # 열두 줄 전부
+
+
+def test_보류_종목은_근접도_목록에서_뺀다():
+    """1선을 이미 지나 괴리율이 음수라 '내일 볼 만한 종목' 맨 위를 차지해 버린다."""
+    from trader.notifier import build_proximity_field
+
+    field = build_proximity_field(_blocked_rows(), exclude={"066970", "189860"})
+
+    assert "엘앤에프" not in field["value"]
+    assert "베뉴지" in field["value"]
+
+
+def test_보류_종목이_없으면_필드도_없다():
+    from trader.notifier import build_blocked_fields
+
+    assert build_blocked_fields(_blocked_rows(), {}) == []
+
+
+def test_보류_종목은_근접도보다_먼저_나온다():
+    """'살 수 있었는데 못 산 것' 이 '내일 볼 만한 것' 보다 급하다."""
+    from trader.notifier import build_daily_summary_embed
+
+    embed = build_daily_summary_embed(
+        "2026-09-02", _blocked_rows(), [], blocked={"066970": _MAX}
+    )
+    names = [f["name"] for f in embed["fields"]]
+
+    assert names.index("⏸️ 진입 못 함 · 최대 종목 수 1종목") < names.index(
+        "🎯 1선 근접도 (미진입)"
+    )

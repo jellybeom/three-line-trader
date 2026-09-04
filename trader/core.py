@@ -1903,6 +1903,7 @@ class Core:
                 await self.refresh_account(),
                 holdings=self._holding_labels(date),
                 cycle_pnl=self._cycle_pnl(date, symbols),
+                blocked=self._store.blocked_symbols(date),
             )
         return build_daily_summary_embed(  # 과거는 기록만
             date,
@@ -1910,6 +1911,7 @@ class Core:
             fills,
             holdings=self._holding_labels(date),
             cycle_pnl=self._cycle_pnl(date, symbols),
+            blocked=self._store.blocked_symbols(date),
         )
 
     def trade_dates(self, limit: int = 10) -> list[str]:
@@ -2572,6 +2574,7 @@ class Core:
             account,
             holdings=self._holding_labels(self._date),
             cycle_pnl=self._cycle_pnl(self._date, symbols),
+            blocked=self._store.blocked_symbols(self._date),
         )
         # 일지 미작성 안내 — 늦어도 주말에는 쓰기로 한 약속을 상기시킨다
         pending = [

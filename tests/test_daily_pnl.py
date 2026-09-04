@@ -357,3 +357,45 @@ def test_요약이_사이클_손익을_실제로_받는다(tmp_path):
 
     source = inspect.getsource(Core)
     assert source.count("build_daily_summary_embed(") == source.count("cycle_pnl=")
+
+
+def test_나중에_진입한_종목은_보류_목록에서_빠진다(tmp_path):
+    """자리가 나서 실제로 들어갔으면 총량이 부족했던 것이 아니다."""
+    from trader.state_machine import Decision, Params, Position, Side, State
+    from trader.store import Store
+
+    store = Store(tmp_path / "t.db")
+    params = Params(
+        line1=5_000, line2=4_500, line3=4_000, buy1_amount=500_000, buy2_amount=500_000
+    )
+    for sym, name in (("005930", "삼성전자"), ("035420", "네이버")):
+        store.register_symbol("2026-09-02", sym, name, params)
+        store.log("2026-09-02", sym, "보류", "최대 종목 수(7) 도달 — 자리가 나면")
+    # 네이버만 나중에 자리가 나서 진입
+    store.save_transition(
+        "2026-09-02",
+        "035420",
+        State.WAITING,
+        Position(State.BUY1, 5_000, 10, 10),
+        Decision(State.BUY1, Side.BUY, 10, "1차 매수"),
+        5_000,
+        5_000,
+    )
+
+    blocked = store.blocked_symbols("2026-09-02")
+
+    assert set(blocked) == {"005930"}
+    assert "최대 종목 수" in blocked["005930"]
+    store.close()
+
+
+def test_요약이_보류_목록을_실제로_받는다():
+    """세 호출부 중 하나라도 빠뜨리면 그 경로만 조용히 안 보인다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core)
+    assert source.count("build_daily_summary_embed(") == source.count(
+        "blocked=self._store"
+    )
