@@ -687,16 +687,10 @@ def test_빈_검색어는_전체를_돌려준다(rows):
 
 
 @pytest.fixture
-def dialog(rows):
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError as err:
-        # 화면이 없는 환경. 다만 **창이 만들어지는 환경에서도** 여기 걸릴 수 있다 —
-        # 앞선 테스트가 Tk 루트를 정리하지 않으면 두 번째 생성이 거부된다. 그때
-        # "no display" 만 남으면 원인을 찾을 수 없으므로 실제 오류를 함께 적는다.
-        pytest.skip(f"Tk 루트를 만들 수 없음: {err}")
-    root.withdraw()
+def dialog(rows, tk_root):
+    # 루트는 세션 공용을 쓴다 — 테스트마다 tk.Tk() 를 새로 만들면 윈도우에서 두 번째
+    # 생성이 실패한다(conftest.py 참고).
+    root = tk_root
     from trader.ui.journal_dialog import JournalDialog
 
     for row in rows:  # 창이 요구하는 필드를 채운다
@@ -711,7 +705,7 @@ def dialog(rows):
     dlg.update_idletasks()
     dlg.update()
     yield dlg
-    root.destroy()
+    dlg.destroy()
 
 
 def _type(search, text: str) -> None:
@@ -911,13 +905,8 @@ def test_기록이_있는_해가_올해보다_뒤여도_담긴다():
 
 
 @pytest.fixture
-def period_dialog(rows):
-    tk = pytest.importorskip("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError as err:
-        pytest.skip(f"Tk 루트를 만들 수 없음: {err}")
-    root.withdraw()
+def period_dialog(rows, tk_root):
+    root = tk_root
     from trader.ui.journal_dialog import JournalDialog
 
     for row in rows:
@@ -937,7 +926,7 @@ def period_dialog(rows):
     dlg.asked = asked
     dlg.update()
     yield dlg
-    root.destroy()
+    dlg.destroy()
 
 
 def test_기본은_이번_달이다(period_dialog):
