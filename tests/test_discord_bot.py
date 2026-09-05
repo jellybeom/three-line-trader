@@ -351,6 +351,7 @@ def test_슬래시_명령이_모두_등록된다():
         "알림",
         "근접도",
         "관심종목",
+        "월간",
     }
     # 주문을 내는 조작은 일부러 넣지 않는다 (계정 탈취 시 피해 제한)
     assert "청산" not in commands and "삭제" not in commands

@@ -15,6 +15,7 @@
 """
 
 import io
+import re
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime
@@ -828,6 +829,32 @@ class TraderBot:
                 app_commands.Choice(name=d, value=d)
                 for d in core.trade_dates(25)
                 if text in d
+            ][:25]
+
+        @tree.command(
+            name="월간", description="이번 달 성적을 봅니다 (달을 비우면 이번 달)"
+        )
+        @app_commands.describe(달="YYYY-MM (비우면 이번 달)")
+        async def monthly(interaction, 달: str = "") -> None:
+            if not await guard(interaction):
+                return
+            await interaction.response.defer()
+            month = (달 or "").strip() or datetime.now().strftime("%Y-%m")
+            if not re.fullmatch(r"\d{4}-\d{2}", month):
+                await interaction.followup.send("달은 YYYY-MM 형식으로 입력하세요.")
+                return
+            await interaction.followup.send(
+                embed=self._to_embed(core.monthly_embed(month))
+            )
+
+        @monthly.autocomplete("달")
+        async def monthly_autocomplete(interaction, current: str):
+            """기록이 있는 달만 고르게 한다."""
+            if not config.allows(interaction.user.id):
+                return []
+            text = (current or "").strip()
+            return [
+                app_commands.Choice(name=m, value=m) for m in core.months() if text in m
             ][:25]
 
         @tree.command(

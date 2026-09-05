@@ -34,6 +34,7 @@ from trader.notifier import (
     build_batch_embed,
     build_daily_summary_embed,
     build_log_csv,
+    build_monthly_embed,
     build_proximity_embed,
     build_registration_warning_embed,
     build_briefing_embed,
@@ -45,6 +46,7 @@ from trader.notifier import (
 )
 from dataclasses import replace
 
+from trader import stats
 from trader.state_machine import (
     carry_to_next_day,
     Decision,
@@ -1914,6 +1916,31 @@ class Core:
             cycle_pnl=self._cycle_pnl(date, symbols),
             blocked=self._store.blocked_symbols(date),
         )
+
+    def monthly_embed(self, month: str) -> dict:
+        """월간 집계 embed (`/월간`). 조회 전용이라 매매에 닿지 않는다.
+
+        month 는 `YYYY-MM`. 그 달 1일부터 말일까지 **청산된 매매**를 센다. 달 중간에
+        불러도 그때까지의 것이 합쳐진다.
+        """
+        since, until = f"{month}-01", f"{month}-31"
+        entries = self._store.journal_cycles(since=since, until=until)
+        return build_monthly_embed(
+            month,
+            entries,
+            stats.by_quantity(entries),
+            stats.by_tag(entries),
+            stats.by_opening(self._store.slippage_report(since, until)),
+            self._store.blocked_counts(since, until),
+        )
+
+    def months(self, limit: int = 12) -> list[str]:
+        """기록이 있는 달 (최근 순) — `/월간` 자동완성용."""
+        seen = []
+        for date in self._store.recent_trade_dates(limit=10_000):
+            if (m := date[:7]) not in seen:
+                seen.append(m)
+        return seen[:limit]
 
     def trade_dates(self, limit: int = 10) -> list[str]:
         """최근 매매일 목록 (요약 조회 자동완성용)."""

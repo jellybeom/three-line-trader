@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import re
+
 import sqlite3
 import datetime as dt
 from datetime import datetime
@@ -576,6 +578,24 @@ class Store:
             (trade_date,),
         ).fetchall()
         return [(r["ts"], r["symbol"], r["name"], r["kind"], r["reason"]) for r in rows]
+
+    def blocked_counts(self, since: str, until: str) -> dict[str, int]:
+        """{사유: 횟수} — 기간 동안 보류가 몇 번 있었는지.
+
+        같은 종목이 하루에 여러 번 보류되므로 '몇 종목' 이 아니라 **몇 번**이다. 자리가
+        얼마나 자주 모자랐는지를 보는 값이라 반복 횟수가 그대로 의미를 가진다.
+        """
+        rows = self._conn.execute(
+            """SELECT reason FROM events
+               WHERE kind = '보류' AND trade_date >= ? AND trade_date <= ?""",
+            (since, until),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for r in rows:
+            head = r["reason"].split("—")[0].strip()
+            key = re.sub(r"\s*\(.*?\)\s*", " ", head).replace(" 도달", "").strip()
+            counts[key or "기타"] = counts.get(key or "기타", 0) + 1
+        return counts
 
     def blocked_symbols(self, trade_date: str) -> dict[str, str]:
         """{종목: 사유} — 그날 **1선에 닿았는데 결국 진입하지 못한** 종목.

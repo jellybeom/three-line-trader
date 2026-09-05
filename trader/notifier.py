@@ -482,6 +482,95 @@ def proximity_rows(
     return rows
 
 
+def build_monthly_embed(
+    month: str, entries: list, buckets: list, tags: list, slips: list, blocked: dict
+) -> dict:
+    """월간 집계 embed — **숫자만**. 그래프는 다음 단계다.
+
+    건수를 늘 함께 적는다. 표본이 작을 때 3건짜리 100% 를 신호로 읽으면 그 판단이 몇 달을
+    간다. 값이 없으면 `-` 로 두고 0 으로 채우지 않는다 — 없는 것과 0 은 다르다.
+    """
+    closed = [e for e in entries if (e.get("state") or "") == "종료"]
+    wins = sum(
+        1 for e in closed if (e.get("realized_pnl") or 0) - (e.get("fees") or 0) > 0
+    )
+    losses = sum(
+        1 for e in closed if (e.get("realized_pnl") or 0) - (e.get("fees") or 0) < 0
+    )
+    net = sum((e.get("realized_pnl") or 0) - (e.get("fees") or 0) for e in closed)
+    decided = wins + losses
+    head = [
+        f"{'📈' if net >= 0 else '📉'}  세후 **{net:+,.0f}원** · {len(closed)}건",
+        f"익절 {wins} · 손절 {losses}"
+        + (f" · 승률 **{wins / decided:.0%}**" if decided else ""),
+    ]
+    if holding := len(entries) - len(closed):
+        head.append(f"보유 중 {holding}종목")
+
+    fields = []
+    if rows := [b for b in buckets if b.trades]:
+        fields.append(
+            {
+                "name": "📦 1차 수량별",
+                "value": "\n".join(_bucket_line(b) for b in rows),
+                "inline": False,
+            }
+        )
+    if rows := [s for s in slips if s.count]:
+        fields.append(
+            {
+                "name": "🎯 판정가 대비 체결 오차",
+                "value": "\n".join(_slip_line(s) for s in rows),
+                "inline": False,
+            }
+        )
+    if tags:
+        fields.append(
+            {
+                "name": "🏷️ 태그별",
+                "value": "\n".join(_bucket_line(b) for b in tags),
+                "inline": False,
+            }
+        )
+    if blocked:
+        top = sorted(blocked.items(), key=lambda kv: -kv[1])[:5]
+        fields.append(
+            {
+                "name": f"⏸️ 진입 못 함 {sum(blocked.values())}회",
+                "value": "\n".join(f"{reason} `{n}회`" for reason, n in top),
+                "inline": False,
+            }
+        )
+    return {
+        "title": f"📊 {month} 월간 집계",
+        "description": "\n".join(head),
+        "color": _COLOR_PROFIT if net >= 0 else _COLOR_LOSS,
+        "fields": fields,
+        "footer": {"text": "표본이 작으면 승률보다 건수를 먼저 본다"},
+    }
+
+
+def _bucket_line(b) -> str:
+    parts = [f"`{b.label:>6}` {b.trades:>2}건"]
+    if (rate := b.win_rate) is not None:
+        parts.append(f"승률 {rate:.0%}")
+    if (ret := b.rate) is not None:
+        parts.append(f"수익률 {ret:+.2%}")
+    if (mfe := b.mfe) is not None:
+        parts.append(f"최고 {mfe:+.1%}")
+    return " · ".join(parts)
+
+
+def _slip_line(s) -> str:
+    parts = [f"`{s.label}` {s.count:>2}건"]
+    if (buy := s.buy) is not None:
+        parts.append(f"매수 {buy:+.2%}")
+    if (sell := s.sell) is not None:
+        parts.append(f"매도 {sell:+.2%}")
+    parts.append(f"최악 {s.worst:.2%}")
+    return " · ".join(parts)
+
+
 def build_log_csv(rows: list[tuple[str, str, str, str, str]]) -> bytes:
     """하루치 로그를 CSV 바이트로. 화면의 `CSV 내보내기` 와 **같은 형식**이다.
 

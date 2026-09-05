@@ -832,3 +832,83 @@ def test_로그가_없으면_빈_CSV라도_머리글은_있다():
     from trader.notifier import build_log_csv
 
     assert "시각,대상" in build_log_csv([]).decode("utf-8-sig")
+
+
+# ── 월간 집계 embed (3단계-5) ───────────────────────────────────
+
+
+def _month_entry(**over):
+    base = {
+        "symbol": "005930",
+        "name": "삼성전자",
+        "state": "종료",
+        "total_bought": 10,
+        "avg_price": 5_000.0,
+        "realized_pnl": 1_000.0,
+        "fees": 100.0,
+        "high_price": 5_400.0,
+        "tags": "테마주",
+    }
+    return {**base, **over}
+
+
+def test_월간_집계는_건수를_항상_함께_적는다():
+    """표본이 작을 때 3건짜리 100% 를 신호로 읽으면 그 판단이 몇 달을 간다."""
+    from trader import stats
+    from trader.notifier import build_monthly_embed
+
+    entries = [_month_entry(), _month_entry(symbol="B", total_bought=2)]
+    embed = build_monthly_embed(
+        "2026-09", entries, stats.by_quantity(entries), stats.by_tag(entries), [], {}
+    )
+
+    qty = next(f for f in embed["fields"] if "수량별" in f["name"])
+    assert "1건" in qty["value"]
+    assert "표본" in embed["footer"]["text"]
+
+
+def test_보유_중인_종목은_성적에서_빠지고_따로_적는다():
+    from trader import stats
+    from trader.notifier import build_monthly_embed
+
+    entries = [_month_entry(), _month_entry(symbol="B", state="1차 매수")]
+    embed = build_monthly_embed(
+        "2026-09", entries, stats.by_quantity(entries), [], [], {}
+    )
+
+    assert "1건" in embed["description"]  # 종료된 것만 센다
+    assert "보유 중 1종목" in embed["description"]
+
+
+def test_값이_없는_항목은_적지_않는다():
+    """없는 것과 0 은 다르다."""
+    from trader.notifier import _slip_line
+    from trader.stats import Slip
+
+    line = _slip_line(Slip("09:00~09:10", buys=[0.01]))
+
+    assert "매수 +1.00%" in line
+    assert "매도" not in line
+
+
+def test_비어_있는_구간은_필드로_만들지_않는다():
+    """빈 표가 붙으면 무엇이 없는 건지 헷갈린다."""
+    from trader.notifier import build_monthly_embed
+    from trader.stats import Bucket
+
+    embed = build_monthly_embed("2026-09", [], [Bucket("1~2주")], [], [], {})
+
+    assert not any("수량별" in f["name"] for f in embed["fields"])
+
+
+def test_보류는_횟수로_센다():
+    """같은 종목이 하루에 여러 번 보류된다 — 자리가 얼마나 자주 모자랐는지가 값이다."""
+    from trader.notifier import build_monthly_embed
+
+    embed = build_monthly_embed(
+        "2026-09", [], [], [], [], {"최대 종목 수": 24, "예수금 부족": 1}
+    )
+
+    field = next(f for f in embed["fields"] if "진입 못 함" in f["name"])
+    assert "25회" in field["name"]
+    assert "최대 종목 수 `24회`" in field["value"]
