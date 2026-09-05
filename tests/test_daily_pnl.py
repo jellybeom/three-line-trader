@@ -399,3 +399,25 @@ def test_요약이_보류_목록을_실제로_받는다():
     assert source.count("build_daily_summary_embed(") == source.count(
         "blocked=self._store"
     )
+
+
+def test_하루치_로그는_화면_한도와_무관하게_전부_담긴다(tmp_path):
+    """화면은 500줄까지만 유지한다 — 오래 돌아간 날은 앞부분이 잘린다."""
+    from trader.state_machine import Params
+    from trader.store import Store
+
+    store = Store(tmp_path / "t.db")
+    params = Params(
+        line1=5_000, line2=4_500, line3=4_000, buy1_amount=500_000, buy2_amount=500_000
+    )
+    store.register_symbol("2026-09-04", "005930", "삼성전자", params)
+    for i in range(600):
+        store.log("2026-09-04", "005930", "보류", f"최대 종목 수 도달 {i}")
+    store.log("2026-09-04", "시스템", "설정", "자동 스케줄 사용")
+
+    rows = store.day_log("2026-09-04")
+
+    assert len(rows) > 500
+    assert rows[-1] == (rows[-1][0], "시스템", "-", "설정", "자동 스케줄 사용")
+    assert any(r[2] == "삼성전자" for r in rows)  # 종목명을 끌어온다
+    store.close()

@@ -482,6 +482,22 @@ def proximity_rows(
     return rows
 
 
+def build_log_csv(rows: list[tuple[str, str, str, str, str]]) -> bytes:
+    """하루치 로그를 CSV 바이트로. 화면의 `CSV 내보내기` 와 **같은 형식**이다.
+
+    맨 앞에 BOM 을 둔다 — 없으면 엑셀이 UTF-8 을 못 알아보고 한글이 깨진다.
+    줄바꿈은 CRLF 로 둔다(csv 모듈 기본). 엑셀과 폰 앱 양쪽에서 안전하다.
+    """
+    import csv
+    import io
+
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow(["시각", "대상", "종목명", "종류", "내용"])
+    writer.writerows(rows)
+    return b"\xef\xbb\xbf" + buffer.getvalue().encode("utf-8")
+
+
 def build_blocked_fields(symbols: list[dict], blocked: dict[str, str]) -> list[dict]:
     """보류 종목 필드 — **사유별로 나누고, 전부 보여준다.**
 

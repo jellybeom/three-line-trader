@@ -810,3 +810,48 @@ def test_답글을_전부_지우면_UI_내용만_남는다(bot):
     _run(b._rebuild_journal("111"))
 
     assert store.journal_text("2026-08-24", "263800")[1] == "박스를 잘 못찾은건 아닐까"
+
+
+# ── 매매 로그 보관 채널 (2026-09-05) ────────────────────────────
+
+
+def test_로그_채널이_다른_채널과_같으면_거부한다(tmp_path):
+    """매일 오는 CSV 가 알림·일지와 섞이면 둘 다 읽기 어려워진다."""
+    from trader.discord_bot import BotConfigError, load_bot_config
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[discord]\nbot_token = "t"\nchannel_id = "1"\nallowed_users = ["9"]\n'
+        'log_channel_id = "1"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(BotConfigError, match="log_channel_id"):
+        load_bot_config(str(cfg))
+
+
+def test_로그_채널을_비우면_기능만_꺼진다(tmp_path):
+    from trader.discord_bot import load_bot_config
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[discord]\nbot_token = "t"\nchannel_id = "1"\nallowed_users = ["9"]\n',
+        encoding="utf-8",
+    )
+    assert load_bot_config(str(cfg)).log_channel_id == 0
+
+
+def test_파일_첨부_권한이_없으면_시작할_때_알린다(bot):
+    """없으면 15:35 마다 조용히 실패한다 — 하루치가 빠진 것을 나중에야 안다."""
+    b, _thread, _store = bot
+    channel = _FakeChannel()
+    channel.guild = type("G", (), {"me": object()})()
+    channel.permissions_for = lambda _me: type(
+        "P", (), {"view_channel": True, "send_messages": True, "attach_files": False}
+    )()
+    b._log_channel = channel
+    sent = []
+    b.send_text = lambda text: _noop(sent, text)
+
+    _run(b._warn_if_cannot_attach())
+
+    assert sent and "파일 첨부" in sent[0]

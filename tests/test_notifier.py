@@ -793,3 +793,42 @@ def test_보류_종목은_근접도보다_먼저_나온다():
     assert names.index("⏸️ 진입 못 함 · 최대 종목 수 1종목") < names.index(
         "🎯 1선 근접도 (미진입)"
     )
+
+
+# ── 매매 로그 CSV (2026-09-05) ──────────────────────────────────
+
+
+def test_로그_CSV는_화면_내보내기와_같은_형식이다():
+    """엑셀 한글 호환 BOM 이 없으면 폰·엑셀에서 한글이 깨진다."""
+    from trader.notifier import build_log_csv
+
+    data = build_log_csv(
+        [("2026-09-04 09:13:36", "037440", "희림", "체결", "1차 익절 → 체결 8주")]
+    )
+
+    assert data.startswith(b"\xef\xbb\xbf")  # BOM
+    text = data.decode("utf-8-sig")
+    assert text.splitlines()[0] == "시각,대상,종목명,종류,내용"
+    assert "희림" in text
+
+
+def test_내용에_쉼표가_있어도_열이_밀리지_않는다():
+    """보류 사유에 `예수금 부족(1,509,883 < 137,857)` 처럼 쉼표가 들어간다."""
+    import csv
+    import io
+
+    from trader.notifier import build_log_csv
+
+    data = build_log_csv(
+        [("t", "시스템", "-", "보류", "예수금 부족(1,509,883 < 137,857)")]
+    )
+    rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
+
+    assert len(rows[1]) == 5
+    assert rows[1][4] == "예수금 부족(1,509,883 < 137,857)"
+
+
+def test_로그가_없으면_빈_CSV라도_머리글은_있다():
+    from trader.notifier import build_log_csv
+
+    assert "시각,대상" in build_log_csv([]).decode("utf-8-sig")

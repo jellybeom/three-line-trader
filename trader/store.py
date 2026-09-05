@@ -559,6 +559,24 @@ class Store:
         with self._conn:
             self._insert_event(trade_date, symbol, kind=kind, reason=reason)
 
+    def day_log(self, trade_date: str) -> list[tuple[str, str, str, str, str]]:
+        """그날의 로그 — (시각, 대상, 종목명, 종류, 내용). 화면 목록과 같은 다섯 열.
+
+        화면의 `CSV 내보내기` 는 **표시 중인 500줄까지만** 담는다. 오래 돌아간 날은
+        앞부분이 잘리므로, 자동 전송은 여기서 DB 를 읽어 **그날 전부**를 담는다.
+        종목명은 symbols 에서 끌어오고, 시스템 이벤트처럼 없는 것은 `-` 로 둔다.
+        """
+        rows = self._conn.execute(
+            """SELECT e.ts, e.symbol, COALESCE(s.name, '-') AS name, e.kind, e.reason
+               FROM events e
+               LEFT JOIN symbols s
+                 ON s.trade_date = e.trade_date AND s.symbol = e.symbol
+               WHERE e.trade_date = ?
+               ORDER BY e.id""",
+            (trade_date,),
+        ).fetchall()
+        return [(r["ts"], r["symbol"], r["name"], r["kind"], r["reason"]) for r in rows]
+
     def blocked_symbols(self, trade_date: str) -> dict[str, str]:
         """{종목: 사유} — 그날 **1선에 닿았는데 결국 진입하지 못한** 종목.
 

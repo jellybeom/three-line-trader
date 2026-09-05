@@ -33,6 +33,7 @@ from trader.notifier import (
     build_alert_embed,
     build_batch_embed,
     build_daily_summary_embed,
+    build_log_csv,
     build_proximity_embed,
     build_registration_warning_embed,
     build_briefing_embed,
@@ -2619,6 +2620,22 @@ class Core:
         if self._bot is not None:  # 요약이 나갔으니 장중 대시보드는 걷어낸다
             await self._bot.clear_dashboard()
         await self._send_embed(embed)
+        await self._send_day_log()
+
+    async def _send_day_log(self) -> None:
+        """하루치 로그 CSV 를 보관 채널로. 실패해도 요약에는 영향이 없다.
+
+        `events` 는 `data/` 에만 있고 git 에 올라가지 않는다 — 디스크가 죽으면 슬리피지·
+        보류·판정가 기록이 통째로 사라진다. 월간 집계가 쓸 데이터라 사본을 하나 둔다.
+        """
+        if self._bot is None:
+            return
+        try:
+            rows = self._store.day_log(self._date)
+            if rows:
+                await self._bot.send_day_log(self._date, build_log_csv(rows), len(rows))
+        except Exception as err:  # noqa: BLE001 — 보관 실패가 요약을 막지 않게
+            self._log("시스템", "경고", f"매매 로그 보관 실패: {err}", notify=False)
 
     # ── 상태 로드 / 발행 ────────────────────────────────────────
 

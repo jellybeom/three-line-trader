@@ -14,6 +14,7 @@
 **변경은 반드시 명령 큐를 통해서** 한다 — UI 와 똑같은 경로라 경쟁 상태가 없다.
 """
 
+import io
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,6 +51,8 @@ class BotConfig:
     # 매매일지 전용 채널. 비어 있으면(0) 스레드 기능만 꺼지고 나머지는 평소대로 돈다 —
     # 설정을 안 채운 상태로 업데이트해도 알림이 멈추면 안 된다.
     journal_channel_id: int = 0
+    # 하루치 매매 로그 CSV 를 보관할 채널. 비어 있으면(0) 이 기능만 꺼진다.
+    log_channel_id: int = 0
 
     def allows(self, user_id: int) -> bool:
         """화이트리스트가 비어 있으면 아무도 명령을 쓸 수 없다 (안전한 기본값)."""
@@ -92,7 +95,19 @@ def load_bot_config(config_path="config.toml") -> BotConfig:
             "journal_channel_id 가 channel_id 와 같습니다 — "
             "매매일지 스레드는 별도 채널이어야 알림과 섞이지 않습니다."
         )
-    return BotConfig(token, channel_id, frozenset(users), journal_channel_id)
+    log_channel = str(section.get("log_channel_id", "")).strip()
+    try:
+        log_channel_id = int(log_channel) if log_channel else 0
+    except ValueError as e:
+        raise BotConfigError(f"log_channel_id 가 숫자가 아닙니다: {log_channel}") from e
+    if log_channel_id and log_channel_id in (channel_id, journal_channel_id):
+        raise BotConfigError(
+            "log_channel_id 가 다른 채널과 같습니다 — "
+            "매일 오는 CSV 가 알림·일지와 섞이면 둘 다 읽기 어려워집니다."
+        )
+    return BotConfig(
+        token, channel_id, frozenset(users), journal_channel_id, log_channel_id
+    )
 
 
 # ── 표시용 데이터 구성 (순수 함수 — 코어 없이 테스트 가능) ─────
@@ -195,6 +210,7 @@ class TraderBot:
         self._client = None
         self._channel = None
         self._journal_channel = None
+        self._log_channel = None
         self._dashboard_id = None
         self._blocked = {}
         self._pin_warned = False
@@ -232,6 +248,11 @@ class TraderBot:
                 ) or await client.fetch_channel(self._config.journal_channel_id)
                 await self._warn_if_no_message_content()
                 await self._warn_if_missing_permissions()
+            if self._config.log_channel_id:
+                self._log_channel = client.get_channel(
+                    self._config.log_channel_id
+                ) or await client.fetch_channel(self._config.log_channel_id)
+                await self._warn_if_cannot_attach()
                 await self._collect_backlog()
             await tree.sync()
             self._core.on_bot_ready()
@@ -308,6 +329,28 @@ class TraderBot:
             ) or await self._client.fetch_channel(int(thread_id))
         except (discord.HTTPException, ValueError):
             return None
+
+    async def send_day_log(self, trade_date: str, data: bytes, rows: int) -> bool:
+        """하루치 매매 로그 CSV 를 보관 채널로 보낸다.
+
+        `events` 는 `data/` 에만 있고 git 에 올라가지 않는다 — 디스크가 죽으면 슬리피지·
+        보류·판정가 기록이 통째로 사라진다. 월간 집계가 쓸 데이터라 사본을 하나 둔다.
+
+        파일명에 실행 시각을 붙이지 않는다. 하루에 하나뿐이라 붙일 이유가 없고, 날짜만
+        있어야 채널에서 날짜순으로 읽힌다.
+        """
+        if self._log_channel is None or not rows:
+            return False
+        try:
+            await self._log_channel.send(
+                content=f"📋 {trade_date} 매매 로그 · {rows}건",
+                file=discord.File(
+                    io.BytesIO(data), filename=f"trader-log-{trade_date}.csv"
+                ),
+            )
+        except discord.HTTPException:
+            return False  # 로그 보관 실패가 매매나 요약을 막지 않는다
+        return True
 
     # ── 매매일지 스레드 (3단계-3) ───────────────────────────────
     #
@@ -600,6 +643,34 @@ class TraderBot:
                 f"⚠️ 매매일지 채널 권한이 부족합니다: {' · '.join(missing)}. "
                 "채널 편집 → 권한에서 봇에게 허용해 주세요. "
                 "그때까지 종료된 매매의 스레드가 만들어지지 않습니다."
+            )
+
+    async def _warn_if_cannot_attach(self) -> None:
+        """로그 채널에 파일 첨부 권한이 있는지 시작할 때 본다.
+
+        없으면 15:35 마다 조용히 실패한다 — 보관이 목적인데 하루치가 통째로 빠진 것을
+        나중에야 알게 된다. 파일 첨부는 다른 채널에 필요 없던 권한이라 흔히 빠뜨린다.
+        """
+        channel = self._log_channel
+        if channel is None or not hasattr(channel, "permissions_for"):
+            return
+        me = getattr(getattr(channel, "guild", None), "me", None)
+        if me is None:
+            return
+        have = channel.permissions_for(me)
+        missing = [
+            label
+            for attr, label in (
+                ("view_channel", "채널 보기"),
+                ("send_messages", "메시지 보내기"),
+                ("attach_files", "파일 첨부"),
+            )
+            if not getattr(have, attr, False)
+        ]
+        if missing:
+            await self.send_text(
+                f"⚠️ 매매로그 채널 권한이 부족합니다: {' · '.join(missing)}. "
+                "그때까지 하루치 로그가 보관되지 않습니다."
             )
 
     async def _warn_if_no_message_content(self) -> None:
