@@ -546,7 +546,6 @@ def build_monthly_embed(
         "description": "\n".join(head),
         "color": _COLOR_PROFIT if net >= 0 else _COLOR_LOSS,
         "fields": fields,
-        "footer": {"text": "표본이 작으면 승률보다 건수를 먼저 본다"},
     }
 
 

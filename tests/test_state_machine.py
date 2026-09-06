@@ -159,15 +159,51 @@ def test_2차3익절_상태에서_7퍼_갭이면_5퍼_생략_전량청산():
     assert d.to_state is State.CLOSED and d.qty == 120
 
 
-def test_극소량_보유시_매도수량_0이면_주문없이_상태만_전이():
+def test_2주는_3퍼센트와_5퍼센트에_한_주씩_판다():
+    """`floor(2 × 0.4) = 0` 이라 예전에는 3% 단계를 통째로 건너뛰었다.
+
+    2026-09-01 SK바이오팜이 그랬다 — 2주 보유로 3% 에서 못 팔고 5% 를 기다리다 본절로
+    밀려 수동 청산했다. 한 주라도 파는 쪽이 설계 의도에 가깝다.
+    """
     p = Params(
         line1=10_000, line2=9_000, line3=8_000, buy1_amount=20_000, buy2_amount=18_000
     )  # 1선 체결 시 2주
-    pos = run(Position(), [10_000], p)  # 2주 보유
-    d = decide(pos, p, 10_300)  # floor(2×0.4) = 0주
-    assert d.side is None and d.to_state is State.BUY1_TP1
-    pos = run(pos, [10_300, 10_500, 10_700], p)  # 이후 1주, 1주 매도로 정리
+    pos = run(Position(), [10_000], p)
+    assert pos.total_bought == 2
+
+    d = decide(pos, p, 10_300)
+    assert (d.side, d.qty, d.to_state) == (Side.SELL, 1, State.BUY1_TP1)
+
+    pos = run(pos, [10_300, 10_500], p)  # 3% 에 1주, 5% 에 나머지 1주
     assert pos.state is State.CLOSED and pos.remaining == 0
+
+
+def test_1주는_3퍼센트에_전량_나가고_그_자리에서_끝난다():
+    """보유 상태는 잔량이 0 일 수 없다 — 다 팔았으면 종료로 가야 한다."""
+    p = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=10_000, buy2_amount=9_000
+    )  # 1선 체결 시 1주
+    pos = run(Position(), [10_000], p)
+    assert pos.total_bought == 1
+
+    d = decide(pos, p, 10_300)
+    assert (d.side, d.qty, d.to_state) == (Side.SELL, 1, State.CLOSED)
+
+    pos = run(pos, [10_300], p)
+    assert pos.state is State.CLOSED and pos.remaining == 0
+
+
+def test_3주_이상은_익절_수량이_바뀌지_않는다():
+    """소량 보정은 비중 계산이 0 을 낼 때만 끼어든다."""
+    p = Params(
+        line1=10_000, line2=9_000, line3=8_000, buy1_amount=100_000, buy2_amount=90_000
+    )  # 1선 체결 시 10주
+    pos = run(Position(), [10_000], p)
+    assert pos.total_bought == 10
+
+    assert decide(pos, p, 10_300).qty == 4  # floor(10 × 0.4)
+    pos = run(pos, [10_300], p)
+    assert decide(pos, p, 10_500).qty == 5  # floor(10 × 0.9) − 4
 
 
 # ── 갭 처리: 중간 단계 생략 ─────────────────────────────────────

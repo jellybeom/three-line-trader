@@ -852,7 +852,7 @@ def _month_entry(**over):
     return {**base, **over}
 
 
-def test_월간_집계는_건수를_항상_함께_적는다():
+def test_월간_집계는_승률_옆에_건수를_함께_적는다():
     """표본이 작을 때 3건짜리 100% 를 신호로 읽으면 그 판단이 몇 달을 간다."""
     from trader import stats
     from trader.notifier import build_monthly_embed
@@ -863,8 +863,8 @@ def test_월간_집계는_건수를_항상_함께_적는다():
     )
 
     qty = next(f for f in embed["fields"] if "수량별" in f["name"])
-    assert "1건" in qty["value"]
-    assert "표본" in embed["footer"]["text"]
+    for line in qty["value"].splitlines():
+        assert "건" in line.split("·")[0]  # 승률보다 건수가 먼저 온다
 
 
 def test_보유_중인_종목은_성적에서_빠지고_따로_적는다():

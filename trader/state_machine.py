@@ -155,11 +155,22 @@ def _tp_sell_qty(pos: Position, params: Params, upto_level: int) -> int:
     비중은 최초 물량(total_bought) 기준 누적으로 계산하므로,
     갭 상승으로 단계를 건너뛰어도 매도 총량이 어긋나지 않는다.
     예) 100주, 대기 익절 상태에서 +5% 도달 → 누적 90% - 기매도 0 = 90주 매도
+
+    **비중 계산이 0 을 내면 1주를 판다.** 1~2주 같은 소량은 `floor(2 × 0.4) = 0` 이라
+    3% 단계를 통째로 건너뛰고, 결국 목표에 못 미친 채 본절로 밀린다
+    (2026-09-01 SK바이오팜: 2주 보유 → 3% 에서 못 팔고 수동 청산). 한 주라도 파는 쪽이
+    설계 의도에 가깝다.
+
+        1주 → 3% 에 1주(전량)
+        2주 → 3% 에 1주, 5% 에 1주
+        3주 이상 → 종전과 같다 (비중 계산이 이미 1 이상을 낸다)
+
+    잔량으로 상한을 두므로 없는 물량을 팔지 않는다.
     """
     cum_ratio = sum(params.tp_ratios[:upto_level])
     already_sold = pos.total_bought - pos.remaining
     qty = math.floor(pos.total_bought * cum_ratio) - already_sold
-    return min(max(qty, 0), pos.remaining)
+    return min(max(qty, 1), pos.remaining)
 
 
 def _buy_qty(amount: float, price: float, cost_rate: float = 0.0) -> int:
@@ -214,11 +225,19 @@ def _decide_tp_chain(
 def _tp_decision(
     pos: Position, params: Params, level: int, to_state: State, reason: str
 ) -> Decision:
-    """부분 익절 Decision 생성. 계산된 매도 수량이 0이면(극소량 보유)
-    거부될 0주 주문 대신 주문 없는 상태 전이로 처리한다."""
+    """부분 익절 Decision 생성.
+
+    **이번 매도로 잔량이 0 이 되면 익절 상태가 아니라 종료로 간다.** 보유 상태는 잔량이
+    0 일 수 없기 때문이다(Position.__post_init__). 1주짜리가 3% 에 전량 나가는 경우가
+    여기 해당한다 — 그 매매는 그 자리에서 끝난 것이 맞다.
+
+    잔량이 0 인데(있을 수 없는 상태) 불리면 주문 없는 전이로 넘긴다.
+    """
     qty = _tp_sell_qty(pos, params, level)
-    if qty == 0:
+    if qty <= 0:
         return Decision(to_state, None, 0, reason + " (매도 수량 0 → 상태만 전이)")
+    if qty >= pos.remaining:
+        return Decision(State.CLOSED, Side.SELL, pos.remaining, reason + " → 전량 청산")
     return Decision(to_state, Side.SELL, qty, reason)
 
 
