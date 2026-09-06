@@ -50,6 +50,9 @@ BLOCK = 9.0  # 헤더·본문·푸터 사이 간격
 GAP = 5.0  # 차트 사이
 SIDE = 58.0  # 오른쪽 기둥 폭
 LINE = 4.6  # 코멘트 한 줄 높이
+# 여러 줄로 쓴 코멘트를 한 문단으로 이을 때의 구분자. 슬래시는 이 문서에서 이미
+# `평단 / 수량` 처럼 **두 값을 나누는** 뜻으로 쓰므로 문장 구분에는 쓰지 않는다.
+JOIN = " · "
 
 # 한글 폰트 후보. 윈도우에는 맑은 고딕이 기본으로 있어 별도 설치가 필요 없다.
 # Noto CJK 는 PostScript 윤곽이라 reportlab 이 읽지 못하므로 후보에 넣지 않는다.
@@ -118,17 +121,17 @@ def info_rows(entry: dict, cycle: list[dict], calendar=None) -> list[tuple[str, 
         rows.append(
             ("최고 / 최저", f"{(high - avg) / avg:+.1%} / {(low - avg) / avg:+.1%}")
         )
-    if held := cycle_holding(cycle, calendar):
-        rows.append(("보유", held))
-    # 진입·청산·기준봉을 각각의 행으로 둔다. 한 줄로 묶으면 좁은 기둥에서 줄이 접혀
-    # 어느 값이 무엇인지 흐려진다.
+    # 기준봉 → 진입 → 청산 → 보유. 시간 순서대로 읽히도록 세운다 — 왜 골랐고(기준봉),
+    # 언제 들어가 언제 나왔으며(진입·청산), 얼마나 들고 있었나(보유).
+    if base := base_bar_label(cycle, entry.get("base_date") or "", calendar):
+        rows.append(("기준봉", base))
     entered, exited = entry_exit_stamps(cycle)
     if entered:
         rows.append(("진입", entered))
     if exited:
         rows.append(("청산", exited))
-    if base := base_bar_label(cycle, entry.get("base_date") or "", calendar):
-        rows.append(("기준봉", base))
+    if held := cycle_holding(cycle, calendar):
+        rows.append(("보유", held))
     if path := transition_path(cycle):
         rows.append(("상태 경로", path))
     if tags := (entry.get("tags") or ""):
@@ -208,12 +211,21 @@ class _Sheet:
         return lines
 
 
+def comment_text(entry: dict, key: str) -> str:
+    """여러 줄로 쓴 코멘트를 한 문단으로. 줄 사이는 가운뎃점으로 나눈다.
+
+    스레드에 답글을 여러 번 달면 줄이 나뉘는데, 그냥 띄어쓰기로 이으면 문장 경계가
+    사라져 한 문장처럼 읽힌다(2026-09-06 실측: "…지지받은 듯 기준봉이 생기고…").
+    """
+    lines = [l.strip() for l in (entry.get(key) or "").split("\n") if l.strip()]
+    return JOIN.join(lines) or "-"
+
+
 def _comments_height(sheet: _Sheet, entry: dict, width: float, size: float) -> float:
     """코멘트 띠의 실제 높이(mm). **배치 전에 알아야** 위·아래 여백을 맞출 수 있다."""
     total = 0.0
     for key in ("good", "bad"):
-        body = " ".join((entry.get(key) or "-").split("\n"))
-        total += len(sheet.wrap(body, size, width - 20)) * LINE + 3
+        total += len(sheet.wrap(comment_text(entry, key), size, width - 20)) * LINE + 3
     return total - 3
 
 
@@ -223,8 +235,7 @@ def _draw_comments(
     """y 는 첫 줄 기준선."""
     for label, key in (("잘한 점", "good"), ("아쉬운 점", "bad")):
         sheet.text(x, y, label, size=size, bold=True)
-        body = " ".join((entry.get(key) or "-").split("\n"))
-        lines = sheet.wrap(body, size, width - 20)
+        lines = sheet.wrap(comment_text(entry, key), size, width - 20)
         for j, line in enumerate(lines):
             sheet.text(x + 20, y - j * LINE, line, size=size)
         y -= len(lines) * LINE + 3

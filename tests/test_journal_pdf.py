@@ -299,3 +299,53 @@ def test_화살표는_뒤따르는_단계와_함께_줄을_넘긴다(tmp_path):
     for line in lines[1:]:
         assert line.startswith("→")  # 이어지는 줄은 화살표로 시작한다
     assert not any(line.rstrip().endswith(("→", "%")) for line in lines)
+
+
+# ── 코멘트 잇기 · 항목 순서 (2026-09-06) ────────────────────────
+
+
+def test_여러_줄로_쓴_코멘트는_가운뎃점으로_잇는다():
+    """스레드에 답글을 여러 번 달면 줄이 나뉜다.
+
+    띄어쓰기로만 이으면 문장 경계가 사라져 한 문장처럼 읽힌다(2026-09-06 실측:
+    "…지지받은 듯 기준봉이 생기고…"). 슬래시는 이 문서에서 `평단 / 수량` 처럼
+    두 값을 나누는 뜻으로 이미 쓰므로 쓰지 않는다.
+    """
+    from trader.journal_pdf import comment_text
+
+    entry = {"good": "박스에서 지지받은 듯\n기준봉이 생기고 첫 반등지점"}
+
+    assert (
+        comment_text(entry, "good")
+        == "박스에서 지지받은 듯 · 기준봉이 생기고 첫 반등지점"
+    )
+
+
+def test_한_줄이면_구분자를_넣지_않는다():
+    from trader.journal_pdf import comment_text
+
+    assert comment_text({"good": "박스 하단을 잡았다"}, "good") == "박스 하단을 잡았다"
+
+
+def test_빈_줄은_버린다():
+    """답글 사이에 빈 줄이 섞여도 구분자가 겹치지 않는다."""
+    from trader.journal_pdf import comment_text
+
+    assert comment_text({"bad": "첫째\n\n\n둘째"}, "bad") == "첫째 · 둘째"
+
+
+def test_안_쓴_코멘트는_대시로_남긴다():
+    from trader.journal_pdf import comment_text
+
+    assert comment_text({}, "good") == "-"
+    assert comment_text({"bad": "   "}, "bad") == "-"
+
+
+def test_매매_정보는_시간_순서로_세운다():
+    """왜 골랐고(기준봉) → 언제 들어가 언제 나왔으며 → 얼마나 들고 있었나."""
+    from trader.trading_calendar import TradingCalendar
+
+    labels = [label for label, _v in info_rows(_entry(), _cycle(), TradingCalendar())]
+    order = [labels.index(x) for x in ("기준봉", "진입", "청산", "보유")]
+
+    assert order == sorted(order)
