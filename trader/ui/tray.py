@@ -169,10 +169,22 @@ class Tray:
     def _quit(self, _icon=None, _item=None) -> None:
         self._root.after(0, self._on_quit)
 
-    def stop(self) -> None:
-        if self._icon is not None:
+    def stop(self, timeout: float = 3.0) -> None:
+        """아이콘을 내리고 **스레드가 끝날 때까지 기다린다.**
+
+        기다리지 않으면 창이 사라진 뒤에도 pystray 스레드가 살아 있어, 윈도우가 이미
+        없는 창에 메시지를 보낼 때 `KeyError` 가 나고 그것을 처리하다 Tkinter 변수가
+        정리되며 `main thread is not in main loop` 로 이어진다(2026-09-06 실측).
+
+        기다림에 상한을 둔다 — 트레이가 응답하지 않는다고 프로그램 종료가 막히면 안 된다.
+        pystray 는 아이콘을 내린 뒤 정리에 몇 초를 쓸 수 있어 3초로 잡았다.
+        """
+        icon, thread = self._icon, self._thread
+        self._icon = self._thread = None
+        if icon is not None:
             try:
-                self._icon.stop()
+                icon.stop()
             except Exception:  # noqa: BLE001
                 pass
-            self._icon = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)

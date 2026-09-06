@@ -16,6 +16,7 @@ settings 테이블에 저장되어 재시작 시 복원된다.
 from __future__ import annotations
 
 import csv
+import os
 import queue
 import re
 import sys
@@ -275,6 +276,11 @@ class App(tk.Tk):
         종료로 남는다 — 트레이가 없다고 프로그램이 안 뜨면 본말이 뒤바뀐다.
         """
         self._tray = Tray(self, self.destroy, self._open_data_folder)
+        if os.environ.get("TRADER_NO_TRAY"):
+            # 테스트용 스위치. 트레이는 별도 스레드에서 도는데, 창을 만들고 부수기를
+            # 반복하면 그 스레드가 창보다 오래 살아 경고가 남는다. UI 테스트는 창
+            # 구성을 보는 것이지 트레이 동작을 보는 것이 아니다.
+            return
         if self._tray.start():
             self.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
 

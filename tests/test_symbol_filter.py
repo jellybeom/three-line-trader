@@ -710,3 +710,59 @@ def test_트레이_아이콘은_준비된_그림을_쓴다():
 
     assert _ICON.exists()
     assert make_image("감시 중", 64).size == (64, 64)
+
+
+def test_트레이는_멈출_때_스레드가_끝날_때까지_기다린다(app, monkeypatch):
+    """기다리지 않으면 창이 사라진 뒤에도 pystray 스레드가 살아 있다.
+
+    윈도우가 이미 없는 창에 메시지를 보내면 KeyError 가 나고, 그것을 처리하다 Tkinter
+    변수가 정리되며 `main thread is not in main loop` 로 이어진다(2026-09-06 실측).
+    """
+    import threading
+
+    from trader.ui.tray import Tray
+
+    joined = []
+
+    class FakeThread:
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            joined.append(timeout)
+
+    tray = Tray(app, app.destroy)
+    tray._icon = type("I", (), {"stop": lambda self: None})()
+    tray._thread = FakeThread()
+
+    tray.stop(timeout=1.5)
+
+    assert joined == [1.5]  # 기다렸다
+    assert not tray.active
+    assert isinstance(threading.current_thread(), threading.Thread)
+
+
+def test_트레이가_응답하지_않아도_종료를_막지_않는다(app):
+    """기다림에 상한이 없으면 트레이 하나 때문에 프로그램이 안 꺼진다."""
+    from trader.ui.tray import Tray
+
+    class StuckThread:
+        def is_alive(self):
+            return True
+
+        def join(self, timeout=None):
+            assert timeout is not None, "상한 없이 기다리면 안 된다"
+
+    tray = Tray(app, app.destroy)
+    tray._icon = type("I", (), {"stop": lambda self: None})()
+    tray._thread = StuckThread()
+
+    tray.stop()  # 예외 없이 돌아와야 한다
+
+    assert not tray.active
+
+
+def test_테스트에서는_트레이를_띄우지_않는다(app):
+    """창을 만들고 부수기를 반복하면 트레이 스레드가 창보다 오래 산다."""
+    assert app._tray is not None  # 객체는 있고
+    assert not app._tray.active  # 아이콘은 안 띄운다

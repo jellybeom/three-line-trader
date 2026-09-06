@@ -18,7 +18,23 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_tray():
+    """테스트에서는 트레이 아이콘을 띄우지 않는다.
+
+    트레이는 별도 스레드에서 도는데, 창을 만들고 부수기를 반복하면 그 스레드가 창보다
+    오래 살아 `main thread is not in main loop` 경고가 남는다(2026-09-06 실측).
+    UI 테스트는 창 구성을 보는 것이지 트레이 동작을 보는 것이 아니다 — 트레이 자체는
+    test_symbol_filter.py 에서 따로 시험한다.
+    """
+    os.environ["TRADER_NO_TRAY"] = "1"
+    yield
+    os.environ.pop("TRADER_NO_TRAY", None)
 
 
 @pytest.fixture
