@@ -281,6 +281,47 @@ def closed_cycles(store, date: str) -> list[dict]:
     return entries
 
 
+def export_pdf(
+    store,
+    date: str,
+    root: Path | str = "journal",
+    calendar=None,
+    symbol: str = "",
+) -> list[Path]:
+    """그날 청산된 매매를 A4 PDF 로. 만든 파일 목록을 돌려준다.
+
+    마크다운 문서와 **같은 폴더**에 둔다. PDF 는 원본이 아니라 출력물이라 `.gitignore`
+    대상이다 — 마크다운이 있으면 언제든 다시 뽑을 수 있고, 매번 커밋하면 저장소가
+    그림 무게로 계속 커진다.
+
+    차트는 보관해 둔 PNG 를 쓴다. 다시 그리려 하면 안 된다 — 3분봉은 지난 날짜를
+    키움에서 다시 받을 수 없어, 저장본이 유일한 사본이다.
+    """
+    from trader.journal_pdf import render_trade_pdf
+
+    entries = [
+        e for e in closed_cycles(store, date) if not symbol or e["symbol"] == symbol
+    ]
+    if not entries:
+        return []
+    cycles = store.cycles_for([(e["symbol"], e.get("trade_date", "")) for e in entries])
+    day_dir = Path(root) / date[:7] / date
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for entry in entries:
+        cycle = cycles.get((entry["symbol"], entry.get("trade_date", "")), [])
+        charts = {}
+        for label, key, _suffix in _CHARTS:
+            src = Path(entry.get(key) or "")
+            if entry.get(key) and src.exists():
+                charts[label] = str(src)
+        out = day_dir / f"{trade_slug(entry)}.pdf"
+        render_trade_pdf(out, entry, cycle, charts, calendar)
+        written.append(out)
+    return written
+
+
 def export_day(
     store,
     date: str,

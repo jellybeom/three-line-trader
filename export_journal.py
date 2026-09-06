@@ -10,6 +10,13 @@
     uv run python export_journal.py --all
     uv run python export_journal.py --mock         # 모의투자 기록
 
+PDF 는 **필요할 때만** 뽑는다 (`--pdf`). 마크다운이 원본이고 PDF 는 출력물이라, 매번
+만들면 느리고 git 저장소가 그림 무게로 계속 커진다.
+
+    uv run python export_journal.py --pdf 2026-09-03          그날 청산분 전부
+    uv run python export_journal.py --pdf 2026-09-03 037440   그중 한 종목만
+    uv run python export_journal.py --pdf --month 2026-09     그 달 전부
+
 DB 는 **프로그램과 같은 규칙**으로 고른다 — `data/mode.txt` 를 읽어 실전이면
 `trader-real.db`, 모의면 `trader-mock.db`. 모드가 DB 안에 있으면 '어느 DB 를 열지'
 정하는 데 순환이 생기므로 모드만 DB 밖에 있다(core._mode_file 참고).
@@ -22,7 +29,7 @@ import sys
 from pathlib import Path
 
 from trader.core import db_path_for, read_mode
-from trader.journal_export import export_day
+from trader.journal_export import export_day, export_pdf
 from trader.store import Store
 from trader.trading_calendar import TradingCalendar, load_holidays
 
@@ -42,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     """argv 를 받는 이유: sync_journal.py 가 이 함수를 그대로 부른다."""
     parser = argparse.ArgumentParser(description="매매일지 마크다운 생성")
     parser.add_argument("date", nargs="?", default="", help="매매일 (YYYY-MM-DD)")
+    parser.add_argument(
+        "symbol", nargs="?", default="", help="종목코드 (--pdf 와 함께)"
+    )
+    parser.add_argument(
+        "--pdf", action="store_true", help="A4 PDF 도 만든다 (기본은 마크다운만)"
+    )
     parser.add_argument("--month", default="", help="그 달 전체 (YYYY-MM)")
     parser.add_argument("--all", action="store_true", help="기록이 있는 모든 매매일")
     parser.add_argument("--out", default="journal", help="문서를 쓸 폴더")
@@ -73,14 +86,23 @@ def main(argv: list[str] | None = None) -> int:
         if not dates:
             print("내보낼 매매일이 없습니다.")
             return 0
+        if args.symbol and not args.pdf:
+            print("종목코드는 --pdf 와 함께 씁니다.")
+            return 1
         total = 0
         for date in dates:
-            written = export_day(store, date, args.out, calendar)
-            if written:
-                docs = [p for p in written if p.suffix == ".md"]
-                print(f"{date}  문서 {len(docs)}개 · 파일 {len(written)}개")
-                total += len(written)
-        print(f"\n{args.out}/ 에 {total}개 파일을 썼습니다.")
+            if args.pdf:
+                written = export_pdf(store, date, args.out, calendar, args.symbol)
+                if written:
+                    print(f"{date}  PDF {len(written)}장")
+            else:
+                written = export_day(store, date, args.out, calendar)
+                if written:
+                    docs = [p for p in written if p.suffix == ".md"]
+                    print(f"{date}  문서 {len(docs)}개 · 파일 {len(written)}개")
+            total += len(written)
+        kind = "PDF" if args.pdf else "파일"
+        print(f"\n{args.out}/ 에 {total}개 {kind}을 썼습니다.")
     finally:
         store.close()
     return 0
