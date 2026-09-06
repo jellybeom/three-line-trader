@@ -37,7 +37,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from trader.journal import compact_timeline, cycle_holding, transition_path
+from trader.journal import (
+    base_bar_label,
+    cycle_holding,
+    entry_exit_stamps,
+    transition_path,
+)
 from trader.journal_export import net_pnl, result_label, slippage_rows, trade_slug
 
 MARGIN = 11.0  # mm — 상하좌우 동일
@@ -115,8 +120,15 @@ def info_rows(entry: dict, cycle: list[dict], calendar=None) -> list[tuple[str, 
         )
     if held := cycle_holding(cycle, calendar):
         rows.append(("보유", held))
-    if timeline := compact_timeline(cycle, entry.get("base_date") or "", calendar):
-        rows.append(("시점", timeline))
+    # 진입·청산·기준봉을 각각의 행으로 둔다. 한 줄로 묶으면 좁은 기둥에서 줄이 접혀
+    # 어느 값이 무엇인지 흐려진다.
+    entered, exited = entry_exit_stamps(cycle)
+    if entered:
+        rows.append(("진입", entered))
+    if exited:
+        rows.append(("청산", exited))
+    if base := base_bar_label(cycle, entry.get("base_date") or "", calendar):
+        rows.append(("기준봉", base))
     if path := transition_path(cycle):
         rows.append(("상태 경로", path))
     if tags := (entry.get("tags") or ""):
@@ -166,9 +178,25 @@ class _Sheet:
         self.c.line(_mm(x1), _mm(y), _mm(x2), _mm(y))
 
     def wrap(self, s: str, size: float, width_mm: float) -> list[str]:
-        """폭에 맞춰 줄을 나눈다."""
-        lines, cur = [], ""
+        """폭에 맞춰 줄을 나눈다.
+
+        **화살표는 뒤따르는 단계에 붙여 둔다.** 그냥 띄어쓰기로 자르면
+        `1차 매수 → 3% 익절 → 5%` / `익절 → 7% 익절` 처럼 `5%` 와 `익절` 이 갈라져
+        읽기 나쁘다. 줄을 넘길 거면 `→ 5% 익절` 째로 넘어가야 한다.
+        """
+        tokens: list[str] = []
         for token in s.split(" "):
+            if token == "→":
+                tokens.append(token)  # 다음 것과 합칠 표시
+            elif tokens and tokens[-1] == "→":
+                tokens[-1] = f"→ {token}"
+            elif tokens and tokens[-1].startswith("→") and len(tokens[-1].split()) < 3:
+                tokens[-1] = f"{tokens[-1]} {token}"
+            else:
+                tokens.append(token)
+
+        lines, cur = [], ""
+        for token in tokens:
             trial = f"{cur} {token}".strip()
             if self.c.stringWidth(trial, self.font, size) <= _mm(width_mm) or not cur:
                 cur = trial

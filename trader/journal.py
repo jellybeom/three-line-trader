@@ -148,6 +148,48 @@ def cycle_holding(
     return format_holding(entry, until, days)
 
 
+def entry_exit_stamps(transitions: list[dict]) -> tuple[str, str]:
+    """(진입, 청산) 시각. 하루 안에 끝났으면 시각만, 날짜를 넘겼으면 날짜까지.
+
+    compact_timeline 은 셋을 한 줄로 합치는데, PDF 처럼 항목을 나란히 세우는 자리에서는
+    '진입 / 청산 / 기준봉' 을 각각의 행으로 두는 편이 읽힌다 — 한 줄로 묶으면 폭이
+    좁을 때 줄이 접혀 어느 값이 무엇인지 흐려진다.
+    """
+    buys = [r for r in transitions if r.get("side") == "매수"]
+    closed = [r for r in transitions if (r.get("to_state") or "") == _CLOSED]
+    if not buys:
+        return "", ""
+    entry = buys[0].get("ts") or ""
+    exit_ts = (closed[-1].get("ts") or "") if closed else ""
+    # 청산이 아직 없으면 날짜를 적을 이유가 없다 — 비교할 상대가 없으니 시각만으로
+    # 충분하고, 날짜는 어차피 문서 헤더에 있다.
+    same_day = not exit_ts or entry[:10] == exit_ts[:10]
+
+    def stamp(ts: str) -> str:
+        if not ts:
+            return ""
+        if len(ts) < 16:
+            return ts[:10]
+        return ts[11:16] if same_day else f"{ts[5:10]} {ts[11:16]}"
+
+    return stamp(entry), stamp(exit_ts)
+
+
+def base_bar_label(
+    transitions: list[dict], base_date: str, calendar: TradingCalendar | None = None
+) -> str:
+    """`08-26 (D+5)` — 기준봉 날짜와 진입까지의 경과 거래일."""
+    if not base_date:
+        return ""
+    buys = [r for r in transitions if r.get("side") == "매수"]
+    text = base_date[5:]
+    if calendar is not None and buys:
+        entry = (buys[0].get("ts") or "")[:10]
+        if entry and (days := format_days(calendar.days_between(base_date, entry))):
+            text += f" ({days})"
+    return text
+
+
 def compact_timeline(
     transitions: list[dict],
     base_date: str = "",

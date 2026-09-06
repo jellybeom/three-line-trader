@@ -245,3 +245,57 @@ def test_PDF는_커밋하지_않는다():
 
     ignore = Path(__file__).resolve().parents[1] / ".gitignore"
     assert "*.pdf" in ignore.read_text(encoding="utf-8")
+
+
+# ── 시점 분리 · 줄바꿈 (2026-09-06) ─────────────────────────────
+
+
+def test_진입_청산_기준봉을_각각의_행으로_둔다():
+    """한 줄로 묶으면 좁은 기둥에서 줄이 접혀 어느 값이 무엇인지 흐려진다."""
+    from trader.trading_calendar import TradingCalendar
+
+    labels = [label for label, _v in info_rows(_entry(), _cycle(), TradingCalendar())]
+
+    assert "시점" not in labels
+    for expected in ("진입", "청산", "기준봉"):
+        assert expected in labels
+
+
+def test_같은_날_끝났으면_시각만_적는다():
+    from trader.journal import entry_exit_stamps
+
+    cycle = [
+        {"ts": "2026-09-03 09:13:36", "side": "매수", "to_state": "1차 매수"},
+        {"ts": "2026-09-03 14:20:41", "side": "매도", "to_state": "종료"},
+    ]
+
+    assert entry_exit_stamps(cycle) == ("09:13", "14:20")
+
+
+def test_날짜를_넘겼으면_날짜까지_적는다():
+    from trader.journal import entry_exit_stamps
+
+    assert entry_exit_stamps(_cycle()) == ("09-02 09:13", "09-03 14:20")
+
+
+def test_아직_보유_중이면_청산은_비어_있다():
+    from trader.journal import entry_exit_stamps
+
+    cycle = [{"ts": "2026-09-03 09:13:36", "side": "매수", "to_state": "1차 매수"}]
+
+    assert entry_exit_stamps(cycle) == ("09:13", "")
+
+
+def test_화살표는_뒤따르는_단계와_함께_줄을_넘긴다(tmp_path):
+    """`… → 5%` / `익절 → 7% 익절` 처럼 갈라지면 읽기 나쁘다."""
+    from reportlab.pdfgen import canvas
+
+    from trader.journal_pdf import _Sheet, register_fonts
+
+    sheet = _Sheet(canvas.Canvas(str(tmp_path / "t.pdf")), *register_fonts())
+    lines = sheet.wrap("1차 매수 → 3% 익절 → 5% 익절 → 7% 익절", 8.2, 30)
+
+    assert len(lines) > 1  # 실제로 접혔다
+    for line in lines[1:]:
+        assert line.startswith("→")  # 이어지는 줄은 화살표로 시작한다
+    assert not any(line.rstrip().endswith(("→", "%")) for line in lines)
