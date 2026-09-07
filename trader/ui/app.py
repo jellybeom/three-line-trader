@@ -369,26 +369,51 @@ class App(tk.Tk):
     # ── 화면 조립 ───────────────────────────────────────────────
 
     def _build_toolbar(self) -> None:
+        """툴바 두 줄. **설정이 아니라 지금 상태**만 둔다.
+
+        첫 줄은 무엇을 누를 수 있나(조작)와 지금 어떤 상태인가(모드·연결·감시),
+        둘째 줄은 보고 있는 날짜와 그날 성적이다. 날짜와 손익을 같은 줄에 둔 이유는
+        **날짜를 바꾸면 아래 숫자가 그날 것으로 바뀌기** 때문이다 — 떨어져 있으면
+        과거 날짜를 보는 중인데 손익은 오늘 것인가 하고 헷갈린다.
+
+        자금·익절·거래비용·알림은 설정 창(`Ctrl+,`)으로 옮겼다. 매일 보는 화면에
+        매일 안 바꾸는 값이 두 줄을 차지하고 있었다.
+        """
+        c = theme.palette()
         self._toolbar = ttk.Frame(self, padding=(8, 5))
         self._toolbar.pack(fill="x")
-        self._toggle_btn = ttk.Button(
-            self._toolbar, text="감시 시작", command=self._toggle_run
-        )
+
+        top = ttk.Frame(self._toolbar)
+        top.pack(fill="x")
+        self._toggle_btn = ttk.Button(top, text="감시 시작", command=self._toggle_run)
         self._toggle_btn.pack(side="left")
         # 매매일지는 로그 우클릭으로도 열 수 있지만, 하루에 한 번은 반드시 여는 화면이라
         # 툴바에도 둔다 (우클릭은 '그 종목의 일지', 이 버튼은 '전체 목록' 으로 역할이 다르다).
-        ttk.Button(self._toolbar, text="매매일지", command=self._open_journal).pack(
+        ttk.Button(top, text="매매일지", command=self._open_journal).pack(
             side="left", padx=(6, 0)
         )
-        ttk.Button(
-            self._toolbar, text="설정", width=5, command=self._open_settings
-        ).pack(side="left", padx=(6, 0))
-        self._status = ttk.Label(
-            self._toolbar, text="정지됨", foreground=theme.palette().muted
+        ttk.Button(top, text="설정", width=5, command=self._open_settings).pack(
+            side="left", padx=(6, 0)
         )
+
+        self._status = ttk.Label(top, text="정지됨", foreground=c.muted)
         self._status.pack(side="right")
-        pnl_box = ttk.Frame(self._toolbar)
-        pnl_box.pack(side="right", padx=(0, 16))
+        self._discord_status = ttk.Label(top, text="● Discord", foreground=c.muted)
+        self._discord_status.pack(side="right", padx=(0, 10))
+        self._kiwoom_status = ttk.Label(top, text="● 키움", foreground=c.muted)
+        self._kiwoom_status.pack(side="right", padx=(0, 8))
+        self._mode_badge = ttk.Label(
+            top, text="모의투자", foreground=c.loss, font=("", 10, "bold")
+        )
+        self._mode_badge.pack(side="right", padx=(0, 12))
+
+        bottom = ttk.Frame(self._toolbar)
+        bottom.pack(fill="x", pady=(4, 0))
+        self._build_date_nav(bottom)
+        self._account = ttk.Label(bottom, text="가용 -", foreground=c.muted)
+        self._account.pack(side="right")
+        pnl_box = ttk.Frame(bottom)
+        pnl_box.pack(side="right", padx=(0, 12))
         self._pnl_parts = {}
         for i, key in enumerate(("실현", "평가", "합계")):
             if i:
@@ -396,210 +421,100 @@ class App(tk.Tk):
             lbl = ttk.Label(pnl_box, text=f"{key} -")
             lbl.pack(side="left")
             self._pnl_parts[key] = lbl
-        self._mode_badge = ttk.Label(
-            self._toolbar,
-            text="모의투자",
-            foreground=theme.palette().loss,
-            font=("", 10, "bold"),
+
+    def _build_date_nav(self, parent: ttk.Frame) -> None:
+        """매매일 이동. 감시 중에는 `_change_date` 가 막는다."""
+        line = ttk.Frame(parent)
+        line.pack(side="left")
+        self._date_var = tk.StringVar()
+        self._date_prev = ttk.Button(
+            line, text="◀", width=2, command=lambda: self._shift_date(-1)
         )
-        self._mode_badge.pack(side="right", padx=(0, 16))
+        self._date_prev.pack(side="left")
+        if DateEntry:  # 날짜 영역을 클릭해도 캘린더가 펼쳐지도록 바인딩
+            self._date_picker = DateEntry(
+                line,
+                textvariable=self._date_var,
+                width=11,
+                justify="center",
+                date_pattern="yyyy-mm-dd",
+                showothermonthdays=False,
+            )
+            self._date_picker.bind(
+                "<<DateEntrySelected>>", lambda _e: self._change_date()
+            )
+            self._date_picker.bind("<Button-1>", self._open_calendar)
+            self._date_picker.pack(side="left", padx=4)
+        else:
+            self._date_picker = None
+            ttk.Entry(
+                line, textvariable=self._date_var, width=12, justify="center"
+            ).pack(side="left", padx=4)
+        self._date_next = ttk.Button(
+            line, text="▶", width=2, command=lambda: self._shift_date(1)
+        )
+        self._date_next.pack(side="left")
+        # 폭을 고정한다. `(월)` 과 `(수)` 의 글자 폭이 달라 그때마다 옆 위젯이 밀린다.
+        self._weekday = ttk.Label(
+            line, text="-", anchor="center", foreground=theme.palette().muted
+        )
+        self._weekday.configure(width=_width_in_chars(self._weekday, _MARKET_SAMPLE))
+        self._weekday.pack(side="left", padx=(8, 0))
 
     def _build_settings(self, parent: ttk.Frame) -> None:
-        """설정 영역: 한 줄 5그룹. 그룹 내 컨텐츠는 상하 가운데 정렬,
-        마지막 그룹이 남는 폭을 채워 오른쪽 여백을 없앤다."""
-        row = ttk.Frame(parent)
-        row.pack(fill="x", padx=8, pady=(2, 4))
-        muted = theme.palette().muted
+        """화면에 붙지 않는 위젯들을 만들어 둔다.
 
-        g_mode = ttk.LabelFrame(row, text="투자 모드", padding=(10, 2, 10, 6))
-        g_mode.pack(side="left", fill="both", expand=True)
-        box = ttk.Frame(g_mode)
-        box.pack(expand=True)  # 상하 가운데 정렬
+        자금·익절·모드·연결 조작은 전부 설정 창(`Ctrl+,`)으로 옮겼다. 다만 이 값들을
+        담는 변수와 일부 위젯은 코어 이벤트를 받아 갱신되는 곳이 여럿이라, 화면에서만
+        떼고 객체는 남긴다 — 없애면 이벤트 처리부를 전부 고쳐야 하고, 그 과정에서
+        빠뜨린 한 줄이 조용한 버그가 된다.
+
+        `hidden` 은 pack 하지 않는 프레임이다. Tk 는 붙지 않은 위젯을 그리지 않으므로
+        화면에는 나타나지 않는다.
+        """
+        hidden = ttk.Frame(parent)
+        # 감시 중 잠글 위젯 목록. 자금·익절 칸이 설정 창으로 옮겨가 지금은 비어 있고,
+        # 창 쪽은 스스로 저장 버튼을 잠근다(TradeSettingsDialog). 목록 자체를 없애지
+        # 않는 이유는 나중에 툴바에 잠글 것이 생길 때 자리를 남겨 두기 위해서다.
+        self._lock_widgets: list = []
+
         self._mode_var = tk.StringVar(value="모의")
-        self._mode_radios = []
-        for text, pady in (("모의", (0, 2)), ("실전", 0)):
-            rb = ttk.Radiobutton(
-                box,
+        self._mode_radios = [
+            ttk.Radiobutton(
+                hidden,
                 text=text,
                 value=text,
                 variable=self._mode_var,
                 command=self._on_mode_selected,
             )
-            rb.pack(anchor="w", pady=pady)
-            self._mode_radios.append(rb)
-
-        g_date = ttk.LabelFrame(row, text="매매일", padding=(10, 2, 10, 6))
-        g_date.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        box = ttk.Frame(g_date)
-        box.pack(expand=True)
-        self._date_var = tk.StringVar()
-        line = ttk.Frame(box)
-        line.pack(pady=(0, 3))
-        self._date_prev = ttk.Button(
-            line, text="◀", width=2, command=lambda: self._shift_date(-1)
-        )
-        self._date_prev.pack(side="left", padx=(0, 3))
-        if DateEntry:  # 날짜 영역을 클릭해도 캘린더가 펼쳐지도록 바인딩
-            self._date_picker = DateEntry(
-                line,
-                textvariable=self._date_var,
-                date_pattern="yyyy-mm-dd",
-                width=11,
-                justify="center",
-                state="readonly",
-            )
-            self._date_picker.pack(side="left")
-            self._date_picker.bind(
-                "<<DateEntrySelected>>", lambda _e: self._change_date()
-            )
-            self._date_picker.bind("<Button-1>", self._open_calendar)
-        else:  # tkcalendar 미설치: 직접 입력 (Enter 로 이동)
-            self._date_picker = None
-            e = ttk.Entry(line, textvariable=self._date_var, width=12, justify="center")
-            e.pack(side="left")
-            e.bind("<Return>", lambda _e: self._change_date())
-        self._date_next = ttk.Button(
-            line, text="▶", width=2, command=lambda: self._shift_date(1)
-        )
-        self._date_next.pack(side="left", padx=(3, 0))
-        # 폭을 고정한다. 날짜를 넘길 때마다 글자 길이가 달라지면 그룹 폭이 늘었다 줄었다
-        # 하며 옆 그룹(키움·Discord·자금)이 밀린다.
-        self._weekday = ttk.Label(box, text="-", anchor="center")
-        self._weekday.configure(width=_width_in_chars(self._weekday, _MARKET_SAMPLE))
-        self._weekday.pack(fill="x")
-
-        g_kiwoom = ttk.LabelFrame(row, text="키움증권 API", padding=(10, 2, 10, 6))
-        g_kiwoom.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        box = ttk.Frame(g_kiwoom)
-        box.pack(expand=True)
-        line = ttk.Frame(box)
-        line.pack(fill="x", pady=(0, 3))
+            for text in ("모의", "실전")
+        ]
         self._kiwoom_connect_btn = ttk.Button(
-            line, text="연결", width=6, command=self._connect_kiwoom
+            hidden, text="연결", command=self._connect_kiwoom
         )
-        self._kiwoom_connect_btn.pack(side="left")
-        self._kiwoom_status = ttk.Label(line, text="● 미연결", foreground=muted)
-        self._kiwoom_status.pack(side="left", padx=(8, 0))
-        line = ttk.Frame(box)
-        line.pack(fill="x")
-        ttk.Button(line, text="⟳", width=3, command=self._refresh_account).pack(
-            side="right"
-        )
-        self._account = ttk.Label(line, text="주문가능 -")
-        self._account.pack(side="right", padx=(0, 6))
-
-        g_discord = ttk.LabelFrame(row, text="Discord", padding=(10, 2, 10, 6))
-        g_discord.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        box = ttk.Frame(g_discord)
-        box.pack(expand=True)
-        line = ttk.Frame(box)
-        line.pack(fill="x", pady=(0, 3))
-        # 봇은 프로그램 시작과 함께 자동 연결되므로 버튼이 없다 (상태만 표시)
-        self._discord_status = ttk.Label(
-            line, text="● 연결 중...", foreground=theme.palette().warn
-        )
-        self._discord_status.pack(side="left")
-        line = ttk.Frame(box)
-        line.pack(fill="x")
-        ttk.Label(line, text="알림", foreground=muted).pack(side="left")
         self._notify_combo = ttk.Combobox(
-            line,
+            hidden,
             values=["전체", "매매만 (시스템 제외)", "에러만", "끔"],
             state="readonly",
-            width=15,
-            justify="center",
         )
         self._notify_combo.set("전체")
-        self._notify_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda _e: self._bus.commands.put(
-                bus.SetNotifyLevel(self._notify_combo.get())
-            ),
-        )
-        self._notify_combo.pack(side="left", padx=(6, 0))
-
-        g_strategy = ttk.LabelFrame(
-            row, text="자금 배분 및 익절 전략", padding=(10, 2, 10, 6)
-        )
-        g_strategy.pack(side="left", fill="both", expand=True, padx=(8, 0))
-        keys = (
-            "total",
-            "max",
-            "buy1",
-            "buy2",
-            "rate1",
-            "rate2",
-            "rate3",
-            "ratio1",
-            "ratio2",
-            "ratio3",
-        )
-        self._funds_vars = {k: tk.StringVar() for k in keys}
-        box = ttk.Frame(g_strategy)
-        box.pack(expand=True)
-
-        grid = ttk.Frame(box)
-        grid.pack(side="left")
-        self._lock_widgets: list = []  # 감시 중 비활성화할 설정 위젯들
-        for r, (label, key, width) in enumerate(
-            [("총 운용금액", "total", 12), ("최대 종목", "max", 12)]
-        ):
-            ttk.Label(grid, text=label, foreground=muted).grid(
-                row=r, column=0, sticky="e", padx=(0, 6)
+        self._apply_btn = ttk.Button(hidden, text="적용", command=self._apply_funds)
+        self._per_symbol = ttk.Label(hidden, text="-")
+        self._funds_vars = {
+            k: tk.StringVar()
+            for k in (
+                "total",
+                "max",
+                "buy1",
+                "buy2",
+                "rate1",
+                "rate2",
+                "rate3",
+                "ratio1",
+                "ratio2",
+                "ratio3",
             )
-            e = ttk.Entry(
-                grid, textvariable=self._funds_vars[key], width=width, justify="center"
-            )
-            e.grid(row=r, column=1, pady=1)
-            if key == "total":
-                self._make_money_entry(e, self._funds_vars[key])
-            e.bind("<KeyRelease>", self._auto_fill_funds, add="+")
-            self._lock_widgets.append(e)
-        ttk.Label(grid, text="종목당", foreground=muted).grid(
-            row=2, column=0, sticky="e", padx=(0, 6)
-        )
-        self._per_symbol = ttk.Label(grid, text="-", anchor="center")
-        self._per_symbol.grid(row=2, column=1)
-        ttk.Label(grid, text="매수 금액", foreground=muted).grid(row=0, column=4)
-        for r, key in [(1, "buy1"), (2, "buy2")]:
-            ttk.Label(grid, text=f"{r}차", foreground=muted).grid(
-                row=r, column=3, sticky="e", padx=(16, 6)
-            )
-            e = ttk.Entry(
-                grid, textvariable=self._funds_vars[key], width=11, justify="center"
-            )
-            e.grid(row=r, column=4, pady=1)
-            self._make_money_entry(e, self._funds_vars[key])
-            self._lock_widgets.append(e)
-
-        ttk.Separator(box, orient="vertical").pack(
-            side="left", fill="y", padx=12, pady=2
-        )
-
-        grid = ttk.Frame(box)
-        grid.pack(side="left")
-        for col, text in enumerate(["1차", "2차", "3차"], start=1):
-            ttk.Label(grid, text=text, foreground=muted).grid(row=0, column=col)
-        for r, (label, prefix) in enumerate(
-            [("익절 %", "rate"), ("매도 비중 %", "ratio")], start=1
-        ):
-            ttk.Label(grid, text=label, foreground=muted).grid(
-                row=r, column=0, sticky="e", padx=(0, 6)
-            )
-            for i in (1, 2, 3):
-                e = ttk.Entry(
-                    grid,
-                    textvariable=self._funds_vars[f"{prefix}{i}"],
-                    width=6,
-                    justify="center",
-                )
-                e.grid(row=r, column=i, padx=2, pady=1)
-                self._lock_widgets.append(e)
-
-        self._apply_btn = ttk.Button(
-            box, text="적용", width=6, command=self._apply_funds
-        )
-        self._apply_btn.pack(side="left", fill="y", padx=(12, 0), pady=2)
+        }
 
     def _build_main_area(self) -> None:
         paned = ttk.PanedWindow(self, orient="vertical")
@@ -1382,8 +1297,10 @@ class App(tk.Tk):
             case bus.ChartReady(symbol=s, name=n, daily_path=dp, minute_path=mp):
                 self._show_chart(s, n, dp, mp)
             case bus.DiscordStatus(connected=ok, detail=detail):
+                # 툴바에 키움과 나란히 놓이므로 **어느 쪽인지** 이름을 남긴다.
+                # 미연결 사유는 로그에 남으니 여기서는 짧게 둔다.
                 self._discord_status.configure(
-                    text="● 연결됨" if ok else f"● 미연결 · {detail}",
+                    text="● Discord",
                     foreground=theme.palette().ok if ok else theme.palette().muted,
                 )
             case bus.SymbolInfo(symbol=s, name=n):
@@ -1392,14 +1309,15 @@ class App(tk.Tk):
             case bus.KiwoomStatus(connected=ok, detail=detail):
                 self._backend_sim = "시뮬레이션" in detail
                 self._kiwoom_status.configure(
-                    text=f"● 연결됨 · {detail}" if ok else f"● 미연결 · {detail}",
+                    text="● 키움",
                     foreground=theme.palette().ok if ok else theme.palette().muted,
                 )
             case bus.Account(deposit=d, account=acct):
                 # 이 값은 '주문가능금액'(= 현금 + 당일 매도대금 재사용분)이다.
                 # 영웅문 [예수금] 탭 숫자와 다르므로 이름을 정확히 적는다.
-                prefix = f"{acct} · " if acct else ""
-                self._account.configure(text=f"{prefix}주문가능 {d:,.0f}")
+                # 계좌 표기는 넣지 않는다 — 툴바가 좁고, 계좌는 설정 창에 있다.
+                # '가용' 은 주문가능금액이다(현금 + 당일 매도대금 재사용분).
+                self._account.configure(text=f"가용 {d:,.0f}원")
             case bus.Mode(real=real):
                 self._mode_real = real
                 self._mode_var.set("실전" if real else "모의")
@@ -1420,8 +1338,11 @@ class App(tk.Tk):
         )
 
     def _set_settings_locked(self, locked: bool) -> None:
-        """감시 중에는 매매 조건에 영향을 주는 설정 위젯을 시각적으로도 잠근다.
-        (주문가능금액 새로고침·알림 수준은 매매와 무관하므로 항상 허용)"""
+        """감시 중에는 매매 조건에 영향을 주는 조작을 시각적으로도 잠근다.
+
+        자금·익절은 설정 창이 스스로 잠그므로(TradeSettingsDialog) 여기서는 툴바에
+        남은 것만 본다 — 매매일 이동과 모드 전환이다.
+        """
         state = "disabled" if locked else "normal"
         widgets = (
             self._lock_widgets

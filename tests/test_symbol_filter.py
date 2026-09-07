@@ -751,3 +751,83 @@ def test_테스트에서는_트레이를_띄우지_않는다(app):
     """창을 만들고 부수기를 반복하면 트레이 스레드가 창보다 오래 산다."""
     assert app._tray is not None  # 객체는 있고
     assert not app._tray.active  # 아이콘은 안 띄운다
+
+
+# ── 툴바 재구성 (2026-09-07) ────────────────────────────────────
+
+
+def test_툴바에는_설정_입력칸이_없다(app):
+    """자금·익절 칸이 매일 보는 화면에서 두 줄을 차지하고 있었다.
+
+    값을 담는 변수는 남기되(이벤트 처리부가 여럿 참조한다) 화면에는 붙이지 않는다.
+    """
+
+    def entries(widget):
+        found = []
+        for child in widget.winfo_children():
+            if child.winfo_class() in ("TEntry", "TCombobox", "TRadiobutton"):
+                found.append(child)
+            found += entries(child)
+        return found
+
+    # 날짜 입력(DateEntry)은 툴바에 남는다 — 그 외 입력칸은 없어야 한다
+    others = [w for w in entries(app._toolbar) if w is not app._date_picker]
+    assert others == []
+    assert app._funds_vars["total"].get() == ""  # 변수는 살아 있다
+
+
+def test_툴바는_두_줄이다(app):
+    """조작·상태가 첫 줄, 보고 있는 날짜와 그날 성적이 둘째 줄이다."""
+    rows = [w for w in app._toolbar.winfo_children() if w.winfo_class() == "TFrame"]
+
+    assert len(rows) == 2
+
+
+def test_날짜와_손익이_같은_줄에_있다(app):
+    """날짜를 바꾸면 손익이 그날 것으로 바뀐다 — 떨어져 있으면 헷갈린다."""
+    rows = [w for w in app._toolbar.winfo_children() if w.winfo_class() == "TFrame"]
+    bottom = rows[1]
+
+    def has(widget, target):
+        return widget is target or any(has(c, target) for c in widget.winfo_children())
+
+    assert has(bottom, app._date_prev)
+    assert has(bottom, app._pnl_parts["합계"])
+    assert has(bottom, app._account)
+
+
+def test_연결_상태는_어느_쪽인지_이름이_남는다(app):
+    """키움과 Discord 가 나란히 놓인다 — 둘 다 `● 연결됨` 이면 구분되지 않는다."""
+    app._dispatch(bus.KiwoomStatus(True, "5790-8081 위탁종합"))
+    app._dispatch(bus.DiscordStatus(True, ""))
+    app.update()
+
+    assert "키움" in app._kiwoom_status.cget("text")
+    assert "Discord" in app._discord_status.cget("text")
+
+
+def test_가용_금액이_툴바에_보인다(app):
+    """'지금 더 살 수 있나' 에 답하는 값이라 매매 중 계속 본다."""
+    app._dispatch(bus.Account(1_509_883, "5790-8081"))
+    app.update()
+
+    text = app._account.cget("text")
+    assert "가용" in text and "1,509,883" in text
+    assert "5790" not in text  # 계좌 표기는 설정 창에 있다
+
+
+def test_설정_버튼과_단축키가_있다(app):
+    """매일 여는 자리가 아니라 필요할 때 여는 자리다 — 찾기 쉬워야 한다."""
+    labels = []
+
+    def walk(widget):
+        for child in widget.winfo_children():
+            try:
+                labels.append(child.cget("text"))
+            except Exception:  # noqa: BLE001 - 텍스트가 없는 위젯
+                pass
+            walk(child)
+
+    walk(app._toolbar)
+    assert "설정" in labels
+    assert app.bind("<Control-comma>")
