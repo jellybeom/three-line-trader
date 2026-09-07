@@ -489,10 +489,12 @@ three-line-trader/
 │   ├── journal.py            # 매매일지 표시 문자열 (상태 경로·진입/청산 시점·보유기간, 순수 함수)
 │   ├── journal_export.py     # 매매일지 문서 렌더·파일 쓰기 (순수 함수 + export_day)
 │   ├── journal_pdf.py        # 매매 1건 = A4 가로 1장 PDF (필요할 때만 뽑는다)
+│   ├── config_io.py          # config.toml 읽기·쓰기 — **주석을 지키고** 원자적으로 저장
 │   ├── journal_input.py      # Discord 스레드 답글 파싱·되먹임 방지 (순수 함수)
 │   ├── stats.py              # 월간 집계 — 수량별·태그별 성적, 체결 오차 (순수 함수)
 │   └── ui/                   # Tkinter UI (화면 단위 분리, 비즈니스 로직 없음)
 │       ├── app.py            # 메인 윈도우: 툴바(감시·모드·손익) + 설정 5그룹 + 상태 바
+│       ├── settings_dialog.py# 매매 설정 (자금·익절·거래비용·알림) + 입력 검증 공용 함수
 │       ├── tray.py           # 트레이 아이콘 — ✕ 를 종료 대신 숨김으로 (없으면 조용히 비활성)
 │       ├── positions_view.py # 종목 모니터: 행 내 📈/✎/✕, 등락률·기준봉 D±n·보유기간 열, 다중 선택 메뉴
 │       ├── events_view.py    # 로그 뷰 (우클릭: 화면 지우기 / CSV 내보내기)
@@ -519,6 +521,7 @@ three-line-trader/
 │   ├── test_sync_journal.py  # git 동기화 (실제 저장소로 시험) + 배치 파일 인코딩 검사
 │   ├── test_journal_input.py # 답글 접두어 규칙·되먹임 방지·journal_sync (v13)
 │   ├── test_stats.py         # 월간 집계 (구간 나누기·표본이 작을 때의 처리)
+│   ├── test_config_io.py     # 설정 저장 (주석 보존·원자적 쓰기·형 검증)
 │   ├── test_journal_pdf.py   # A4 PDF (여백·표 내용·폰트 물러나기)
 │   ├── test_journal_path.py  # 상태 경로·사이클 묶기·화살표 배치·조회 API 파싱
 │   ├── test_trading_calendar.py # 거래일 계산 (공휴일·주말·범위 밖 근사)

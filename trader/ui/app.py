@@ -29,6 +29,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 from trader.journal import format_holding
 from trader.state_machine import State
 from trader.ui import bus
+from trader.ui.settings_dialog import parse_funds
 from trader.ui.tray import Tray
 
 try:
@@ -993,37 +994,20 @@ class App(tk.Tk):
         self._funds_vars["buy2"].set(f"{half:,}")
 
     def _apply_funds(self) -> None:
+        """툴바 [적용]. 검증은 settings_dialog 와 **같은 함수**를 쓴다.
+
+        규칙이 두 벌이 되면 한쪽만 고쳐져 조용히 갈라진다.
+        """
         if self._running:
             messagebox.showwarning(
                 "변경 불가", "감시 중에는 변경할 수 없습니다. 먼저 중지하세요."
             )
             return
-        from trader.state_machine import Params  # 검증 규칙 재사용
-
-        v = {
+        values = {
             k: var.get().replace(",", "").strip() for k, var in self._funds_vars.items()
         }
         try:
-            total = float(v["total"])
-            max_n = int(v["max"])
-            buy1, buy2 = float(v["buy1"]), float(v["buy2"])
-            rates = tuple(float(v[f"rate{i}"]) / 100 for i in (1, 2, 3))
-            ratios = tuple(float(v[f"ratio{i}"]) / 100 for i in (1, 2, 3))
-            if total <= 0 or max_n <= 0:
-                raise ValueError("총 운용금액과 최대 종목 수는 0보다 커야 합니다")
-            if buy1 + buy2 > total / max_n + 1e-9:
-                raise ValueError(
-                    f"1차+2차 금액이 종목당 배분({total / max_n:,.0f})을 초과합니다"
-                )
-            Params(
-                line1=3,
-                line2=2,
-                line3=1,
-                buy1_amount=max(buy1, 3),
-                buy2_amount=max(buy2, 2),
-                tp_rates=rates,
-                tp_ratios=ratios,
-            )  # 익절률·비중 규칙 검증
+            total, max_n, buy1, buy2, rates, ratios = parse_funds(values)
         except ValueError as e:
             messagebox.showerror("입력 오류", str(e))
             return
