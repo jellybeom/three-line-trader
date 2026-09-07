@@ -238,6 +238,8 @@ class App(tk.Tk):
         self._holding_at = datetime.min
         # 코어가 시작 로그로 알려 준다. 설정 창에 채우고, 바뀌었는지 비교하는 데 쓴다.
         self._fee_rates: tuple[float, float] = (0.00015, 0.002)
+        # 코어와 같은 파일을 본다. 코어는 시작할 때 읽고, UI 는 설정 창에서 읽고 쓴다.
+        self._config_path = "config.toml"
         self._staged: dict[str, str] = (
             {}
         )  # CSV 로 불러온 3선 미입력 종목 {코드: 종목명}
@@ -1029,7 +1031,13 @@ class App(tk.Tk):
         values["commission"] = f"{self._fee_rates[0] * 100:g}"
         values["tax"] = f"{self._fee_rates[1] * 100:g}"
         values["notify_level"] = self._notify_combo.get()
-        TradeSettingsDialog(self, values, self._save_settings, running=self._running)
+        TradeSettingsDialog(
+            self,
+            values,
+            self._save_settings,
+            running=self._running,
+            on_env=self._open_env_settings,
+        )
 
     def _save_settings(self, values: dict) -> None:
         """설정 창의 [저장]. 검증에 실패하면 ValueError 를 올려 창이 닫히지 않게 한다."""
@@ -1056,6 +1064,77 @@ class App(tk.Tk):
         if values["notify_level"] != self._notify_combo.get():
             self._notify_combo.set(values["notify_level"])
             self._bus.commands.put(bus.SetNotifyLevel(values["notify_level"]))
+
+    def _open_env_settings(self) -> None:
+        """환경 설정 창. `config.toml` 을 읽어 채운다."""
+        from trader import config_io
+        from trader.ui.env_dialog import EnvSettingsDialog
+
+        data = config_io.read(self._config_path)
+        values = {"mode_real": self._mode_real}
+        for key in (
+            "kiwoom.real.appkey",
+            "kiwoom.real.secretkey",
+            "kiwoom.real.account",
+            "kiwoom.mock.appkey",
+            "kiwoom.mock.secretkey",
+            "kiwoom.mock.account",
+            "discord.bot_token",
+            "discord.channel_id",
+            "discord.journal_channel_id",
+            "discord.log_channel_id",
+            "discord.allowed_users",
+            "startup.auto_connect",
+            "schedule.enabled",
+            "schedule.start",
+            "schedule.stop",
+            "schedule.summary",
+            "chart.font",
+            "pdf.font",
+            "pdf.font_bold",
+        ):
+            values[key] = config_io.get(data, key)
+        EnvSettingsDialog(
+            self, values, self._save_env, self._request_mode, running=self._running
+        )
+
+    def _save_env(self, updates: dict) -> None:
+        """환경 설정 저장. 실패하면 ValueError 를 올려 창이 닫히지 않게 한다."""
+        from trader import config_io
+
+        try:
+            config_io.write(updates, self._config_path)
+        except config_io.ConfigError as err:
+            raise ValueError(str(err)) from err
+        self._log_system(
+            "설정을 저장했습니다 — 채널·스케줄·폰트는 재시작해야 반영됩니다."
+        )
+
+    def _request_mode(self, want_real: bool) -> bool:
+        """모드 전환 요청. 실제로 보냈으면 True.
+
+        확인창과 감시 중 금지는 여기서 본다 — 창이 아니라 앱이 감시 상태를 안다.
+        """
+        if self._running:
+            messagebox.showwarning(
+                "전환 불가", "감시 중에는 모드를 전환할 수 없습니다. 먼저 중지하세요."
+            )
+            return False
+        if want_real and not messagebox.askyesno(
+            "실전투자 전환",
+            "실전투자로 전환합니다.\n실제 주문이 나갑니다.\n\n"
+            "매매 기록(DB)이 실전용으로 바뀌고 키움·Discord 연결이 끊깁니다.\n"
+            "계속할까요?",
+        ):
+            return False
+        self._bus.commands.put(bus.SetMode(want_real))
+        return True
+
+    def _log_system(self, text: str) -> None:
+        """설정 저장처럼 UI 에서 끝나는 일을 로그창에 남긴다."""
+        self.events.append(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "시스템", "-", "설정", text
+        )
 
     def _open_journal(self, select: tuple[str, str] | None = None) -> None:
         """매매일지 창 — 목록은 코어에서 받아 채운다 (JournalEntries 이벤트).

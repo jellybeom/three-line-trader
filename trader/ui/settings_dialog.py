@@ -86,7 +86,9 @@ class TradeSettingsDialog(tk.Toplevel):
     알 수 없어, '저장했는데 안 바뀐다' 는 혼란이 생긴다.
     """
 
-    def __init__(self, master, values: dict, on_save, running: bool = False):
+    def __init__(
+        self, master, values: dict, on_save, running: bool = False, on_env=None
+    ):
         super().__init__(master)
         self.title("매매 설정")
         self.transient(master)
@@ -95,6 +97,7 @@ class TradeSettingsDialog(tk.Toplevel):
         # 필요가 없다. 아이콘만 붙인다.
         apply_icon(self)
         self._on_save = on_save
+        self._on_env = on_env
         self._running = running
         self._vars: dict[str, tk.StringVar] = {}
 
@@ -192,6 +195,10 @@ class TradeSettingsDialog(tk.Toplevel):
     def _build_buttons(self, parent) -> None:
         bar = ttk.Frame(parent)
         bar.pack(fill="x", pady=(4, 0))
+        if self._on_env is not None:
+            # 환경 설정은 한 단계 안쪽에 둔다 — API 키·모드처럼 몇 달에 한 번 건드리는
+            # 값이라, 매일 여는 자리에 나란히 두면 실수로 누를 위험만 커진다.
+            ttk.Button(bar, text="환경 설정…", command=self._open_env).pack(side="left")
         ttk.Button(bar, text="취소", command=self.destroy).pack(side="right")
         self._save_btn = ttk.Button(bar, text="저장", command=self._save)
         self._save_btn.pack(side="right", padx=(0, 6))
@@ -214,6 +221,12 @@ class TradeSettingsDialog(tk.Toplevel):
         out = {k: v.get().replace(",", "").strip() for k, v in self._vars.items()}
         out["notify_level"] = self._notify.get()
         return out
+
+    def _open_env(self) -> None:
+        """환경 설정 창을 열고 이 창은 닫는다 — 두 창이 겹쳐 뜨면 어느 쪽이 위인지 흐려진다."""
+        callback = self._on_env
+        self.destroy()
+        callback()
 
     def _save(self) -> None:
         if self._running:
