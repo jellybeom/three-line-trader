@@ -109,6 +109,18 @@ class NotifyLevel:
 
 
 @dataclass(frozen=True)
+class FeeRates:
+    """거래비용 (시작 시 복원값 또는 변경 확정값).
+
+    설정 창에 채워 넣고, 저장할 때 '정말 바뀌었는지' 를 가리는 데 쓴다 — 안 바뀐 값을
+    다시 쓰면 config.toml 이 매번 갱신되고 로그가 지저분해진다.
+    """
+
+    commission_rate: float
+    tax_rate: float
+
+
+@dataclass(frozen=True)
 class TradeDate:
     """현재 활성 매매일. UI 는 수신 시 테이블을 비우고 이어지는 PositionUpdate 로 다시 채운다."""
 
@@ -341,6 +353,18 @@ class SetNotifyLevel:
     """Discord 알림 수준 변경 (전체 / 매매만 / 에러만 / 끔)."""
 
     level: str
+
+
+@dataclass(frozen=True)
+class SetFees:
+    """거래비용 변경 — config.toml 에 저장하고 **즉시** 반영한다.
+
+    코어는 시작할 때만 config 를 읽으므로, 저장만 하고 끝내면 재시작 전까지 옛 값으로
+    수량을 계산한다. 그러면 '저장했는데 안 바뀐다' 가 된다.
+    """
+
+    commission_rate: float
+    tax_rate: float
 
 
 @dataclass(frozen=True)

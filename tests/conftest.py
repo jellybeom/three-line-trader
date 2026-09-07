@@ -38,6 +38,28 @@ def _no_tray():
 
 
 @pytest.fixture
+def app():
+    """실제 App 창. 여러 파일이 쓰므로 여기 둔다.
+
+    트레이는 `_no_tray` 가 꺼 놓는다 — 창을 만들고 부수기를 반복하는 자리라
+    트레이 스레드가 창보다 오래 살면 경고가 남는다.
+    """
+    tk = pytest.importorskip("tkinter")
+    from trader.ui.app import App
+    from trader.ui import bus
+
+    try:
+        window = App(bus.Bus())
+    except tk.TclError as err:  # pragma: no cover - 화면 없는 환경
+        pytest.skip(f"창을 만들 수 없음: {err}")
+    window.geometry("1400x800+3000+3000")
+    window.update()
+    yield window
+    if window.winfo_exists():
+        window.destroy()
+
+
+@pytest.fixture
 def tk_root():
     """숨겨진 Tk 루트. 살아 있는 루트가 있으면 그것을 빌려 쓴다."""
     tk = pytest.importorskip("tkinter")

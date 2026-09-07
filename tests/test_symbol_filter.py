@@ -20,21 +20,6 @@ from trader.ui import bus
 _ADD_ROWS = ("__add__", "__csv__")
 
 
-@pytest.fixture
-def app():
-    tk = pytest.importorskip("tkinter")
-    from trader.ui.app import App
-
-    try:
-        window = App(bus.Bus())
-    except tk.TclError:
-        pytest.skip("표시 장치가 없는 환경")
-    window.geometry("1400x800+3000+3000")
-    window.update()
-    yield window
-    window.destroy()
-
-
 def _params() -> Params:
     return Params(10_000, 9_500, 9_000, 100_000, 100_000)
 

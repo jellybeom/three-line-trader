@@ -236,6 +236,8 @@ class App(tk.Tk):
         # 종목 → (진입 시각, 청산 시각, 경과 거래일). 보유기간을 화면이 직접 계산한다
         self._holding: dict[str, tuple[str, str, int | None]] = {}
         self._holding_at = datetime.min
+        # 코어가 시작 로그로 알려 준다. 설정 창에 채우고, 바뀌었는지 비교하는 데 쓴다.
+        self._fee_rates: tuple[float, float] = (0.00015, 0.002)
         self._staged: dict[str, str] = (
             {}
         )  # CSV 로 불러온 3선 미입력 종목 {코드: 종목명}
@@ -263,6 +265,7 @@ class App(tk.Tk):
         self._build_status_bar()
 
         self.bind_all("<Button-1>", self._maybe_deselect, add="+")
+        self.bind("<Control-comma>", lambda _e: self._open_settings())
         self._setup_tray()
         self.after(_POLL_MS, self._poll)
         self.after(1000, self._refresh_clock)
@@ -377,6 +380,9 @@ class App(tk.Tk):
         ttk.Button(self._toolbar, text="매매일지", command=self._open_journal).pack(
             side="left", padx=(6, 0)
         )
+        ttk.Button(
+            self._toolbar, text="설정", width=5, command=self._open_settings
+        ).pack(side="left", padx=(6, 0))
         self._status = ttk.Label(
             self._toolbar, text="정지됨", foreground=theme.palette().muted
         )
@@ -1093,6 +1099,49 @@ class App(tk.Tk):
             return
         self._bus.commands.put(cmd)
 
+    def _open_settings(self) -> None:
+        """매매 설정 창. 지금 값을 그대로 채워서 연다.
+
+        저장 경로가 셋으로 갈린다 — 자금·익절은 DB(`SetFunds`), 거래비용은
+        `config.toml`(`SetFees`), 알림 수준은 DB(`SetNotifyLevel`). 사용자에게는 한
+        창이지만 안에서는 각자의 길로 간다.
+        """
+        from trader.ui.settings_dialog import TradeSettingsDialog
+
+        values = {
+            k: var.get().replace(",", "").strip() for k, var in self._funds_vars.items()
+        }
+        values["commission"] = f"{self._fee_rates[0] * 100:g}"
+        values["tax"] = f"{self._fee_rates[1] * 100:g}"
+        values["notify_level"] = self._notify_combo.get()
+        TradeSettingsDialog(self, values, self._save_settings, running=self._running)
+
+    def _save_settings(self, values: dict) -> None:
+        """설정 창의 [저장]. 검증에 실패하면 ValueError 를 올려 창이 닫히지 않게 한다."""
+        from trader.ui.settings_dialog import parse_fees, parse_funds
+
+        total, max_n, buy1, buy2, rates, ratios = parse_funds(values)
+        commission, tax = parse_fees(values)
+
+        # 화면의 자금 칸도 함께 맞춰 둔다 — 툴바와 창이 다른 값을 보이면 혼란스럽다.
+        for key, value in (
+            ("total", total),
+            ("max", max_n),
+            ("buy1", buy1),
+            ("buy2", buy2),
+        ):
+            self._funds_vars[key].set(f"{value:,.0f}" if key != "max" else str(value))
+        for i in (1, 2, 3):
+            self._funds_vars[f"rate{i}"].set(f"{rates[i - 1] * 100:g}")
+            self._funds_vars[f"ratio{i}"].set(f"{ratios[i - 1] * 100:g}")
+
+        self._bus.commands.put(bus.SetFunds(total, max_n, buy1, buy2, rates, ratios))
+        if (commission, tax) != self._fee_rates:
+            self._bus.commands.put(bus.SetFees(commission, tax))
+        if values["notify_level"] != self._notify_combo.get():
+            self._notify_combo.set(values["notify_level"])
+            self._bus.commands.put(bus.SetNotifyLevel(values["notify_level"]))
+
     def _open_journal(self, select: tuple[str, str] | None = None) -> None:
         """매매일지 창 — 목록은 코어에서 받아 채운다 (JournalEntries 이벤트).
 
@@ -1324,6 +1373,8 @@ class App(tk.Tk):
                 self._update_pnl()
             case bus.NotifyLevel(level=lv):
                 self._notify_combo.set(lv)
+            case bus.FeeRates(commission_rate=c, tax_rate=t):
+                self._fee_rates = (c, t)
             case bus.Blocked(symbol=s, active=on, reason=why):
                 self.positions.set_blocked(s, on, why)
             case bus.JournalEntries(entries=entries, months=months):

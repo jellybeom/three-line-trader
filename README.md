@@ -522,6 +522,7 @@ three-line-trader/
 │   ├── test_journal_input.py # 답글 접두어 규칙·되먹임 방지·journal_sync (v13)
 │   ├── test_stats.py         # 월간 집계 (구간 나누기·표본이 작을 때의 처리)
 │   ├── test_config_io.py     # 설정 저장 (주석 보존·원자적 쓰기·형 검증)
+│   ├── test_settings_dialog.py# 매매 설정 창 (입력 검증·세 저장 경로)
 │   ├── test_journal_pdf.py   # A4 PDF (여백·표 내용·폰트 물러나기)
 │   ├── test_journal_path.py  # 상태 경로·사이클 묶기·화살표 배치·조회 API 파싱
 │   ├── test_trading_calendar.py # 거래일 계산 (공휴일·주말·범위 밖 근사)
@@ -773,6 +774,27 @@ git branch -M main
 > 줄바꿈이 LF 여도 여러 줄 `if (...)` 블록을 잘못 끊는다. 그래서 `.bat` 은 **ASCII + CRLF**
 > 로만 두고(`.gitattributes` 가 고정한다), 한글과 판단은 전부 `.py` 쪽에 둔다.
 > `tests/test_sync_journal.py` 가 이 규칙을 검사한다.
+
+### 설정은 어디에 저장되나
+
+한 창에서 고치지만 **저장 경로가 갈린다.** 어디에 있는지를 알아야 '재시작해야 하나' 를
+판단할 수 있다.
+
+| 항목 | 저장 위치 | 반영 |
+|---|---|---|
+| 자금·익절 비중 | DB `settings` | 즉시 (대기 종목에 적용) |
+| 알림 수준 | DB `settings` | 즉시 |
+| 거래비용 | `config.toml` | **즉시** — 저장과 함께 메모리도 갱신한다 |
+| API 키·채널·스케줄 | `config.toml` | 재시작 |
+| 실전/모의 | `data/mode.txt` | 즉시 (DB 교체·연결 해제) |
+
+거래비용을 파일에만 쓰면 재시작 전까지 옛 값으로 매수 수량을 계산한다. 그래서
+`SetFees` 는 저장과 반영을 함께 한다.
+
+**`config.toml` 은 프로그램이 쓰지만 주석은 지킨다**(`config_io.py`). 값이 있는 줄만
+찾아 오른쪽을 갈아 끼우고, 임시 파일에 쓴 뒤 바꿔치기한다 — 통째로 다시 쓰면 몇 달에
+걸쳐 실측으로 쌓은 근거가 한 번에 사라지고, 저장 도중 죽으면 다음 실행에서 아예 뜨지
+않는다.
 
 ### 하루의 시각 정리
 

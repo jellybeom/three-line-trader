@@ -46,7 +46,7 @@ from trader.notifier import (
 )
 from dataclasses import replace
 
-from trader import stats
+from trader import config_io, stats
 from trader.state_machine import (
     carry_to_next_day,
     Decision,
@@ -478,6 +478,7 @@ class Core:
         self._emit_funds()
         self._bus.events.put(bus.Mode(self._mode_real))
         self._bus.events.put(bus.NotifyLevel(self._notify_level))
+        self._bus.events.put(bus.FeeRates(self._commission_rate, self._tax_rate))
         self._bus.events.put(bus.WatchStatus(False))
         self._warn_restored_pending()
 
@@ -527,6 +528,7 @@ class Core:
             case (
                 bus.ConnectKiwoom()
                 | bus.RefreshAccount()
+                | bus.SetFees()
                 | bus.SetNotifyLevel()
                 | bus.SetRunning()
                 | bus.SetFunds()
@@ -831,6 +833,20 @@ class Core:
                 await self._connect()
             case bus.RefreshAccount():
                 await self._refresh_account()
+            case bus.SetFees(commission_rate=c, tax_rate=t):
+                # config.toml 에 남기고 메모리에도 바로 반영한다. 파일에만 쓰면
+                # 재시작 전까지 옛 값으로 매수 수량을 계산한다.
+                try:
+                    config_io.write(
+                        {"fees.commission_rate": c, "fees.tax_rate": t},
+                        self._config_path,
+                    )
+                except config_io.ConfigError as err:
+                    self._log("시스템", "에러", f"거래비용 저장 실패: {err}")
+                    return
+                self._commission_rate, self._tax_rate = c, t
+                self._bus.events.put(bus.FeeRates(c, t))
+                self._log("시스템", "설정", f"수수료 {c:.4%} / 거래세 {t:.4%}")
             case bus.SetNotifyLevel(level=lv):
                 self._notify_level = lv
                 self._store.set_setting("notify_level", lv)

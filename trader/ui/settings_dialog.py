@@ -19,6 +19,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from trader.ui import theme
+from trader.ui.icons import apply_icon
 
 NOTIFY_LEVELS = ("전체", "매매만 (시스템 제외)", "끔")
 
@@ -90,8 +91,9 @@ class TradeSettingsDialog(tk.Toplevel):
         self.title("매매 설정")
         self.transient(master)
         self.resizable(False, False)
-        theme.apply(self, theme.current())
-        theme.apply_icon(self)
+        # 테마는 부모(App)에서 물려받는다 — ttk 스타일은 인터프리터 단위라 다시 칠할
+        # 필요가 없다. 아이콘만 붙인다.
+        apply_icon(self)
         self._on_save = on_save
         self._running = running
         self._vars: dict[str, tk.StringVar] = {}
