@@ -946,6 +946,9 @@ class Core:
 
     async def _connect(self, quiet: bool = False) -> None:
         """키움 접속. quiet 면 실패를 화면 로그로만 남긴다(자동 재시도용)."""
+        # 토큰 발급에 최대 10초가 걸린다. 그동안 상태를 알려 두지 않으면 실패한 것과
+        # 구분되지 않는다.
+        self._bus.events.put(bus.KiwoomStatus(False, "연결 중..."))
         try:
             auth = load_auth(self._config_path, real=self._mode_real)
             await asyncio.to_thread(
@@ -2007,6 +2010,9 @@ class Core:
                 self._bus.events.put(bus.DiscordStatus(False, "연결 실패"))
                 self._log("시스템", "에러", f"Discord 연결 오류: {e}", notify=False)
 
+        # 봇이 실제로 붙기까지 몇 초 걸린다. 그동안 '연결 안 됨' 으로 두면 실패한 것과
+        # 구분되지 않아, 사용자가 무엇을 기다려야 할지 알 수 없다.
+        self._bus.events.put(bus.DiscordStatus(False, "연결 중..."))
         self._bot = bot
         self._bot_task = asyncio.create_task(runner())
         self._bot_task.add_done_callback(self._task_died("Discord 봇"))

@@ -30,6 +30,7 @@ from trader.journal import format_holding
 from trader.state_machine import State
 from trader.ui import bus
 from trader.ui.settings_dialog import parse_funds
+from trader.ui.tooltip import Tooltip
 from trader.ui.tray import Tray
 
 try:
@@ -400,10 +401,14 @@ class App(tk.Tk):
 
         self._status = ttk.Label(top, text="정지됨", foreground=c.muted)
         self._status.pack(side="right")
+        # 화면에는 점 하나로 줄이고 자세한 사정은 툴팁에 둔다 — 미연결 사유까지 툴바에
+        # 적으면 한 줄이 넘치고, 점만 보고는 왜 안 되는지 알 수 없다.
         self._discord_status = ttk.Label(top, text="● Discord", foreground=c.muted)
         self._discord_status.pack(side="right", padx=(0, 10))
+        self._discord_tip = Tooltip(self._discord_status, "연결 안 됨")
         self._kiwoom_status = ttk.Label(top, text="● 키움", foreground=c.muted)
         self._kiwoom_status.pack(side="right", padx=(0, 8))
+        self._kiwoom_tip = Tooltip(self._kiwoom_status, "연결 안 됨")
         self._mode_badge = ttk.Label(
             top, text="모의투자", foreground=c.loss, font=("", 10, "bold")
         )
@@ -1130,6 +1135,25 @@ class App(tk.Tk):
         self._bus.commands.put(bus.SetMode(want_real))
         return True
 
+    @staticmethod
+    def _set_link_status(label, tip, connected: bool, detail: str) -> None:
+        """연결 상태를 색과 툴팁으로 나타낸다.
+
+        **연결 중은 노랑**이다. 회색으로 두면 '안 됨' 과 구분되지 않아, 자동 연결이
+        도는 중인지 실패한 것인지 알 수 없다.
+        """
+        c = theme.palette()
+        connecting = not connected and ("연결 중" in detail or "시도" in detail)
+        label.configure(
+            foreground=c.ok if connected else (c.warn if connecting else c.muted)
+        )
+        if connected:
+            tip.text = f"연결됨 · {detail}" if detail else "연결됨"
+        elif connecting:
+            tip.text = detail or "연결 중..."
+        else:
+            tip.text = f"연결 안 됨 · {detail}" if detail else "연결 안 됨"
+
     def _log_system(self, text: str) -> None:
         """설정 저장처럼 UI 에서 끝나는 일을 로그창에 남긴다."""
         self.events.append(
@@ -1377,20 +1401,16 @@ class App(tk.Tk):
                 self._show_chart(s, n, dp, mp)
             case bus.DiscordStatus(connected=ok, detail=detail):
                 # 툴바에 키움과 나란히 놓이므로 **어느 쪽인지** 이름을 남긴다.
-                # 미연결 사유는 로그에 남으니 여기서는 짧게 둔다.
-                self._discord_status.configure(
-                    text="● Discord",
-                    foreground=theme.palette().ok if ok else theme.palette().muted,
+                # 색으로 상태를, 툴팁으로 사정을 알린다.
+                self._set_link_status(
+                    self._discord_status, self._discord_tip, ok, detail
                 )
             case bus.SymbolInfo(symbol=s, name=n):
                 if getattr(self, "_dialog", None) and self._dialog.winfo_exists():
                     self._dialog.set_name(s, n)
             case bus.KiwoomStatus(connected=ok, detail=detail):
                 self._backend_sim = "시뮬레이션" in detail
-                self._kiwoom_status.configure(
-                    text="● 키움",
-                    foreground=theme.palette().ok if ok else theme.palette().muted,
-                )
+                self._set_link_status(self._kiwoom_status, self._kiwoom_tip, ok, detail)
             case bus.Account(deposit=d, account=acct):
                 # 이 값은 '주문가능금액'(= 현금 + 당일 매도대금 재사용분)이다.
                 # 영웅문 [예수금] 탭 숫자와 다르므로 이름을 정확히 적는다.

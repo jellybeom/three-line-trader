@@ -213,3 +213,52 @@ def _walk(widget):
     for child in widget.winfo_children():
         yield child
         yield from _walk(child)
+
+
+def test_탭을_전환해도_비밀값이_사라지지_않는다(app):
+    """`<FocusIn>` 으로 마스크를 지우면 탭을 눌러 페이지가 보이기만 해도 날아간다.
+
+    2026-09-07 실측: 실전 키 ↔ 모의 키 탭을 오가면 앱키 칸이 비었다.
+    """
+    dlg = EnvSettingsDialog(app, VALUES, lambda _u: None, lambda _r: True)
+    app.update()
+    tabs = next(w for w in _walk(dlg) if w.winfo_class() == "TNotebook")
+
+    for index in (1, 0, 1, 0):
+        tabs.select(index)
+        app.update()
+
+    assert dlg._vars["kiwoom.real.appkey"].get() == "••••••••1234"
+    assert dlg._vars["kiwoom.mock.appkey"].get() == mask("MOCKKEY")
+    assert "kiwoom.real.appkey" not in dlg.updates()  # 안 건드린 것으로 남는다
+    dlg.destroy()
+
+
+def test_글자를_치면_가려진_값이_통째로_지워진다(app):
+    """뒤에 이어 쓰면 `••••1234새키` 가 저장되어 키가 망가진다."""
+    import tkinter as tk
+
+    dlg = EnvSettingsDialog(app, VALUES, lambda _u: None, lambda _r: True)
+    app.update()
+    var = dlg._vars["discord.bot_token"]
+
+    dlg._clear_mask(tk.Event(), var)  # keysym 이 없는 일반 입력
+    assert var.get() == ""
+    dlg.destroy()
+
+
+def test_이동_키로는_지우지_않는다(app):
+    """Tab 이나 방향키는 내용을 바꾸려는 것이 아니다."""
+    import tkinter as tk
+
+    dlg = EnvSettingsDialog(app, VALUES, lambda _u: None, lambda _r: True)
+    app.update()
+    var = dlg._vars["discord.bot_token"]
+
+    for keysym in ("Tab", "Left", "Control_L"):
+        event = tk.Event()
+        event.keysym = keysym
+        dlg._clear_mask(event, var)
+
+    assert dlg._vars["discord.bot_token"].get().startswith("•")
+    dlg.destroy()

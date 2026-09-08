@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from trader.state_machine import Params, Position, State
-from trader.ui import bus
+from trader.ui import bus, theme
 
 _ADD_ROWS = ("__add__", "__csv__")
 
@@ -446,7 +446,11 @@ def test_모든_창에_같은_아이콘이_붙는다(app):
     root = Path(__file__).resolve().parents[1] / "trader" / "ui"
     for path in root.glob("*.py"):
         source = path.read_text(encoding="utf-8")
-        # Toplevel 을 만들거나 상속하는 파일은 apply_icon 을 써야 한다
+        # Toplevel 을 만들거나 상속하는 파일은 apply_icon 을 써야 한다.
+        # 툴팁은 예외다 — `overrideredirect` 로 제목 표시줄을 없앤 임시 창이라
+        # 애초에 아이콘이 그려질 자리가 없다.
+        if "wm_overrideredirect" in source:
+            continue
         makes_window = re.search(r"tk\.Toplevel\(|\(tk\.Toplevel\)|\(tk\.Tk\)", source)
         if makes_window:
             assert "apply_icon" in source, f"{path.name} 에 창 아이콘이 없다"
@@ -831,3 +835,44 @@ def test_설정_버튼과_단축키가_있다(app):
     walk(app._toolbar)
     assert "설정" in labels
     assert app.bind("<Control-comma>")
+
+
+# ── 연결 상태 색·툴팁 (2026-09-07) ──────────────────────────────
+
+
+def test_연결_중은_노랑으로_구분한다(app):
+    """회색으로 두면 '안 됨' 과 구분되지 않아, 도는 중인지 실패인지 알 수 없다."""
+    c = theme.palette()
+
+    app._dispatch(bus.KiwoomStatus(False, "연결 중..."))
+    app.update()
+    assert str(app._kiwoom_status.cget("foreground")) == c.warn
+
+    app._dispatch(bus.KiwoomStatus(True, ""))
+    app.update()
+    assert str(app._kiwoom_status.cget("foreground")) == c.ok
+
+    app._dispatch(bus.KiwoomStatus(False, "연결 실패"))
+    app.update()
+    assert str(app._kiwoom_status.cget("foreground")) == c.muted
+
+
+def test_사정은_툴팁에_담는다(app):
+    """미연결 사유까지 툴바에 적으면 한 줄이 넘치고, 점만 보고는 왜인지 알 수 없다."""
+    app._dispatch(bus.DiscordStatus(False, "연결 실패"))
+    app.update()
+    assert "연결 실패" in app._discord_tip.text
+
+    app._dispatch(bus.DiscordStatus(True, ""))
+    app.update()
+    assert app._discord_tip.text == "연결됨"
+
+
+def test_연결을_시작하면_바로_알린다(app):
+    """토큰 발급에 최대 10초가 걸린다 — 그동안 아무 표시가 없으면 실패로 보인다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core._connect)
+    assert "연결 중" in source

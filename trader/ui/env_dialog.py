@@ -135,13 +135,44 @@ class EnvSettingsDialog(tk.Toplevel):
         entry = ttk.Entry(line, textvariable=var, width=width)
         entry.pack(side="left", fill="x", expand=True)
         if secret:
-            # 가려진 값을 클릭하면 지운다 — 뒤에 이어 쓰면 `••••4f2a새키` 가 된다.
-            entry.bind("<FocusIn>", lambda _e, v=var: self._clear_mask(v))
+            # **글자를 치기 시작할 때만** 지운다. `<FocusIn>` 으로 하면 탭을 눌러
+            # 그 페이지가 보이기만 해도 포커스가 들어와 앱키가 사라진다
+            # (2026-09-07 실측: 실전 키 ↔ 모의 키 탭 전환에서 내용이 날아갔다).
+            entry.bind("<Key>", lambda e, v=var: self._clear_mask(e, v))
 
     @staticmethod
-    def _clear_mask(var: tk.StringVar) -> None:
-        if is_masked(var.get()):
-            var.set("")
+    def _clear_mask(event, var: tk.StringVar) -> str | None:
+        """가려진 값에 처음 글자를 치면 통째로 지운다.
+
+        뒤에 이어 쓰면 `••••4f2a새키` 가 저장되어 키가 망가진다. 이동·복사 키는
+        내용을 바꾸려는 것이 아니므로 그냥 둔다.
+        """
+        if not is_masked(var.get()):
+            return None
+        # keysym 이 없는 이벤트도 온다(합성 이벤트·일부 IME). 없으면 일반 입력으로 본다.
+        if getattr(event, "keysym", "") in (
+            "Tab",
+            "ISO_Left_Tab",
+            "Shift_L",
+            "Shift_R",
+            "Control_L",
+            "Control_R",
+            "Alt_L",
+            "Alt_R",
+            "Left",
+            "Right",
+            "Up",
+            "Down",
+            "Home",
+            "End",
+            "Escape",
+        ):
+            return None
+        var.set("")
+        # keysym 이 없는 이벤트도 온다(합성 이벤트·일부 IME). 없으면 일반 입력으로 본다.
+        if getattr(event, "keysym", "") in ("BackSpace", "Delete"):
+            return "break"  # 지우려던 것이므로 여기서 끝낸다
+        return None
 
     def _build_mode(self, parent) -> None:
         frame = self._section(parent, "투자 모드")
