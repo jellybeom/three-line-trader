@@ -780,24 +780,66 @@ def test_툴바에는_설정_입력칸이_없다(app):
     assert app._funds_vars["total"].get() == ""  # 변수는 살아 있다
 
 
-def test_툴바는_두_줄이다(app):
-    """조작·상태가 첫 줄, 보고 있는 날짜와 그날 성적이 둘째 줄이다."""
-    rows = [w for w in app._toolbar.winfo_children() if w.winfo_class() == "TFrame"]
+def test_좁으면_두_줄_넓으면_한_줄이_된다(app):
+    """묶음이 흐트러지지 않게 프레임만 옮겨 붙는다 — 위젯을 다시 만들면 바인딩이 끊긴다."""
+    from trader.ui.app import _ROW_GAPS
 
-    assert len(rows) == 2
+    app.update()
+    need = (
+        sum(
+            g.winfo_reqwidth()
+            for g in (app._grp_actions, app._grp_status, app._grp_date, app._grp_pnl)
+        )
+        + _ROW_GAPS
+    )
+
+    app._relayout_toolbar(width=need + 500)
+    assert app._one_row is True
+
+    app._relayout_toolbar(width=need - 50)
+    assert app._one_row is False
 
 
-def test_날짜와_손익이_같은_줄에_있다(app):
-    """날짜를 바꾸면 손익이 그날 것으로 바뀐다 — 떨어져 있으면 헷갈린다."""
-    rows = [w for w in app._toolbar.winfo_children() if w.winfo_class() == "TFrame"]
-    bottom = rows[1]
+def test_한_줄일_때_왼쪽은_조작과_상태다(app):
+    """어느 쪽이든 같은 것이 같은 자리에 있어야 창을 넓혀도 눈이 헤매지 않는다."""
+    app._relayout_toolbar(width=2400)
+    app.update()
 
-    def has(widget, target):
-        return widget is target or any(has(c, target) for c in widget.winfo_children())
+    left = [app._grp_actions, app._grp_status]
+    right = [app._grp_date, app._grp_pnl]
+    assert all(g.pack_info()["side"] == "left" for g in left)
+    assert all(g.pack_info()["side"] == "right" for g in right)
 
-    assert has(bottom, app._date_prev)
-    assert has(bottom, app._pnl_parts["합계"])
-    assert has(bottom, app._account)
+
+def test_두_줄일_때도_묶음은_그대로다(app):
+    """윗줄 = 조작·상태, 아랫줄 = 날짜·손익."""
+    app._relayout_toolbar(width=700)
+    app.update()
+
+    assert app._grp_actions.pack_info()["in"] is app._row_top
+    assert app._grp_status.pack_info()["in"] is app._row_top
+    assert app._grp_date.pack_info()["in"] is app._row_bottom
+    assert app._grp_pnl.pack_info()["in"] is app._row_bottom
+
+
+def test_경계에서_떨리지_않는다(app):
+    """한 줄로 되돌아갈 때 여유폭을 더 요구한다 — 없으면 드래그 중 계속 바뀐다."""
+    from trader.ui.app import _ROW_GAPS
+
+    app.update()
+    need = (
+        sum(
+            g.winfo_reqwidth()
+            for g in (app._grp_actions, app._grp_status, app._grp_date, app._grp_pnl)
+        )
+        + _ROW_GAPS
+    )
+
+    app._relayout_toolbar(width=need - 20)
+    assert app._one_row is False
+
+    app._relayout_toolbar(width=need + 20)  # 살짝 넓혀도
+    assert app._one_row is False  # 아직 두 줄이다
 
 
 def test_연결_상태는_어느_쪽인지_이름이_남는다(app):

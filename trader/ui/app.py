@@ -62,6 +62,8 @@ def _market_color(market: str) -> str:
 
 # 개장/휴장 줄의 폭을 정할 때 기준으로 삼는 가장 긴 문구. 휴장 사유는 holidays.csv 에서
 # 오므로 앞으로 조금 길어질 수 있어 여유를 둔다.
+_ROW_GAPS = 40  # 묶음 사이 여백 합계
+_ROW_HYSTERESIS = 60  # 한 줄로 되돌아갈 때 더 요구하는 폭
 _MARKET_SAMPLE = "(월) · 휴장 · 석가탄신일(대체휴일)＋"
 _SEARCH_CHARS = 18  # 검색 입력칸 폭(글자 수) — 종목명은 대개 이보다 짧다
 _IME_GAP_PX = 3  # 검색줄과 표 사이 여백 — 줄이 세로를 많이 먹지 않도록 최소로 둔다
@@ -365,6 +367,13 @@ class App(tk.Tk):
         )
 
     def destroy(self) -> None:  # noqa: D102
+        # 예약해 둔 재배치를 취소한다 — 창이 사라진 뒤 실행되면 TclError 가 난다.
+        if getattr(self, "_relayout_after", None) is not None:
+            try:
+                self.after_cancel(self._relayout_after)
+            except tk.TclError:
+                pass
+            self._relayout_after = None
         if getattr(self, "_tray", None) is not None:
             self._tray.stop()
         super().destroy()
@@ -372,62 +381,151 @@ class App(tk.Tk):
     # ── 화면 조립 ───────────────────────────────────────────────
 
     def _build_toolbar(self) -> None:
-        """툴바 두 줄. **설정이 아니라 지금 상태**만 둔다.
+        """툴바. **창 폭에 따라 한 줄 ↔ 두 줄**로 다시 배치한다.
 
-        첫 줄은 무엇을 누를 수 있나(조작)와 지금 어떤 상태인가(모드·연결·감시),
-        둘째 줄은 보고 있는 날짜와 그날 성적이다. 날짜와 손익을 같은 줄에 둔 이유는
-        **날짜를 바꾸면 아래 숫자가 그날 것으로 바뀌기** 때문이다 — 떨어져 있으면
-        과거 날짜를 보는 중인데 손익은 오늘 것인가 하고 헷갈린다.
+        묶음은 넷이다.
 
-        자금·익절·거래비용·알림은 설정 창(`Ctrl+,`)으로 옮겼다. 매일 보는 화면에
-        매일 안 바꾸는 값이 두 줄을 차지하고 있었다.
+            [조작]  감시·매매일지·설정
+            [상태]  실전/모의 · 키움 · Discord · 감시 중
+            [날짜]  ◀ 매매일 ▶ (요일·장 상태)
+            [손익]  실현 · 평가 · 합계 · 가용
+
+        넓으면 한 줄에 `조작 · 상태 ⋯ 날짜 · 손익`, 좁으면 두 줄로 `조작 ⋯ 상태` /
+        `날짜 ⋯ 손익` 이 된다. **어느 쪽이든 왼쪽은 조작과 상태, 오른쪽은 날짜와 그날
+        돈**이라 같은 것이 늘 같은 자리에 있다.
+
+        위젯을 다시 만들지 않고 **프레임 네 개를 옮겨 붙이기만** 한다. 다시 만들면
+        Tooltip 같은 바인딩이 끊기고, 코어 이벤트가 참조하는 위젯도 바뀐다.
         """
         c = theme.palette()
         self._toolbar = ttk.Frame(self, padding=(8, 5))
         self._toolbar.pack(fill="x")
+        self._row_top = ttk.Frame(self._toolbar)
+        self._row_bottom = ttk.Frame(self._toolbar)
 
-        top = ttk.Frame(self._toolbar)
-        top.pack(fill="x")
-        self._toggle_btn = ttk.Button(top, text="감시 시작", command=self._toggle_run)
+        self._grp_actions = ttk.Frame(self._toolbar)
+        self._toggle_btn = ttk.Button(
+            self._grp_actions, text="감시 시작", command=self._toggle_run
+        )
         self._toggle_btn.pack(side="left")
         # 매매일지는 로그 우클릭으로도 열 수 있지만, 하루에 한 번은 반드시 여는 화면이라
         # 툴바에도 둔다 (우클릭은 '그 종목의 일지', 이 버튼은 '전체 목록' 으로 역할이 다르다).
-        ttk.Button(top, text="매매일지", command=self._open_journal).pack(
+        ttk.Button(self._grp_actions, text="매매일지", command=self._open_journal).pack(
             side="left", padx=(6, 0)
         )
-        ttk.Button(top, text="설정", width=5, command=self._open_settings).pack(
-            side="left", padx=(6, 0)
-        )
+        ttk.Button(
+            self._grp_actions, text="설정", width=5, command=self._open_settings
+        ).pack(side="left", padx=(6, 0))
 
-        self._status = ttk.Label(top, text="정지됨", foreground=c.muted)
-        self._status.pack(side="right")
+        self._grp_status = ttk.Frame(self._toolbar)
+        self._mode_badge = ttk.Label(
+            self._grp_status, text="모의투자", foreground=c.loss, font=("", 10, "bold")
+        )
+        self._mode_badge.pack(side="left", padx=(0, 10))
         # 화면에는 점 하나로 줄이고 자세한 사정은 툴팁에 둔다 — 미연결 사유까지 툴바에
         # 적으면 한 줄이 넘치고, 점만 보고는 왜 안 되는지 알 수 없다.
-        self._discord_status = ttk.Label(top, text="● Discord", foreground=c.muted)
-        self._discord_status.pack(side="right", padx=(0, 10))
-        self._discord_tip = Tooltip(self._discord_status, "연결 안 됨")
-        self._kiwoom_status = ttk.Label(top, text="● 키움", foreground=c.muted)
-        self._kiwoom_status.pack(side="right", padx=(0, 8))
-        self._kiwoom_tip = Tooltip(self._kiwoom_status, "연결 안 됨")
-        self._mode_badge = ttk.Label(
-            top, text="모의투자", foreground=c.loss, font=("", 10, "bold")
+        self._kiwoom_status = ttk.Label(
+            self._grp_status, text="● 키움", foreground=c.muted
         )
-        self._mode_badge.pack(side="right", padx=(0, 12))
+        self._kiwoom_status.pack(side="left", padx=(0, 8))
+        self._kiwoom_tip = Tooltip(self._kiwoom_status, "연결 안 됨")
+        self._discord_status = ttk.Label(
+            self._grp_status, text="● Discord", foreground=c.muted
+        )
+        self._discord_status.pack(side="left", padx=(0, 10))
+        self._discord_tip = Tooltip(self._discord_status, "연결 안 됨")
+        self._status = ttk.Label(self._grp_status, text="정지됨", foreground=c.muted)
+        self._status.pack(side="left")
 
-        bottom = ttk.Frame(self._toolbar)
-        bottom.pack(fill="x", pady=(4, 0))
-        self._build_date_nav(bottom)
-        self._account = ttk.Label(bottom, text="가용 -", foreground=c.muted)
-        self._account.pack(side="right")
-        pnl_box = ttk.Frame(bottom)
-        pnl_box.pack(side="right", padx=(0, 12))
+        self._grp_date = ttk.Frame(self._toolbar)
+        self._build_date_nav(self._grp_date)
+
+        self._grp_pnl = ttk.Frame(self._toolbar)
         self._pnl_parts = {}
         for i, key in enumerate(("실현", "평가", "합계")):
             if i:
-                ttk.Label(pnl_box, text=" · ").pack(side="left")
-            lbl = ttk.Label(pnl_box, text=f"{key} -")
+                ttk.Label(self._grp_pnl, text=" · ").pack(side="left")
+            lbl = ttk.Label(self._grp_pnl, text=f"{key} -")
             lbl.pack(side="left")
             self._pnl_parts[key] = lbl
+        self._account = ttk.Label(self._grp_pnl, text="가용 -", foreground=c.muted)
+        self._account.pack(side="left", padx=(12, 0))
+
+        self._one_row: bool | None = None
+        self._relayout_after: str | None = None
+        self._layout_toolbar(one_row=False)
+        self.bind("<Configure>", self._on_resize, add="+")
+
+    def _on_resize(self, event=None) -> None:
+        """창 크기가 바뀌면 다시 배치한다. **드래그가 멈춘 뒤에** 한 번만 한다.
+
+        `<Configure>` 는 드래그 중 초당 수십 번 온다. 매번 배치하면 눈에 띄게 버벅인다.
+        """
+        if event is not None and event.widget is not self:
+            return
+        if self._relayout_after is not None:
+            self.after_cancel(self._relayout_after)
+        self._relayout_after = self.after(80, self._relayout_toolbar)
+
+    def _relayout_toolbar(self, width: int | None = None) -> None:
+        """필요한 폭을 재서 한 줄로 들어가는지 본다.
+
+        고정 숫자를 박지 않는다 — 손익 금액이 커지거나 폰트가 바뀌면 어긋난다.
+        한 줄로 되돌아갈 때는 **여유폭을 더 요구한다**(hysteresis). 경계에서 한 줄과
+        두 줄이 번갈아 바뀌면 화면이 떨린다.
+        """
+        self._relayout_after = None
+        try:
+            # width 는 시험용이다. Tk 는 geometry 를 바꿔도 winfo_width 가 바로
+            # 따라오지 않아, 테스트가 폭을 직접 넘길 수 있어야 한다.
+            need = (
+                sum(
+                    g.winfo_reqwidth()
+                    for g in (
+                        self._grp_actions,
+                        self._grp_status,
+                        self._grp_date,
+                        self._grp_pnl,
+                    )
+                )
+                + _ROW_GAPS
+            )
+            if width is None:
+                width = self.winfo_width()
+        except tk.TclError:
+            return
+        margin = 0 if self._one_row else _ROW_HYSTERESIS
+        self._layout_toolbar(one_row=width >= need + margin)
+
+    def _layout_toolbar(self, one_row: bool) -> None:
+        """네 묶음을 한 줄 또는 두 줄로 붙인다. 바뀐 것이 없으면 아무것도 하지 않는다."""
+        if one_row == self._one_row:
+            return
+        self._one_row = one_row
+        for group in (
+            self._grp_actions,
+            self._grp_status,
+            self._grp_date,
+            self._grp_pnl,
+        ):
+            group.pack_forget()
+        self._row_top.pack_forget()
+        self._row_bottom.pack_forget()
+
+        if one_row:
+            self._row_top.pack(fill="x")
+            for group in (self._grp_actions, self._grp_status):
+                group.master = self._row_top
+                group.pack(in_=self._row_top, side="left", padx=(0, 12))
+            self._grp_pnl.pack(in_=self._row_top, side="right")
+            self._grp_date.pack(in_=self._row_top, side="right", padx=(0, 12))
+        else:
+            self._row_top.pack(fill="x")
+            self._row_bottom.pack(fill="x", pady=(4, 0))
+            self._grp_actions.pack(in_=self._row_top, side="left")
+            self._grp_status.pack(in_=self._row_top, side="right")
+            self._grp_date.pack(in_=self._row_bottom, side="left")
+            self._grp_pnl.pack(in_=self._row_bottom, side="right")
 
     def _build_date_nav(self, parent: ttk.Frame) -> None:
         """매매일 이동. 감시 중에는 `_change_date` 가 막는다."""
@@ -466,7 +564,8 @@ class App(tk.Tk):
             line, text="-", anchor="center", foreground=theme.palette().muted
         )
         self._weekday.configure(width=_width_in_chars(self._weekday, _MARKET_SAMPLE))
-        self._weekday.pack(side="left", padx=(8, 0))
+        # 날짜와 붙여 둔다 — 한 덩어리로 읽히는 값이라 떨어지면 따로 노는 것처럼 보인다.
+        self._weekday.pack(side="left", padx=(4, 0))
 
     def _build_settings(self, parent: ttk.Frame) -> None:
         """화면에 붙지 않는 위젯들을 만들어 둔다.
