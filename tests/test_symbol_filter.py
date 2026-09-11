@@ -918,3 +918,51 @@ def test_연결을_시작하면_바로_알린다(app):
 
     source = inspect.getsource(Core._connect)
     assert "연결 중" in source
+
+
+def test_손익_금액이_바뀌어도_날짜가_움직이지_않는다(app):
+    """날짜를 넘기면 금액의 자릿수가 매번 달라진다.
+
+    폭이 따라 바뀌면 오른쪽에서 왼쪽으로 밀려 **날짜 위젯이 좌우로 흔들린다**
+    (2026-09-11 지적). 화살표를 연달아 누를 때 버튼이 손 밑에서 도망간다.
+    """
+    app._relayout_toolbar(width=2400)
+    app.update()
+
+    positions = set()
+    for total, realized in (
+        ("+100 (+0.01%)", "+14,480"),
+        ("-44,713 (-2.31%)", "-38,668"),
+        ("+1,234,567 (+12.34%)", "+999,999"),
+    ):
+        app._pnl_parts["합계"].configure(text=f"합계 {total}")
+        app._pnl_parts["실현"].configure(text=f"실현 {realized}")
+        app.update_idletasks()
+        positions.add(app._grp_date.winfo_rootx())
+
+    assert len(positions) == 1
+
+
+def test_가용_금액이_바뀌어도_날짜가_움직이지_않는다(app):
+    app._relayout_toolbar(width=2400)
+    app.update()
+
+    positions = set()
+    for deposit in (12_000, 854_260, 99_999_999):
+        app._dispatch(bus.Account(deposit, ""))
+        app.update_idletasks()
+        positions.add(app._grp_date.winfo_rootx())
+
+    assert len(positions) == 1
+
+
+def test_요일은_날짜에_바짝_붙는다(app):
+    """한 덩어리로 읽히는 값이라 떨어지면 따로 노는 것처럼 보인다."""
+    app.update()
+
+    for text in ("(금) · 개장", "(월) · 휴장 · 대체공휴일"):
+        app._weekday.configure(text=text)
+        app.update_idletasks()
+        arrow_end = app._date_next.winfo_rootx() + app._date_next.winfo_width()
+        gap = app._weekday.winfo_rootx() - arrow_end
+        assert 0 <= gap <= 6, f"{text} 에서 간격이 {gap}px"
