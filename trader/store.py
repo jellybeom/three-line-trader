@@ -579,6 +579,59 @@ class Store:
         ).fetchall()
         return [(r["ts"], r["symbol"], r["name"], r["kind"], r["reason"]) for r in rows]
 
+    def entry_gaps(self, since: str = "", until: str = "") -> list[dict]:
+        """청산된 매매마다 (1선 대비 평단 괴리, 최고 도달률, 세후 손익).
+
+        "계획보다 비싸게 산 매매는 3% 익절까지 잘 못 가는가" 에 답하기 위한 원자료다
+        (2026-09-09 질문). 익절선은 평단 기준이라, 평단이 1선보다 높으면 목표가도 그만큼
+        위로 밀려 도달이 어려워진다 — 그 직관이 실제로 맞는지 세어 본다.
+
+        기준은 **판정가가 아니라 1선**이다. 판정가 대비 오차는 '주문 집행이 얼마나
+        나빴나' 이고, 여기서 묻는 것은 '계획한 가격에서 얼마나 벗어났나' 다.
+
+        최고 도달률(MFE)은 사이클 전체의 최고가를 평단과 견준 값이다. 3%·5% 도달
+        여부를 이 값으로 판정한다.
+        """
+        where = [
+            "p.state = '종료'",
+            "p.total_bought > 0",
+            "p.avg_price > 0",
+            "s.line1 > 0",
+        ]
+        params: list[str] = []
+        if since:
+            where.append("p.trade_date >= ?")
+            params.append(since)
+        if until:
+            where.append("p.trade_date <= ?")
+            params.append(until)
+        rows = self._conn.execute(
+            f"""SELECT p.trade_date, p.symbol, s.name, s.line1,
+                       p.avg_price, p.high_price, p.total_bought
+                FROM positions p JOIN symbols s USING(trade_date, symbol)
+                WHERE {" AND ".join(where)}
+                ORDER BY p.trade_date, p.symbol""",
+            params,
+        ).fetchall()
+
+        out = []
+        for r in rows:
+            avg, line1 = r["avg_price"], r["line1"]
+            realized, fees = self.cycle_totals(r["symbol"], r["trade_date"])
+            out.append(
+                {
+                    "trade_date": r["trade_date"],
+                    "symbol": r["symbol"],
+                    "name": r["name"],
+                    # 양수 = 1선보다 비싸게 샀다 (계획보다 불리)
+                    "entry_gap": (avg - line1) / line1,
+                    "mfe": ((r["high_price"] - avg) / avg) if r["high_price"] else None,
+                    "net": realized - fees,
+                    "invested": avg * r["total_bought"],
+                }
+            )
+        return out
+
     def blocked_counts(self, since: str, until: str) -> dict[str, int]:
         """{사유: 횟수} — 기간 동안 보류가 몇 번 있었는지.
 

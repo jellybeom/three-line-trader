@@ -483,7 +483,13 @@ def proximity_rows(
 
 
 def build_monthly_embed(
-    month: str, entries: list, buckets: list, tags: list, slips: list, blocked: dict
+    month: str,
+    entries: list,
+    buckets: list,
+    tags: list,
+    slips: list,
+    blocked: dict,
+    gaps: list | None = None,
 ) -> dict:
     """월간 집계 embed — **숫자만**. 그래프는 다음 단계다.
 
@@ -513,6 +519,14 @@ def build_monthly_embed(
             {
                 "name": "📦 1차 수량별",
                 "value": "\n".join(_bucket_line(b) for b in rows),
+                "inline": False,
+            }
+        )
+    if rows := [g for g in (gaps or []) if g.trades]:
+        fields.append(
+            {
+                "name": "📐 1선 대비 평단 · 3%/5% 도달률",
+                "value": "\n".join(_gap_line(g) for g in rows),
                 "inline": False,
             }
         )
@@ -557,6 +571,24 @@ def _bucket_line(b) -> str:
         parts.append(f"수익률 {ret:+.2%}")
     if (mfe := b.mfe) is not None:
         parts.append(f"최고 {mfe:+.1%}")
+    return " · ".join(parts)
+
+
+def _gap_line(g) -> str:
+    """`+1~2%  4건 · 3% 25% · 5% 0% · 최고 +1.8%`
+
+    도달률 옆에 늘 건수를 둔다 — 표본이 작을 때 100% 를 신호로 읽으면 그 판단이
+    몇 달을 간다.
+    """
+    parts = [f"`{g.label:>9}` {g.trades:>2}건"]
+    if (r3 := g.rate3) is not None:
+        parts.append(f"3% {r3:.0%}")
+    if (r5 := g.rate5) is not None:
+        parts.append(f"5% {r5:.0%}")
+    if (mfe := g.mfe) is not None:
+        parts.append(f"최고 {mfe:+.1%}")
+    if (ret := g.rate) is not None:
+        parts.append(f"수익률 {ret:+.2%}")
     return " · ".join(parts)
 
 

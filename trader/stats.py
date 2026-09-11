@@ -114,6 +114,77 @@ def by_tag(entries: list[dict], top: int = 5) -> list[Bucket]:
     return sorted(buckets.values(), key=lambda b: -b.trades)[:top]
 
 
+# 1선 대비 평단 괴리 구간. 양수는 계획보다 비싸게 샀다는 뜻이다.
+GAP_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("싸게 샀음", -10.0, -0.001),
+    ("계획대로", -0.001, 0.005),
+    ("+0.5~1%", 0.005, 0.01),
+    ("+1~2%", 0.01, 0.02),
+    ("+2% 넘음", 0.02, 10.0),
+)
+
+
+@dataclass
+class GapBucket:
+    """한 괴리 구간의 성적. **3%·5% 도달률**이 핵심이다."""
+
+    label: str
+    trades: int = 0
+    reached3: int = 0
+    reached5: int = 0
+    mfe_sum: float = 0.0
+    mfe_count: int = 0
+    net: float = 0.0
+    invested: float = 0.0
+
+    @property
+    def rate3(self) -> float | None:
+        return self.reached3 / self.trades if self.trades else None
+
+    @property
+    def rate5(self) -> float | None:
+        return self.reached5 / self.trades if self.trades else None
+
+    @property
+    def mfe(self) -> float | None:
+        return self.mfe_sum / self.mfe_count if self.mfe_count else None
+
+    @property
+    def rate(self) -> float | None:
+        return self.net / self.invested if self.invested else None
+
+
+def by_entry_gap(rows: list[dict], targets=(0.03, 0.05)) -> list[GapBucket]:
+    """1선 대비 평단 괴리 구간별 성적.
+
+    답하려는 질문: **"계획보다 비싸게 산 매매는 3% 익절까지 잘 못 가는가."**
+    익절선이 평단 기준이라 평단이 높으면 목표가도 함께 밀리는데, 그 직관이 실제
+    기록에서도 보이는지 본다(2026-09-09).
+
+    도달 여부는 최고 도달률(MFE)로 판정한다 — 실제로 팔았는지가 아니라 **닿을 수
+    있었는지**를 묻는 것이기 때문이다. 본절 이탈로 먼저 나온 매매도 3% 를 찍었다면
+    '도달' 로 센다.
+    """
+    buckets = [GapBucket(label) for label, _lo, _hi in GAP_BUCKETS]
+    low, high = targets
+    for row in rows:
+        gap, mfe = row.get("entry_gap"), row.get("mfe")
+        if gap is None:
+            continue
+        for bucket, (_label, lo, hi) in zip(buckets, GAP_BUCKETS):
+            if lo <= gap < hi:
+                bucket.trades += 1
+                bucket.net += row.get("net") or 0
+                bucket.invested += row.get("invested") or 0
+                if mfe is not None:
+                    bucket.mfe_sum += mfe
+                    bucket.mfe_count += 1
+                    bucket.reached3 += mfe >= low
+                    bucket.reached5 += mfe >= high
+                break
+    return buckets
+
+
 @dataclass
 class Slip:
     """한 구간의 체결 오차."""

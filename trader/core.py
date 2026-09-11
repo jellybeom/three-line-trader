@@ -1951,6 +1951,7 @@ class Core:
             stats.by_tag(entries),
             stats.by_opening(self._store.slippage_report(since, until)),
             self._store.blocked_counts(since, until),
+            stats.by_entry_gap(self._store.entry_gaps(since, until)),
         )
 
     def months(self, limit: int = 12) -> list[str]:

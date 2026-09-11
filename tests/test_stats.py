@@ -175,3 +175,72 @@ def test_판정가가_없는_체결은_세지_않는다():
     early, late = stats.by_opening([{"ts": "2026-09-01 09:01:00", "side": "매도"}])
 
     assert early.count == 0 and late.count == 0
+
+
+# ── 1선 대비 평단 괴리 (2026-09-09) ─────────────────────────────
+
+
+def _gap_row(gap: float, mfe: float | None = 0.04, net: float = 1_000) -> dict:
+    return {"entry_gap": gap, "mfe": mfe, "net": net, "invested": 100_000}
+
+
+def test_계획보다_비싸게_샀는지로_구간을_가른다():
+    """익절선이 평단 기준이라, 평단이 1선보다 높으면 목표가도 그만큼 위로 밀린다."""
+    rows = [
+        _gap_row(-0.03),  # 싸게 샀음
+        _gap_row(0.0),  # 계획대로
+        _gap_row(0.007),  # +0.5~1%
+        _gap_row(0.015),  # +1~2%
+        _gap_row(0.041),  # +2% 넘음 (야스)
+    ]
+
+    counts = {b.label: b.trades for b in stats.by_entry_gap(rows) if b.trades}
+
+    assert counts == {
+        "싸게 샀음": 1,
+        "계획대로": 1,
+        "+0.5~1%": 1,
+        "+1~2%": 1,
+        "+2% 넘음": 1,
+    }
+
+
+def test_도달_여부는_최고가로_판정한다():
+    """실제로 팔았는지가 아니라 **닿을 수 있었는지**를 묻는다.
+
+    본절 이탈로 먼저 나온 매매도 3% 를 찍었다면 '도달' 이다 — 익절선이 낮았으면
+    벌 수 있었는가에 답하는 값이기 때문이다.
+    """
+    bucket = next(
+        b
+        for b in stats.by_entry_gap([_gap_row(0.0, mfe=0.035), _gap_row(0.0, mfe=0.02)])
+        if b.trades
+    )
+
+    assert bucket.trades == 2
+    assert bucket.reached3 == 1  # 3.5% 만 닿았다
+    assert bucket.reached5 == 0
+    assert bucket.rate3 == 0.5
+
+
+def test_최고가를_모르면_도달로_세지_않는다():
+    """강제 복구된 포지션은 최고가가 없다 — 모르는 것을 '못 갔다' 로 세면 왜곡된다."""
+    bucket = next(b for b in stats.by_entry_gap([_gap_row(0.0, mfe=None)]) if b.trades)
+
+    assert bucket.trades == 1
+    assert bucket.mfe is None
+    assert bucket.rate3 == 0.0  # 분모는 건수라 0 이 되지만 mfe_count 는 안 늘었다
+    assert bucket.mfe_count == 0
+
+
+def test_구간이_겹치지_않는다():
+    """한 매매가 두 구간에 세어지면 합계가 건수보다 커진다."""
+    rows = [_gap_row(g) for g in (-0.001, 0.005, 0.01, 0.02)]
+
+    assert sum(b.trades for b in stats.by_entry_gap(rows)) == len(rows)
+
+
+def test_비어_있는_구간은_판정하지_않는다():
+    empty = stats.GapBucket("빈 구간")
+
+    assert empty.rate3 is None and empty.rate5 is None and empty.mfe is None

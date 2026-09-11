@@ -912,3 +912,25 @@ def test_보류는_횟수로_센다():
     field = next(f for f in embed["fields"] if "진입 못 함" in f["name"])
     assert "25회" in field["name"]
     assert "최대 종목 수 `24회`" in field["value"]
+
+
+def test_도달률_옆에는_늘_건수가_있다():
+    """표본이 작을 때 100% 를 신호로 읽으면 그 판단이 몇 달을 간다."""
+    from trader.notifier import _gap_line
+    from trader.stats import GapBucket
+
+    bucket = GapBucket(
+        "+2% 넘음",
+        trades=1,
+        reached3=0,
+        reached5=0,
+        mfe_sum=-0.03,
+        mfe_count=1,
+        net=-2_500,
+        invested=72_900,
+    )
+
+    line = _gap_line(bucket)
+
+    assert "1건" in line
+    assert "3% 0%" in line and "5% 0%" in line
