@@ -800,15 +800,53 @@ def test_좁으면_두_줄_넓으면_한_줄이_된다(app):
     assert app._one_row is False
 
 
-def test_한_줄일_때_왼쪽은_조작과_상태다(app):
-    """어느 쪽이든 같은 것이 같은 자리에 있어야 창을 넓혀도 눈이 헤매지 않는다."""
+def test_한_줄일_때_손익만_오른쪽이다(app):
+    """왼쪽 정렬이라 앞에서부터 붙는다 — 오른쪽 금액이 변해도 아무것도 밀리지 않는다."""
     app._relayout_toolbar(width=2400)
     app.update()
 
-    left = [app._grp_actions, app._grp_status]
-    right = [app._grp_date, app._grp_pnl]
-    assert all(g.pack_info()["side"] == "left" for g in left)
-    assert all(g.pack_info()["side"] == "right" for g in right)
+    for group in (app._grp_actions, app._grp_date, app._grp_status):
+        assert group.pack_info()["side"] == "left"
+    assert app._grp_pnl.pack_info()["side"] == "right"
+
+
+def test_한_줄일_때_날짜와_상태가_제자리에_있다(app):
+    """날짜는 가장 자주 누르는 것이고, 실전/모의는 하루에도 몇 번 확인하는 값이다.
+
+    금액 자릿수에 따라 움직이면 화살표가 손 밑에서 도망가고, 모드를 늘 다른 자리에서
+    찾게 된다(2026-09-11).
+    """
+    app._relayout_toolbar(width=2400)
+    app.update()
+
+    seen = set()
+    for total, realized in (
+        ("+90 (+0.01%)", "+100"),
+        ("-44,713 (-2.31%)", "-38,668"),
+        ("+1,234,567 (+12.34%)", "+999,999"),
+    ):
+        app._pnl_parts["합계"].configure(text=f"합계 {total}")
+        app._pnl_parts["실현"].configure(text=f"실현 {realized}")
+        app.update_idletasks()
+        seen.add((app._grp_date.winfo_rootx(), app._grp_status.winfo_rootx()))
+
+    assert len(seen) == 1
+
+
+def test_손익은_폭을_고정하지_않는다(app):
+    """오른쪽 끝에 홀로 있어 미는 상대가 없다. 고정하면 작은 금액 앞에 빈칸이 생긴다."""
+    app._relayout_toolbar(width=2400)
+    app.update()
+
+    app._pnl_parts["합계"].configure(text="합계 +90 (+0.01%)")
+    app.update_idletasks()
+    narrow = app._pnl_parts["합계"].winfo_width()
+
+    app._pnl_parts["합계"].configure(text="합계 -44,713 (-2.31%)")
+    app.update_idletasks()
+    wide = app._pnl_parts["합계"].winfo_width()
+
+    assert wide > narrow
 
 
 def test_두_줄일_때도_묶음은_그대로다(app):

@@ -62,9 +62,6 @@ def _market_color(market: str) -> str:
 
 # 개장/휴장 줄의 폭을 정할 때 기준으로 삼는 가장 긴 문구. 휴장 사유는 holidays.csv 에서
 # 오므로 앞으로 조금 길어질 수 있어 여유를 둔다.
-# 손익 라벨 폭을 잡는 견본. 실제로 나올 수 있는 가장 긴 값보다 한 칸 넉넉히 둔다.
-_PNL_SAMPLE = "-9,999,999"
-_TOTAL_SAMPLE = "-9,999,999 (-99.99%)"
 _ROW_GAPS = 40  # 묶음 사이 여백 합계
 _ROW_HYSTERESIS = 60  # 한 줄로 되돌아갈 때 더 요구하는 폭
 _MARKET_SAMPLE = "(월) · 휴장 · 석가탄신일(대체휴일)＋"
@@ -444,25 +441,17 @@ class App(tk.Tk):
         self._build_date_nav(self._grp_date)
 
         self._grp_pnl = ttk.Frame(self._toolbar)
-        # 손익 라벨은 **폭을 고정한다.** 날짜를 넘기면 금액의 자릿수가 매번 달라지는데,
-        # 폭이 따라 바뀌면 오른쪽에서 왼쪽으로 밀려 **날짜 위젯이 좌우로 흔들린다**
-        # (2026-09-11 지적). 숫자는 오른쪽 정렬이라 자리만 잡아 두면 값이 튀지 않는다.
+        # 손익은 **폭을 고정하지 않는다.** 오른쪽 끝에 홀로 있어 길이가 변해도 미는
+        # 상대가 없다. 폭을 고정하면 작은 금액 앞에 빈칸이 생겨 어색하다
+        # (2026-09-11: 날짜를 왼쪽으로 옮기면서 고정이 불필요해졌다).
         self._pnl_parts = {}
-        for i, (key, sample) in enumerate(
-            (("실현", _PNL_SAMPLE), ("평가", _PNL_SAMPLE), ("합계", _TOTAL_SAMPLE))
-        ):
+        for i, key in enumerate(("실현", "평가", "합계")):
             if i:
                 ttk.Label(self._grp_pnl, text=" · ").pack(side="left")
-            lbl = ttk.Label(self._grp_pnl, text=f"{key} -", anchor="e")
-            lbl.configure(width=_width_in_chars(lbl, f"{key} {sample}"))
+            lbl = ttk.Label(self._grp_pnl, text=f"{key} -")
             lbl.pack(side="left")
             self._pnl_parts[key] = lbl
-        self._account = ttk.Label(
-            self._grp_pnl, text="가용 -", anchor="e", foreground=c.muted
-        )
-        self._account.configure(
-            width=_width_in_chars(self._account, "가용 99,999,999원")
-        )
+        self._account = ttk.Label(self._grp_pnl, text="가용 -", foreground=c.muted)
         self._account.pack(side="left", padx=(12, 0))
 
         self._one_row: bool | None = None
@@ -528,11 +517,13 @@ class App(tk.Tk):
 
         if one_row:
             self._row_top.pack(fill="x")
-            for group in (self._grp_actions, self._grp_status):
-                group.master = self._row_top
-                group.pack(in_=self._row_top, side="left", padx=(0, 12))
+            # 버튼 · 날짜 · 상태를 **왼쪽에 차례로** 쌓고 손익만 오른쪽 끝에 둔다.
+            # 왼쪽 정렬이라 앞에서부터 붙으므로, 오른쪽 금액이 길어지든 짧아지든
+            # 날짜도 상태도 밀리지 않는다 — 날짜는 가장 자주 누르는 것이고 실전/모의는
+            # 하루에도 몇 번 확인하는 값이라, 둘 다 제자리에 있어야 한다.
+            for group in (self._grp_actions, self._grp_date, self._grp_status):
+                group.pack(in_=self._row_top, side="left", padx=(0, 14))
             self._grp_pnl.pack(in_=self._row_top, side="right")
-            self._grp_date.pack(in_=self._row_top, side="right", padx=(0, 12))
         else:
             self._row_top.pack(fill="x")
             self._row_bottom.pack(fill="x", pady=(4, 0))
