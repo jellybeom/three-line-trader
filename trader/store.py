@@ -76,6 +76,13 @@ CREATE TABLE IF NOT EXISTS events (       -- append-only 이력
 );
 CREATE INDEX IF NOT EXISTS idx_events_symbol_ts ON events(symbol, ts);
 
+-- positions 의 기본 키는 (trade_date, symbol) 이라 **날짜로 찾을 때만** 빠르다.
+-- cycle_totals 처럼 '한 종목의 지난 행들' 을 찾는 조회는 날짜 범위를 통째로 훑어,
+-- 1년치에서 /월간 의 괴리별 도달률이 1,875ms 가 걸렸다(2026-09-11 실측).
+-- 종목을 앞에 둔 인덱스를 하나 더 두면 289ms 로 줄고 코드는 바뀌지 않는다.
+CREATE INDEX IF NOT EXISTS idx_positions_symbol
+    ON positions(symbol, trade_date);
+
 -- 매매일지: 코멘트와 복기 차트 경로. 매매 데이터(손익·MFE/MAE·태그)는 이미
 -- symbols·positions·events 에 있으므로 여기에는 **사람이 쓴 것과 파일 경로만** 둔다.
 -- 글자 수 제한은 두지 않는다 (TEXT 는 사실상 무제한이고, 차트 PNG 한 장이 텍스트
@@ -206,7 +213,7 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-_SCHEMA_VERSION = 15  # 스키마 변경 시 1 증가.
+_SCHEMA_VERSION = 16  # 스키마 변경 시 1 증가.
 
 
 # 버전별 자동 이관 (컬럼 추가처럼 기존 데이터를 보존할 수 있는 변경만 여기 등록한다).
@@ -280,6 +287,10 @@ _MIGRATIONS: dict[int, tuple] = {
     ),
     15: (  # 답글이 달린 적 있는지 — 일지의 주인이 UI 인지 스레드인지 가른다
         "ALTER TABLE journal_sync ADD COLUMN replied INTEGER NOT NULL DEFAULT 0",
+    ),
+    16: (  # 종목 우선 인덱스 — cycle_totals 계열 조회가 날짜 전체를 훑던 문제
+        "CREATE INDEX IF NOT EXISTS idx_positions_symbol "
+        "ON positions(symbol, trade_date)",
     ),
 }
 

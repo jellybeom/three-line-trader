@@ -421,3 +421,53 @@ def test_하루치_로그는_화면_한도와_무관하게_전부_담긴다(tmp_
     assert rows[-1] == (rows[-1][0], "시스템", "-", "설정", "자동 스케줄 사용")
     assert any(r[2] == "삼성전자" for r in rows)  # 종목명을 끌어온다
     store.close()
+
+
+# ── 종목 우선 인덱스 (2026-09-11) ───────────────────────────────
+
+
+def test_한_종목_조회에_인덱스가_쓰인다(tmp_path):
+    """positions 의 기본 키는 (trade_date, symbol) 이라 날짜로 찾을 때만 빠르다.
+
+    cycle_totals 처럼 '한 종목의 지난 행들' 을 찾는 조회는 날짜 범위를 통째로 훑어,
+    1년치에서 /월간 의 괴리별 도달률이 1,875ms 가 걸렸다(2026-09-11 실측).
+    쿼리 계획이 바뀌면 이 테스트가 먼저 알려 준다.
+    """
+    from trader.store import Store
+
+    store = Store(tmp_path / "t.db")
+    plan = store._conn.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM positions "
+        "WHERE symbol=? AND trade_date<=? ORDER BY trade_date",
+        ("005930", "2026-09-11"),
+    ).fetchone()[3]
+
+    assert "idx_positions_symbol" in plan
+    store.close()
+
+
+def test_예전_DB도_인덱스를_갖게_된다(tmp_path):
+    """이미 쓰던 DB 를 지우지 않고 그대로 빨라져야 한다."""
+    import sqlite3
+
+    from trader.store import Store
+
+    path = tmp_path / "old.db"
+    Store(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute("DROP INDEX idx_positions_symbol")
+    conn.execute("PRAGMA user_version = 15")
+    conn.commit()
+    conn.close()
+
+    store = Store(path)  # 여기서 마이그레이션이 돈다
+
+    names = {
+        r["name"]
+        for r in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    assert "idx_positions_symbol" in names
+    assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 16
+    store.close()
