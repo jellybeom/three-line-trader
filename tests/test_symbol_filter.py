@@ -383,16 +383,34 @@ def test_개장_여부를_모르면_요일만_보여준다(app):
     assert app._weekday.cget("text") == "(화)"
 
 
-def test_날짜를_넘겨도_폭이_변하지_않는다(app):
-    """폭이 들쭉날쭉하면 옆 그룹(키움·Discord·자금)이 밀린다."""
+def test_요일_뒤에_빈칸이_남지_않는다(app):
+    """가장 긴 문구에 맞춰 폭을 고정하면 짧은 날 뒤가 통째로 비어 날짜와 멀어 보인다.
+
+    2026-09-13 지적: `(일) · 휴장 · 주말` 인데도 `석가탄신일(대체휴일)` 만큼 자리를
+    잡고 있었다. 폭을 풀면 내용만큼만 차지한다.
+    """
     app._dispatch(bus.TradeDate("2026-08-17", "휴장", "광복절(대체휴일)"))
-    app.update()
     app.update_idletasks()
     wide = app._weekday.winfo_width()
+
     app._dispatch(bus.TradeDate("2026-08-18", "개장", ""))
-    app.update()
     app.update_idletasks()
-    assert app._weekday.winfo_width() == wide
+
+    assert app._weekday.winfo_width() < wide  # 짧은 날은 좁아진다
+
+
+def test_요일이_길어져도_날짜는_제자리다(app):
+    """폭을 풀어도 날짜가 흔들리면 안 된다 — 화살표가 손 밑에서 도망간다."""
+    app._relayout_toolbar(width=2400)
+    app.update()
+
+    seen = set()
+    for note in ("", "주말", "석가탄신일(대체휴일)"):
+        app._dispatch(bus.TradeDate("2026-10-05", "휴장" if note else "개장", note))
+        app.update_idletasks()
+        seen.add((app._date_prev.winfo_rootx(), app._date_next.winfo_rootx()))
+
+    assert len(seen) == 1
 
 
 def test_휴장_사유가_잘리지_않는다(app):
@@ -410,25 +428,22 @@ def test_휴장_사유가_잘리지_않는다(app):
         assert metrics.measure(text) <= app._weekday.winfo_width(), f"{note} 가 잘린다"
 
 
-def test_폭_계산은_폰트를_실측한다():
-    """글자 수로 어림하면 폰트가 바뀔 때 다시 잘린다."""
-    tk = pytest.importorskip("tkinter")
+def test_폭_계산은_폰트를_실측한다(tk_root):
+    """글자 수로 어림하면 폰트가 바뀔 때 잘린다.
+
+    요일 라벨은 이제 폭을 고정하지 않지만, `_width_in_chars` 는 다른 자리에서도 쓰므로
+    계산 자체는 지켜 둔다. Tk 의 width 단위는 **'0' 문자 폭**이라 한글은 1.5~2배 넓다.
+    """
     from tkinter import font as tkfont, ttk
 
     from trader.ui.app import _MARKET_SAMPLE, _width_in_chars
 
-    try:
-        root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("표시 장치가 없는 환경")
-    root.withdraw()
     longest = "(월) · 휴장 · 석가탄신일(대체휴일)"
     for size in (9, 12, 16, 24):  # 폰트가 커져도 여유가 남아야 한다
         font = tkfont.Font(family="DejaVu Sans", size=size)
-        label = ttk.Label(root, font=font)
+        label = ttk.Label(tk_root, font=font)
         chars = _width_in_chars(label, _MARKET_SAMPLE)
         assert chars * font.measure("0") >= font.measure(longest)
-    root.destroy()
 
 
 # ── 창 아이콘 ─────────────────────────────────────────────────
@@ -800,21 +815,21 @@ def test_좁으면_두_줄_넓으면_한_줄이_된다(app):
     assert app._one_row is False
 
 
-def test_한_줄일_때_손익만_오른쪽이다(app):
-    """왼쪽 정렬이라 앞에서부터 붙는다 — 오른쪽 금액이 변해도 아무것도 밀리지 않는다."""
+def test_한_줄일_때_버튼과_날짜는_왼쪽이다(app):
+    """날짜는 가장 자주 누르는 것이라 자리가 흔들리면 화살표가 손 밑에서 도망간다."""
     app._relayout_toolbar(width=2400)
     app.update()
 
-    for group in (app._grp_actions, app._grp_date, app._grp_status):
+    for group in (app._grp_actions, app._grp_date):
         assert group.pack_info()["side"] == "left"
-    assert app._grp_pnl.pack_info()["side"] == "right"
+    for group in (app._grp_status, app._grp_pnl):
+        assert group.pack_info()["side"] == "right"
 
 
-def test_한_줄일_때_날짜와_상태가_제자리에_있다(app):
-    """날짜는 가장 자주 누르는 것이고, 실전/모의는 하루에도 몇 번 확인하는 값이다.
+def test_한_줄일_때_날짜는_금액과_무관하게_제자리다(app):
+    """상태는 금액 자릿수에 따라 밀려도 된다 — 빨갛고 굵어 위치와 무관하게 보인다.
 
-    금액 자릿수에 따라 움직이면 화살표가 손 밑에서 도망가고, 모드를 늘 다른 자리에서
-    찾게 된다(2026-09-11).
+    날짜는 다르다. 화살표를 연달아 누르는 자리라 1px 도 움직이면 안 된다.
     """
     app._relayout_toolbar(width=2400)
     app.update()
@@ -828,7 +843,7 @@ def test_한_줄일_때_날짜와_상태가_제자리에_있다(app):
         app._pnl_parts["합계"].configure(text=f"합계 {total}")
         app._pnl_parts["실현"].configure(text=f"실현 {realized}")
         app.update_idletasks()
-        seen.add((app._grp_date.winfo_rootx(), app._grp_status.winfo_rootx()))
+        seen.add(app._grp_date.winfo_rootx())
 
     assert len(seen) == 1
 

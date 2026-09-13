@@ -517,13 +517,14 @@ class App(tk.Tk):
 
         if one_row:
             self._row_top.pack(fill="x")
-            # 버튼 · 날짜 · 상태를 **왼쪽에 차례로** 쌓고 손익만 오른쪽 끝에 둔다.
-            # 왼쪽 정렬이라 앞에서부터 붙으므로, 오른쪽 금액이 길어지든 짧아지든
-            # 날짜도 상태도 밀리지 않는다 — 날짜는 가장 자주 누르는 것이고 실전/모의는
-            # 하루에도 몇 번 확인하는 값이라, 둘 다 제자리에 있어야 한다.
-            for group in (self._grp_actions, self._grp_date, self._grp_status):
+            # 버튼 · 날짜는 **왼쪽에 고정**하고, 상태와 손익은 오른쪽에 붙인다.
+            # 날짜는 가장 자주 누르는 것이라 자리가 흔들리면 화살표가 손 밑에서
+            # 도망간다. 상태(실전투자·연결)는 금액 자릿수에 따라 함께 밀리지만,
+            # 빨갛고 굵은 글씨라 위치와 무관하게 눈에 들어온다(2026-09-13 판단).
+            for group in (self._grp_actions, self._grp_date):
                 group.pack(in_=self._row_top, side="left", padx=(0, 14))
             self._grp_pnl.pack(in_=self._row_top, side="right")
+            self._grp_status.pack(in_=self._row_top, side="right", padx=(0, 16))
         else:
             self._row_top.pack(fill="x")
             self._row_bottom.pack(fill="x", pady=(4, 0))
@@ -564,13 +565,12 @@ class App(tk.Tk):
             line, text="▶", width=2, command=lambda: self._shift_date(1)
         )
         self._date_next.pack(side="left")
-        # 폭을 고정한다. `(월)` 과 `(수)` 의 글자 폭이 달라 그때마다 옆 위젯이 밀린다.
-        self._weekday = ttk.Label(
-            line, text="-", anchor="center", foreground=theme.palette().muted
-        )
-        self._weekday.configure(width=_width_in_chars(self._weekday, _MARKET_SAMPLE))
-        # 날짜와 붙여 둔다 — 한 덩어리로 읽히는 값이라 떨어지면 따로 노는 것처럼 보인다.
-        self._weekday.pack(side="left", padx=(4, 0))
+        # 날짜에 바짝 붙인다 — 한 덩어리로 읽히는 값이다. **폭을 고정하지 않는다.**
+        # 가장 긴 문구(`(월) · 휴장 · 석가탄신일(대체휴일)`)에 맞춰 두면 `(일) · 휴장 ·
+        # 주말` 처럼 짧은 날 뒤가 통째로 비어 날짜와 멀어 보인다(2026-09-13 지적).
+        # 요일이 길어져도 왼쪽 정렬이라 날짜는 제자리고, 오른쪽 묶음만 밀린다.
+        self._weekday = ttk.Label(line, text="-", foreground=theme.palette().muted)
+        self._weekday.pack(side="left", padx=(3, 0))
 
     def _build_settings(self, parent: ttk.Frame) -> None:
         """화면에 붙지 않는 위젯들을 만들어 둔다.
