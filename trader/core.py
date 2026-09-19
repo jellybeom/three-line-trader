@@ -318,6 +318,8 @@ class Core:
         self._sched_done: dict[str, str] = {}
         # 휴장 안내를 보낸 날짜. DB 가 아니라 여기 두어 **재시작하면 다시 알린다**.
         self._holiday_notified = ""
+        # 감시 복구를 못 한 날. 5초마다 도는 판정이라 하루 한 번만 알린다.
+        self._resume_warned = ""
         # 마지막으로 **WebSocket** 틱을 받은 시각 (REST 보정은 세지 않는다)
         self._last_ws_tick = 0.0
         self._last_cycle_error = ""  # 같은 실패를 5초마다 다시 알리지 않기 위해
@@ -859,6 +861,7 @@ class Core:
                     )
                     return
                 self._running = r
+                self._store.set_setting("watching", "1" if r else "0")
                 self._bus.events.put(bus.WatchStatus(r))
                 self._log("시스템", "감시", "감시 시작" if r else "감시 중지")
                 if r:
@@ -2301,6 +2304,39 @@ class Core:
         self._sched_done[key] = today
         self._store.set_setting(f"sched_{key}", today)
 
+    def _was_watching(self) -> bool:
+        """직전에 감시 중이었는가. 사고로 죽은 것과 일부러 멈춘 것을 가른다."""
+        return self._store.get_setting("watching", "0") == "1"
+
+    async def _resume_watch(self, today: str) -> None:
+        """감시를 되살린다. **몰래 켜지지 않도록 반드시 알린다.**
+
+        `_auto_start` 와 같은 안전장치를 건다 — 화면의 매매일이 오늘이 아니면 지난 날짜
+        리스트로 매매하게 된다.
+        """
+        if self._broker is None:
+            return  # 아직 연결 전 — 다음 판정에서 다시 본다
+        if self._date != today:
+            if self._resume_warned != today:
+                self._resume_warned = today
+                self._log(
+                    "시스템",
+                    "경고",
+                    f"감시가 꺼져 있는데 되살리지 못했습니다 — 화면의 매매일"
+                    f"({self._date})이 오늘이 아닙니다",
+                )
+            return
+        self._running = True
+        self._store.set_setting("watching", "1")
+        self._bus.events.put(bus.WatchStatus(True))
+        self._log(
+            "시스템",
+            "경고",  # '매매만' 필터를 넘겨 폰으로도 가게 한다
+            "감시가 꺼져 있어 다시 시작했습니다 — 장중에 프로그램이 재시작된 것으로 "
+            "보입니다. 그 사이의 진입 신호는 놓쳤을 수 있습니다.",
+        )
+        await self.send_briefing()
+
     async def _check_schedule(self) -> None:
         if not self._schedule.get("enabled"):
             return
@@ -2323,12 +2359,21 @@ class Core:
                 )
             return
 
-        if (
-            self._sched_last("start") != today
-            and self._schedule["start"] <= t < self._schedule["stop"]
-        ):
+        in_session = self._schedule["start"] <= t < self._schedule["stop"]
+        if self._sched_last("start") != today and in_session:
             self._sched_mark("start", today)
             await self._auto_start(today)
+        elif in_session and not self._running and self._was_watching():
+            # **장중에 감시가 꺼져 있고, 직전에 감시 중이었다면 되살린다.**
+            #
+            # 시작 시각은 '그 순간에 한 번' 발동하고 DB 에 기록을 남긴다. 그래서
+            # 10:32 에 프로세스가 되살아나면 '오늘은 이미 시작했다' 로 판단해 건너뛰고,
+            # 감시가 꺼진 채 장이 끝난다(2026-09-15 실측: 5시간을 놓쳤다).
+            #
+            # 손으로 중지해 둔 경우와 구분하려고 **감시 상태를 DB 에 남긴다.** 사고로
+            # 죽은 것이면 '감시 중' 으로 남아 있고, 일부러 멈췄으면 '중지' 로 남는다 —
+            # 저녁에 종목을 정리하려고 멈춘 뒤 재시작했을 때 감시가 붙으면 편집이 막힌다.
+            await self._resume_watch(today)
 
         if (
             self._sched_last("stop") != today
@@ -2337,6 +2382,7 @@ class Core:
         ):
             self._sched_mark("stop", today)
             self._running = False
+            self._store.set_setting("watching", "0")
             self._bus.events.put(bus.WatchStatus(False))
             self._log("시스템", "감시", "자동 스케줄 — 감시 중지")
 

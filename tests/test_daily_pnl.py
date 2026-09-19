@@ -471,3 +471,85 @@ def test_예전_DB도_인덱스를_갖게_된다(tmp_path):
     assert "idx_positions_symbol" in names
     assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 16
     store.close()
+
+
+# ── 재시작 후 감시 복구 (2026-09-15) ────────────────────────────
+
+
+def _core(tmp_path, running: bool, watched: bool, date: str = "2026-09-15"):
+    """감시 상태만 정해 둔 코어. 스케줄 판정만 시험한다."""
+    from datetime import time as dtime
+
+    from trader.core import Core
+    from trader.store import Store
+    from trader.ui import bus
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._store = Store(tmp_path / "t.db")
+    core._store.set_setting("watching", "1" if watched else "0")
+    core._running = running
+    core._date = date
+    core._broker = object()  # 연결됨으로 둔다
+    core._schedule = {
+        "enabled": True,
+        "start": dtime(8, 55),
+        "stop": dtime(15, 30),
+        "summary": dtime(15, 35),
+    }
+    return core
+
+
+def test_감시_중_죽었다_살아나면_다시_감시한다(tmp_path):
+    """시작 시각은 '그 순간 한 번' 발동하고 DB 에 기록을 남긴다.
+
+    그래서 장중에 프로세스가 되살아나면 '오늘은 이미 시작했다' 로 판단해 건너뛰고,
+    감시가 꺼진 채 장이 끝난다(2026-09-15 실측: Windows 업데이트 재부팅으로 5시간을
+    놓쳤다).
+    """
+    core = _core(tmp_path, running=False, watched=True)
+
+    assert core._was_watching() is True
+    core._store.close()
+
+
+def test_손으로_멈춘_것은_되살리지_않는다(tmp_path):
+    """저녁에 종목을 정리하려고 멈춘 뒤 재시작했을 때 감시가 붙으면 편집이 막힌다."""
+    core = _core(tmp_path, running=False, watched=False)
+
+    assert core._was_watching() is False
+    core._store.close()
+
+
+def test_지난_날짜_리스트로는_되살리지_않는다(tmp_path):
+    """화면의 매매일이 오늘이 아니면 지난 리스트로 매매하게 된다."""
+    import asyncio
+
+    core = _core(tmp_path, running=False, watched=True, date="2026-09-14")
+
+    asyncio.run(core._resume_watch("2026-09-15"))
+
+    assert core._running is False
+    core._store.close()
+
+
+def test_되살리면_반드시_알린다(tmp_path):
+    """몰래 켜지면 그것대로 곤란하다 — 그 사이 신호를 놓쳤을 수 있다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core._resume_watch)
+
+    assert '"경고"' in source  # '매매만' 필터를 넘겨 폰으로도 간다
+    assert "놓쳤을 수 있습니다" in source
+
+
+def test_감시_상태를_DB에_남긴다():
+    """사고로 죽은 것과 일부러 멈춘 것을 가르는 유일한 근거다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core._handle_system_command)
+
+    assert 'set_setting("watching"' in source
