@@ -109,6 +109,19 @@ class NotifyLevel:
 
 
 @dataclass(frozen=True)
+class TradePdfSent:
+    """PDF 전송 결과 (일지 창의 상태줄에 쓴다).
+
+    코어가 결과를 알아도 창에 전할 길이 없으면 '보내는 중…' 이 영영 남는다
+    (2026-09-16 지적). error 가 비어 있으면 성공이다.
+    """
+
+    trade_date: str
+    symbol: str
+    error: str = ""
+
+
+@dataclass(frozen=True)
 class FeeRates:
     """거래비용 (시작 시 복원값 또는 변경 확정값).
 

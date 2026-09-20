@@ -1477,6 +1477,9 @@ class App(tk.Tk):
                 self._notify_combo.set(lv)
             case bus.FeeRates(commission_rate=c, tax_rate=t):
                 self._fee_rates = (c, t)
+            case bus.TradePdfSent(trade_date=td, symbol=sym, error=err):
+                if (dlg := getattr(self, "_journal_dialog", None)) is not None:
+                    dlg.pdf_sent(td, sym, err)
             case bus.Blocked(symbol=s, active=on, reason=why):
                 self.positions.set_blocked(s, on, why)
             case bus.JournalEntries(entries=entries, months=months):

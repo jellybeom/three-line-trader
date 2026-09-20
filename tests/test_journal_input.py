@@ -245,7 +245,7 @@ class _FakeMessage:
         self.author = type("A", (), {"bot": bot})()
         self.edited = None
 
-    async def edit(self, content=None, embed=None):
+    async def edit(self, content=None, embed=None, view=None):
         self.edited = embed if embed is not None else content
         if content is not None:
             self.content = content
@@ -506,8 +506,10 @@ class _FakeChannel:
         self.sent = []
         self._next = 500
 
-    async def send(self, embed=None):
+    async def send(self, embed=None, view=None):
+        # view 는 `📄 PDF 받기` 버튼이다. 진짜 채널은 받으므로 가짜도 받아야 한다.
         self._next += 1
+        self.last_view = view
         thread = _FakeThread(self._next)
         message = _FakeMessage(self._next, "")
         message.create_thread = lambda name, auto_archive_duration=None: _made(
@@ -939,3 +941,50 @@ def test_PDF를_보내면_빈_문자열을_돌려준다(bot, monkeypatch, tmp_pa
 
     assert _run(b.send_trade_pdf("2026-09-15", "441270", str(pdf))) == ""
     assert thread.sent  # 실제로 보냈다
+
+
+# ── 스레드의 PDF 버튼 (2026-09-16) ──────────────────────────────
+
+
+def test_버튼에_매매가_담겨_재시작해도_눌린다(bot):
+    """custom_id 에 담지 않으면 재시작 후 옛 버튼이 죽어 '눌러도 아무 일이 없는' 상태가 된다."""
+    b, _thread, _store = bot
+
+    view = b._pdf_view("2026-09-15", "441270")
+    ids = [item.custom_id for item in view.children]
+
+    assert ids == ["trade_pdf:2026-09-15:441270"]
+    assert view.timeout is None  # 영구 — 시간이 지나도 살아 있다
+
+
+def test_기존_스레드를_고쳐_쓸_때도_버튼이_붙는다(bot):
+    """옛 스레드에는 버튼이 없다 — 기동할 때 최신 형식으로 고쳐 쓰며 함께 붙인다."""
+    b, _thread, _store = bot
+
+    view = b._pdf_view("2026-08-24", "263800")
+
+    assert view.children  # 버튼이 하나는 있다
+    assert view.children[0].label == "PDF 받기"
+
+
+def test_허용되지_않은_사용자는_버튼을_눌러도_막힌다(bot):
+    """버튼은 스레드를 볼 수 있는 누구에게나 보인다."""
+    b, _thread, _store = bot
+    replies = []
+
+    async def send_message(text, **_kwargs):
+        replies.append(text)
+
+    interaction = type(
+        "I",
+        (),
+        {
+            "user": type("U", (), {"id": 999})(),  # 허용 목록은 {1} 뿐이다
+            "data": {"custom_id": "trade_pdf:2026-09-15:441270"},
+            "response": type("R", (), {"send_message": staticmethod(send_message)})(),
+        },
+    )()
+
+    _run(b._on_pdf_button(interaction))
+
+    assert replies and "허용되지 않은" in replies[0]

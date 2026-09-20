@@ -28,6 +28,7 @@ from discord import app_commands
 from trader import journal_input
 from trader.notifier import build_trade_embed
 
+_PDF_BUTTON_ID = "trade_pdf"  # 버튼 custom_id 접두어
 _BACKLOG_MAX = 30  # 기동 시 훑을 최근 스레드 수 (약 한 달치)
 _BACKFILL_DAYS = 5  # 스레드를 뒤늦게 만들 대상 기간 (최근 매매일 수)
 
@@ -239,6 +240,14 @@ class TraderBot:
         self._register_commands(tree)
 
         @client.event
+        async def on_interaction(interaction) -> None:
+            """버튼 클릭. 슬래시 명령은 CommandTree 가 따로 받는다."""
+            if interaction.type is not discord.InteractionType.component:
+                return
+            if str(interaction.data.get("custom_id", "")).startswith(_PDF_BUTTON_ID):
+                await self._on_pdf_button(interaction)
+
+        @client.event
         async def on_ready() -> None:  # noqa: RUF029 — discord.py 규약
             self._channel = client.get_channel(
                 self._config.channel_id
@@ -331,6 +340,48 @@ class TraderBot:
         except (discord.HTTPException, ValueError):
             return None
 
+    def _pdf_view(self, trade_date: str, symbol: str):
+        """스레드 embed 에 붙는 `📄 PDF 받기` 버튼.
+
+        스레드 안에서는 **어느 매매인지 이미 정해져 있다.** 슬래시 명령처럼 날짜와
+        종목코드를 칠 이유가 없어, 폰에서 한 번 누르면 끝난다.
+
+        `custom_id` 에 매매를 담아 **봇이 재시작해도 눌리게** 한다(영구 View). 담지
+        않으면 재시작 후 옛 버튼이 죽어 '눌러도 아무 일이 없는' 상태가 된다.
+        """
+        bot = self
+
+        class PdfView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=None)  # 영구 — 시간이 지나도 살아 있다
+                self.add_item(
+                    discord.ui.Button(
+                        label="PDF 받기",
+                        emoji="📄",
+                        style=discord.ButtonStyle.secondary,
+                        custom_id=f"{_PDF_BUTTON_ID}:{trade_date}:{symbol}",
+                    )
+                )
+
+        return PdfView()
+
+    async def _on_pdf_button(self, interaction) -> None:
+        """버튼이 눌렸을 때. **이미 있어도 다시 만든다** — 코멘트가 바뀌었을 수 있다."""
+        if not self._config.allows(interaction.user.id):
+            await interaction.response.send_message(
+                "허용되지 않은 사용자입니다.", ephemeral=True
+            )
+            return
+        try:
+            _prefix, trade_date, symbol = interaction.data["custom_id"].split(":")
+        except (KeyError, ValueError):
+            return
+        # 만드는 데 몇 초 걸린다. Discord 는 3초 안에 응답이 없으면 실패로 본다.
+        await interaction.response.defer()
+        error = await self._core.make_and_send_pdf(trade_date, symbol)
+        if error:
+            await interaction.followup.send(f"PDF 를 만들지 못했습니다 — {error}")
+
     async def send_trade_pdf(self, trade_date: str, symbol: str, path: str) -> str:
         """매매 한 건의 PDF 를 그 매매의 스레드로. 실패 사유를 돌려준다(빈 문자열이면 성공).
 
@@ -413,7 +464,10 @@ class TraderBot:
         ):
             return False
         try:
-            message = await self._journal_channel.send(embed=self._to_embed(embed))
+            message = await self._journal_channel.send(
+                embed=self._to_embed(embed),
+                view=self._pdf_view(trade_date, symbol),
+            )
         except discord.Forbidden as err:
             # 50001 Missing Access. 비공개 채널은 역할별로 접근을 따로 허용해야 한다 —
             # 채널은 보이는데 전송만 막혀 청산할 때마다 같은 오류가 난다(2026-08-26).
@@ -602,7 +656,10 @@ class TraderBot:
                 current = message.embeds[0].description if message.embeds else ""
                 if current == embed["description"]:
                     continue
-                await message.edit(embed=self._to_embed(embed))
+                await message.edit(
+                    embed=self._to_embed(embed),
+                    view=self._pdf_view(trade_date, symbol),
+                )
                 fixed += 1
                 await self._attach_charts(trade_date, symbol)
             except (discord.HTTPException, ValueError, IndexError):

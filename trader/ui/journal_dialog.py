@@ -294,7 +294,11 @@ def summarize(entry: dict) -> list[tuple[str, str]]:
     if path := (entry.get("path") or ""):
         rows.append(("상태 경로", path))
     if timeline := (entry.get("timeline") or ""):
-        rows.append(("시점", timeline))
+        # 보유기간은 따로 뺀다 — 한 줄로 묶으면 좁은 칸에서 줄이 접혀 어느 값이
+        # 무엇인지 흐려진다 (PDF 도 같은 이유로 나눴다).
+        rows.append(("시점", strip_holding(timeline)))
+    if holding := (entry.get("holding") or ""):
+        rows.append(("보유", holding))
     if tags := (entry.get("tags") or ""):
         rows.append(("태그", " ".join(f"#{t}" for t in tags.split(",") if t)))
     if base := (entry.get("base_date") or ""):
@@ -337,6 +341,16 @@ def summarize_stats(entries: list[dict], total: int | None = None) -> str:
 
 
 PDF_MARK = "📄"
+
+
+def strip_holding(timeline: str) -> str:
+    """`… · 보유 4일차` 에서 보유 부분만 떼어 낸다.
+
+    코어가 `holding` 을 따로 보내 주지만, 예전 방식으로 만들어진 문자열에도 붙어 있어
+    그대로 두면 같은 값이 두 줄에 나온다.
+    """
+    parts = [p for p in timeline.split(" · ") if not p.startswith("보유 ")]
+    return " · ".join(parts)
 
 
 def entry_label(entry: dict, has_pdf: bool = False) -> str:
@@ -852,6 +866,20 @@ class JournalDialog(tk.Toplevel):
             return
         self._on_send_pdf(entry["trade_date"], entry["symbol"], str(path))
         self._status.configure(text="Discord 로 보내는 중…")
+
+    def pdf_sent(self, trade_date: str, symbol: str, error: str) -> None:
+        """코어가 전송을 마치면 앱이 불러 준다 — 상태줄을 끝맺는다.
+
+        결과가 돌아오지 않으면 '보내는 중…' 이 영영 남아, 갔는지 안 갔는지 알 수 없다.
+        그 사이에 다른 매매를 골랐을 수 있으므로 **보낸 매매가 지금 고른 것일 때만**
+        고쳐 쓴다.
+        """
+        entry = self._current
+        if not entry or (entry["trade_date"], entry["symbol"]) != (trade_date, symbol):
+            return
+        self._status.configure(
+            text=f"전송 실패 — {error}" if error else "Discord 로 보냈습니다"
+        )
 
     def _save(self) -> None:
         if self._current is None:

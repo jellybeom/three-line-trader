@@ -832,12 +832,43 @@ class Core:
                     return
                 self._spawn(self._send_trade_pdf(td, sym, path), "PDF 전송")
 
+    async def make_and_send_pdf(self, trade_date: str, symbol: str) -> str:
+        """PDF 를 만들어 그 매매의 스레드로. 실패 사유를 돌려준다(빈 문자열이면 성공).
+
+        Discord 버튼·슬래시 명령이 함께 쓴다. **이미 있어도 다시 만든다** — 코멘트를
+        나중에 썼으면 내용이 달라진다.
+
+        만드는 일은 **워커 스레드**에서 한다. 차트 두 장을 읽어 그리는 데 몇 초가 걸려,
+        여기서 그대로 하면 그동안 틱 처리가 멈춘다.
+        """
+        if self._bot is None:
+            return "Discord 가 연결되어 있지 않습니다"
+        try:
+            path = await asyncio.to_thread(self._build_pdf, trade_date, symbol)
+        except Exception as err:  # noqa: BLE001 — 실패해도 매매는 계속돈다
+            return str(err)
+        if path is None:
+            return "그 날짜에 청산된 매매가 없습니다"
+        return await self._bot.send_trade_pdf(trade_date, symbol, str(path))
+
+    def _build_pdf(self, trade_date: str, symbol: str):
+        """(워커 스레드) PDF 를 만든다. **DB 를 새로 연다** — SQLite 는 스레드 전용이다."""
+        from trader.journal_export import export_pdf
+
+        store = Store(db_path_for(self._mode_real, self._db_dir))
+        try:
+            made = export_pdf(store, trade_date, calendar=self._calendar, symbol=symbol)
+        finally:
+            store.close()
+        return made[0] if made else None
+
     async def _send_trade_pdf(self, trade_date: str, symbol: str, path: str) -> None:
         """PDF 를 스레드로. 결과를 로그에 남긴다 — 조용히 실패하면 갔는지 알 수 없다."""
         # 이름은 **DB 에서** 찾는다. 일지 창에서는 지난 매매도 보내므로 오늘 감시 목록
         # (`_entries`)에 없을 수 있다 — 거기서만 찾으면 예전 매매에서 터진다.
         name = self._store.symbol_name(trade_date, symbol) or symbol
         error = await self._bot.send_trade_pdf(trade_date, symbol, path)
+        self._bus.events.put(bus.TradePdfSent(trade_date, symbol, error))
         if error:
             self._log(symbol, "에러", f"{name} PDF 전송 실패 — {error}")
         else:
@@ -2818,9 +2849,12 @@ class Core:
                 {
                     **entry,
                     "path": transition_path(cycle),
+                    # 보유기간은 **따로 보낸다.** 한 줄로 묶으면 좁은 칸에서 줄이
+                    # 접혀 어느 값이 무엇인지 흐려진다 (PDF 도 같은 이유로 나눴다).
                     "timeline": cycle_timeline(
                         cycle, entry.get("base_date") or "", self._calendar
                     ),
+                    "holding": cycle_holding(cycle, self._calendar),
                 }
             )
         return entries, self._store.journal_months()
