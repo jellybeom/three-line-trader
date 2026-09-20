@@ -1257,7 +1257,28 @@ class App(tk.Tk):
             on_period=self._request_journal_period,
             months=months,
             on_delete=self._delete_journal,
+            on_pdf=self._make_pdf,
         )
+
+    def _make_pdf(self, trade_date: str, symbol: str):
+        """매매 한 건을 PDF 로. **워커 스레드에서 불린다** — DB 를 새로 연다.
+
+        SQLite 연결은 만든 스레드에서만 쓸 수 있어, 코어의 것을 빌려 쓸 수 없다.
+        조회 전용이라 같은 파일을 함께 열어도 안전하다(WAL).
+        """
+        from trader.core import db_path_for
+        from trader.journal_export import export_pdf
+        from trader.store import Store
+        from trader.trading_calendar import TradingCalendar
+
+        store = Store(db_path_for(self._mode_real, "data"))
+        try:
+            made = export_pdf(
+                store, trade_date, calendar=TradingCalendar(), symbol=symbol
+            )
+        finally:
+            store.close()
+        return made[0] if made else None
 
     def _delete_journal(self, trade_date: str, symbol: str) -> None:
         """일지 삭제 후 목록을 다시 받는다. 확인창은 다이얼로그가 이미 띄웠다."""

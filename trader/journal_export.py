@@ -79,6 +79,16 @@ def trade_slug(entry: dict) -> str:
     return f"{entry.get('symbol', '')}-{safe_name(entry.get('name', ''))}"
 
 
+def pdf_path(entry: dict, root: Path | str = "journal") -> Path:
+    """그 매매의 PDF 가 놓이는 자리. **만들지는 않는다.**
+
+    화면에서 '이미 있는지' 를 묻거나 만든 뒤 열 때 쓴다. 경로 규칙이 export_pdf 와
+    갈라지면 '있다고 표시되는데 안 열리는' 일이 생기므로 한 곳에서만 만든다.
+    """
+    date = entry.get("trade_date", "")
+    return Path(root) / date[:7] / date / f"{trade_slug(entry)}.pdf"
+
+
 def result_label(entry: dict) -> str:
     """익절 / 손절 / 본전 / 보유 중 — 폴더를 정렬만 해도 결과가 모이도록."""
     if (entry.get("state") or "") != "종료":
@@ -316,7 +326,7 @@ def export_pdf(
             src = Path(entry.get(key) or "")
             if entry.get(key) and src.exists():
                 charts[label] = str(src)
-        out = day_dir / f"{trade_slug(entry)}.pdf"
+        out = pdf_path(entry, root)
         render_trade_pdf(out, entry, cycle, charts, calendar)
         written.append(out)
     return written

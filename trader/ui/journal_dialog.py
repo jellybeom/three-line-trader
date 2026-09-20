@@ -11,6 +11,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
+import subprocess
+import sys
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
@@ -332,7 +336,10 @@ def summarize_stats(entries: list[dict], total: int | None = None) -> str:
     return " · ".join(parts)
 
 
-def entry_label(entry: dict) -> str:
+PDF_MARK = "📄"
+
+
+def entry_label(entry: dict, has_pdf: bool = False) -> str:
     """목록 한 줄 — 앞에 코멘트 작성 여부만 표시한다.
 
     예전에는 손익 아이콘(💰/🛑/⚪)도 붙였는데, 작아서 구분이 안 되고 **부호와 색까지
@@ -341,8 +348,11 @@ def entry_label(entry: dict) -> str:
     """
     net = net_pnl(entry)
     written = WRITTEN_MARK if (entry.get("good") or entry.get("bad")) else "　"
+    # PDF 가 있으면 뒤에 붙인다. 앞에 두면 ✍ 와 자리를 다퉈 어느 쪽이 무엇인지 흐려진다.
+    made = f" {PDF_MARK}" if has_pdf else ""
     return (
-        f"{written} {entry.get('trade_date', '')} {entry.get('name', '')} {net:+,.0f}"
+        f"{written} {entry.get('trade_date', '')} {entry.get('name', '')} "
+        f"{net:+,.0f}{made}"
     )
 
 
@@ -368,6 +378,7 @@ class JournalDialog(tk.Toplevel):
         on_period: Callable[[str, str], None] | None = None,
         months: tuple = (),
         on_delete: Callable[[str, str], None] | None = None,
+        on_pdf: Callable[[str, str], object] | None = None,
     ):
         super().__init__(master)
         self.title("매매일지")
@@ -379,6 +390,8 @@ class JournalDialog(tk.Toplevel):
         self._on_save = on_save
         self._on_period_change = on_period
         self._on_delete = on_delete
+        self._on_pdf = on_pdf
+        self._pdf_busy = False
         self._current: dict | None = None
         self._views: dict[str, ChartView] = {}
 
@@ -521,6 +534,9 @@ class JournalDialog(tk.Toplevel):
         self._status.pack(side="left")
         self._save_button = ttk.Button(bar, text="저장", command=self._save)
         self._save_button.pack(side="right")
+        self._pdf_button = ttk.Button(bar, text="PDF 만들기", command=self._make_pdf)
+        if on_pdf is not None:
+            self._pdf_button.pack(side="right", padx=(0, 6))
 
         form = ttk.Frame(right)
         form.pack(side="bottom", fill="x", pady=(8, 0))
@@ -626,7 +642,7 @@ class JournalDialog(tk.Toplevel):
         )
         self._list.delete(0, "end")
         for index, entry in enumerate(self._visible):
-            self._list.insert("end", entry_label(entry))
+            self._list.insert("end", entry_label(entry, self._has_pdf(entry)))
             # 줄마다 글자색을 준다. 고른 줄에서도 색이 유지되도록 selectforeground 까지
             # 지정한다 — 안 하면 선택하는 순간 결과가 안 보인다.
             color = entry_color(entry)
@@ -691,6 +707,7 @@ class JournalDialog(tk.Toplevel):
 
     def _show(self, entry: dict) -> None:
         self._current = entry
+        self._sync_pdf_button()
         for child in self._summary.winfo_children():
             child.destroy()
         for row, (label, value) in enumerate(summarize(entry)):
@@ -720,6 +737,94 @@ class JournalDialog(tk.Toplevel):
         )
 
     # ── 저장 ───────────────────────────────────────────────────
+
+    # ── PDF ────────────────────────────────────────────────────
+
+    def _has_pdf(self, entry: dict) -> bool:
+        """그 매매의 PDF 파일이 이미 있는가."""
+        from trader.journal_export import pdf_path
+
+        try:
+            return pdf_path(entry).exists()
+        except OSError:
+            return False
+
+    def _sync_pdf_button(self) -> None:
+        """고른 매매에 맞춰 버튼 글자와 활성 여부를 맞춘다.
+
+        **이미 있어도 누를 수 있게 둔다** — 코멘트를 나중에 쓰면 내용이 달라지므로
+        다시 만들 이유가 있다. 덮어써도 잃는 것이 없다(마크다운이 원본이다).
+        """
+        entry = self._current
+        if not entry:
+            self._pdf_button.state(["disabled"])
+            return
+        self._pdf_button.state(["!disabled"])
+        self._pdf_button.configure(
+            text="PDF 다시 만들기" if self._has_pdf(entry) else "PDF 만들기"
+        )
+
+    def _make_pdf(self) -> None:
+        """PDF 를 만든다. **워커 스레드에서** 돌린다.
+
+        차트 두 장을 읽어 그리는 데 몇 초가 걸린다. 메인 스레드에서 하면 그동안 창이
+        얼어붙어 '멈췄나' 싶게 된다.
+        """
+        entry = self._current
+        if not entry or getattr(self, "_pdf_busy", False):
+            return
+        self._pdf_busy = True
+        self._pdf_button.state(["disabled"])
+        self._status.configure(text="PDF 만드는 중…")
+
+        result: list = []
+
+        def work() -> None:
+            # 만드는 일은 앱이 한다 — 다이얼로그는 DB 도 캘린더도 모른다.
+            try:
+                result.append((self._on_pdf(entry["trade_date"], entry["symbol"]), ""))
+            except Exception as err:  # noqa: BLE001 — 실패해도 창은 살아 있어야 한다
+                result.append((None, str(err)))
+
+        # **워커에서 Tk 를 만지지 않는다.** `after` 조차 다른 스레드에서 부르면
+        # `main thread is not in main loop` 가 난다. 결과는 리스트에 담고, 메인
+        # 스레드에서 도는 폴링이 그것을 집어 간다.
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_pdf(result)
+
+    def _poll_pdf(self, result: list) -> None:
+        """워커가 끝났는지 메인 스레드에서 지켜본다."""
+        if not result:
+            self.after(100, self._poll_pdf, result)
+            return
+        path, error = result[0]
+        self._pdf_done(path, error)
+
+    def _pdf_done(self, path, error: str) -> None:
+        """워커가 끝난 뒤 메인 스레드에서 불린다."""
+        self._pdf_busy = False
+        self._sync_pdf_button()
+        if error or path is None:
+            self._status.configure(
+                text=f"PDF 실패 — {error}" if error else "만들 매매가 없습니다"
+            )
+            return
+        self._status.configure(text=f"PDF 저장 — {path.name}")
+        self._fill_list()  # 📄 표시를 붙인다
+        self._open_file(path)
+
+    @staticmethod
+    def _open_file(path) -> None:
+        """만든 파일을 바로 연다 — 안 그러면 어디 생겼는지 찾아야 한다."""
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # noqa: S606 - 우리가 만든 파일이다
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError:
+            pass  # 못 열어도 파일은 만들어졌다
 
     def _save(self) -> None:
         if self._current is None:

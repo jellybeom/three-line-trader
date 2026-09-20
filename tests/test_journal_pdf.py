@@ -376,3 +376,66 @@ def test_매매_정보는_시간_순서로_세운다():
     order = [labels.index(x) for x in ("기준봉", "진입", "청산", "보유")]
 
     assert order == sorted(order)
+
+
+# ── 일지 창의 PDF 버튼 (2026-09-16) ─────────────────────────────
+
+
+@pytest.mark.font
+def test_PDF_경로는_한_곳에서만_만든다():
+    """화면이 '있다' 고 표시하는 경로와 실제로 쓰는 경로가 갈라지면,
+    표시는 되는데 안 열리는 일이 생긴다."""
+    import inspect
+
+    from trader.journal_export import export_pdf, pdf_path
+
+    assert (
+        pdf_path(
+            {"trade_date": "2026-09-15", "symbol": "440110", "name": "파두"}
+        ).as_posix()
+        == "journal/2026-09/2026-09-15/440110-파두.pdf"
+    )
+    assert "pdf_path(entry, root)" in inspect.getsource(export_pdf)
+
+
+@pytest.mark.font
+def test_목록은_PDF가_있을_때만_표시를_붙인다():
+    from trader.ui.journal_dialog import PDF_MARK, entry_label
+
+    entry = {
+        "trade_date": "2026-09-15",
+        "name": "파두",
+        "realized_pnl": 7_610,
+        "fees": 120,
+    }
+
+    assert PDF_MARK not in entry_label(entry, has_pdf=False)
+    assert entry_label(entry, has_pdf=True).endswith(PDF_MARK)
+
+
+@pytest.mark.font
+def test_워커_스레드에서_Tk를_만지지_않는다():
+    """`after` 조차 다른 스레드에서 부르면 main thread is not in main loop 가 난다."""
+    import inspect
+
+    from trader.ui.journal_dialog import JournalDialog
+
+    source = inspect.getsource(JournalDialog._make_pdf)
+    worker = source[source.index("def work()") : source.index("threading.Thread")]
+
+    assert "self.after" not in worker
+    assert "self._status" not in worker
+    assert "result.append" in worker
+
+
+@pytest.mark.font
+def test_이미_있어도_다시_만들_수_있다():
+    """코멘트를 나중에 쓰면 내용이 달라지므로 다시 만들 이유가 있다."""
+    import inspect
+
+    from trader.ui.journal_dialog import JournalDialog
+
+    source = inspect.getsource(JournalDialog._sync_pdf_button)
+
+    assert '"PDF 다시 만들기"' in source
+    assert '"!disabled"' in source  # 있어도 잠그지 않는다
