@@ -9,6 +9,24 @@ from __future__ import annotations
 import pytest
 
 from trader.journal_pdf import PdfError, fill_rows, info_rows, register_fonts
+
+
+@pytest.fixture(autouse=True)
+def _need_korean_font(request):
+    """한글 폰트가 없는 환경에서는 PDF 를 만드는 시험만 건너뛴다.
+
+    없으면 `PdfError` 로 실패하는데, 그러면 '환경이 없다' 와 '코드가 깨졌다' 가
+    구분되지 않는다(2026-09-16: 폰트 없는 컨테이너에서 6개가 실패로 보였다).
+    윈도우에는 맑은 고딕이 기본으로 있어 실제 운용에서는 걸리지 않는다.
+    """
+    if "font" in request.keywords:
+        return
+    try:
+        register_fonts()
+    except PdfError as err:
+        pytest.skip(f"한글 폰트 없음 — {err}")
+
+
 from trader.state_machine import Decision, Params, Position, Side, State
 from trader.store import Store
 
@@ -135,13 +153,22 @@ def test_주문_없는_전이는_체결로_세지_않는다():
 # ── 폰트 ────────────────────────────────────────────────────────
 
 
+@pytest.mark.font
 def test_없는_폰트를_지정하면_설치된_것으로_물러난다():
-    """지정이 틀렸다고 PDF 를 아예 못 만들면 곤란하다."""
-    regular, bold = register_fonts("/없는/경로.ttf", "/없는/경로.ttf")
+    """지정이 틀렸다고 PDF 를 아예 못 만들면 곤란하다.
+
+    설치된 후보가 하나도 없는 환경(폰트 없는 컨테이너)에서는 물러날 곳이 없으므로
+    `PdfError` 가 맞다 — 그 경우는 아래 테스트가 따로 본다.
+    """
+    try:
+        regular, bold = register_fonts("/없는/경로.ttf", "/없는/경로.ttf")
+    except PdfError:
+        pytest.skip("설치된 한글 폰트가 없어 물러날 곳이 없는 환경")
 
     assert regular and bold
 
 
+@pytest.mark.font
 def test_폰트를_하나도_못_찾으면_고치는_법을_알려준다(monkeypatch):
     monkeypatch.setattr("trader.journal_pdf.FONT_CANDIDATES", ())
     with pytest.raises(PdfError, match="폰트"):

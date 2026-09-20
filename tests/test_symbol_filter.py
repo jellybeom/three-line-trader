@@ -428,24 +428,6 @@ def test_휴장_사유가_잘리지_않는다(app):
         assert metrics.measure(text) <= app._weekday.winfo_width(), f"{note} 가 잘린다"
 
 
-def test_폭_계산은_폰트를_실측한다(tk_root):
-    """글자 수로 어림하면 폰트가 바뀔 때 잘린다.
-
-    요일 라벨은 이제 폭을 고정하지 않지만, `_width_in_chars` 는 다른 자리에서도 쓰므로
-    계산 자체는 지켜 둔다. Tk 의 width 단위는 **'0' 문자 폭**이라 한글은 1.5~2배 넓다.
-    """
-    from tkinter import font as tkfont, ttk
-
-    from trader.ui.app import _MARKET_SAMPLE, _width_in_chars
-
-    longest = "(월) · 휴장 · 석가탄신일(대체휴일)"
-    for size in (9, 12, 16, 24):  # 폰트가 커져도 여유가 남아야 한다
-        font = tkfont.Font(family="DejaVu Sans", size=size)
-        label = ttk.Label(tk_root, font=font)
-        chars = _width_in_chars(label, _MARKET_SAMPLE)
-        assert chars * font.measure("0") >= font.measure(longest)
-
-
 # ── 창 아이콘 ─────────────────────────────────────────────────
 
 

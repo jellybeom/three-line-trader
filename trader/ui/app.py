@@ -24,7 +24,7 @@ import tkinter as tk
 import traceback
 from pathlib import Path
 from datetime import datetime, time as dtime, timedelta
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from trader.journal import format_holding
 from trader.state_machine import State
@@ -64,7 +64,6 @@ def _market_color(market: str) -> str:
 # 오므로 앞으로 조금 길어질 수 있어 여유를 둔다.
 _ROW_GAPS = 40  # 묶음 사이 여백 합계
 _ROW_HYSTERESIS = 60  # 한 줄로 되돌아갈 때 더 요구하는 폭
-_MARKET_SAMPLE = "(월) · 휴장 · 석가탄신일(대체휴일)＋"
 _SEARCH_CHARS = 18  # 검색 입력칸 폭(글자 수) — 종목명은 대개 이보다 짧다
 _IME_GAP_PX = 3  # 검색줄과 표 사이 여백 — 줄이 세로를 많이 먹지 않도록 최소로 둔다
 _POLL_MS = 200
@@ -209,21 +208,6 @@ def parse_watchlist_csv(path: str) -> list[tuple[str, str, str, tuple | None]]:
             seen.add(code)
             result.append((code, name or code, "", None, "", ""))
     return result
-
-
-def _width_in_chars(widget, sample: str) -> int:
-    """`sample` 이 잘리지 않는 width 값 (글자 수 단위).
-
-    Tk 의 width 는 **'0' 문자 폭**을 단위로 센다. 한글은 그보다 1.5~2배 넓어, 글자 수를
-    그대로 넣으면 폰트에 따라 뒷부분이 잘린다 — 리눅스에서는 아슬아슬하게 들어가고
-    Windows 한글 폰트에서는 잘렸다(2026-08-17 실측). 폰트를 재서 환산한다.
-    """
-    try:
-        metrics = tkfont.Font(font=widget.cget("font") or "TkDefaultFont")
-        unit = metrics.measure("0") or 1
-        return -(-metrics.measure(sample) // unit)  # 올림
-    except tk.TclError:  # 폰트를 못 읽어도 창은 떠야 한다
-        return len(sample) * 2
 
 
 class App(tk.Tk):
@@ -995,35 +979,6 @@ class App(tk.Tk):
             self._mode_var.set("모의")
             return
         self._bus.commands.put(bus.SetMode(want_real))
-
-    @staticmethod
-    def _make_money_entry(entry: ttk.Entry, var: tk.StringVar) -> None:
-        """숫자만 입력 허용 + 입력 중에도 세 자리 콤마 유지 (지웠다 다시 써도 적용)."""
-        vcmd = (entry.register(lambda p: p == "" or p.replace(",", "").isdigit()), "%P")
-        entry.configure(validate="key", validatecommand=vcmd)
-
-        def reformat(_event=None):
-            raw = var.get().replace(",", "")
-            if raw.isdigit():
-                var.set(f"{int(raw):,}")
-                entry.icursor("end")
-
-        entry.bind(
-            "<KeyRelease>", reformat
-        )  # 다른 KeyRelease 핸들러는 add="+" 로 뒤에 연결
-
-    def _auto_fill_funds(self, _event=None) -> None:
-        """총액/최대 종목 입력 시 종목당 배분 표시 및 1·2차 금액 절반씩 자동 채움."""
-        try:
-            total = float(self._funds_vars["total"].get().replace(",", "") or 0)
-            max_n = int(self._funds_vars["max"].get() or 0)
-            per = int(total // max_n) if max_n else 0  # 버림 — 배분 초과 원천 차단
-        except ValueError:
-            return
-        half = per // 2  # 버림: 1차+2차 합이 항상 종목당 배분 이하
-        self._per_symbol.configure(text=f"{per:,}")
-        self._funds_vars["buy1"].set(f"{half:,}")
-        self._funds_vars["buy2"].set(f"{half:,}")
 
     def _apply_funds(self) -> None:
         """툴바 [적용]. 검증은 settings_dialog 와 **같은 함수**를 쓴다.

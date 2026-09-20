@@ -18,8 +18,12 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.pytest.ini_options]
+markers = [
+    "font: 한글 폰트가 없는 환경에서도 돌아야 하는 시험",
+]
 pythonpath = ["."]
 testpaths = ["tests"]
