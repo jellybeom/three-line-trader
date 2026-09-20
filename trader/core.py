@@ -525,6 +525,7 @@ class Core:
                 | bus.RequestDailySummary()
                 | bus.ChartRequest()
                 | bus.SendChartDiscord()
+                | bus.SendTradePdf()
             ):
                 await self._handle_journal_command(cmd)
             case (
@@ -825,6 +826,22 @@ class Core:
                     self._log(s, "에러", "Discord 연결 후 전송할 수 있습니다")
                     return
                 self._spawn(self._send_chart_images(s, paths), "차트 전송")
+            case bus.SendTradePdf(trade_date=td, symbol=sym, path=path):
+                if self._bot is None:
+                    self._log(sym, "에러", "Discord 연결 후 전송할 수 있습니다")
+                    return
+                self._spawn(self._send_trade_pdf(td, sym, path), "PDF 전송")
+
+    async def _send_trade_pdf(self, trade_date: str, symbol: str, path: str) -> None:
+        """PDF 를 스레드로. 결과를 로그에 남긴다 — 조용히 실패하면 갔는지 알 수 없다."""
+        name = self._registry.get(symbol, (symbol,))[0]
+        error = await self._bot.send_trade_pdf(trade_date, symbol, path)
+        if error:
+            self._log(symbol, "에러", f"{name} PDF 전송 실패 — {error}")
+        else:
+            self._log(
+                symbol, "일지", f"{name} PDF 를 스레드로 보냈습니다", notify=False
+            )
 
     # ── 연결·설정 명령 ───────────────────────────────────────────
 

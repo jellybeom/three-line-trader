@@ -379,6 +379,7 @@ class JournalDialog(tk.Toplevel):
         months: tuple = (),
         on_delete: Callable[[str, str], None] | None = None,
         on_pdf: Callable[[str, str], object] | None = None,
+        on_send_pdf: Callable[[str, str, str], None] | None = None,
     ):
         super().__init__(master)
         self.title("매매일지")
@@ -391,6 +392,7 @@ class JournalDialog(tk.Toplevel):
         self._on_period_change = on_period
         self._on_delete = on_delete
         self._on_pdf = on_pdf
+        self._on_send_pdf = on_send_pdf
         self._pdf_busy = False
         self._current: dict | None = None
         self._views: dict[str, ChartView] = {}
@@ -537,6 +539,11 @@ class JournalDialog(tk.Toplevel):
         self._pdf_button = ttk.Button(bar, text="PDF 만들기", command=self._make_pdf)
         if on_pdf is not None:
             self._pdf_button.pack(side="right", padx=(0, 6))
+        # 만들기와 보내기를 나눈다 — 인쇄만 하려는데 Discord 에도 올라가면 곤란하고,
+        # 올라간 것은 되돌릴 수 없다.
+        self._send_button = ttk.Button(bar, text="Discord 전송", command=self._send_pdf)
+        if on_send_pdf is not None:
+            self._send_button.pack(side="right", padx=(0, 6))
 
         form = ttk.Frame(right)
         form.pack(side="bottom", fill="x", pady=(8, 0))
@@ -758,11 +765,13 @@ class JournalDialog(tk.Toplevel):
         entry = self._current
         if not entry:
             self._pdf_button.state(["disabled"])
+            self._send_button.state(["disabled"])
             return
+        has = self._has_pdf(entry)
         self._pdf_button.state(["!disabled"])
-        self._pdf_button.configure(
-            text="PDF 다시 만들기" if self._has_pdf(entry) else "PDF 만들기"
-        )
+        self._pdf_button.configure(text="PDF 다시 만들기" if has else "PDF 만들기")
+        # 없는 파일을 보낼 수는 없다.
+        self._send_button.state(["!disabled"] if has else ["disabled"])
 
     def _make_pdf(self) -> None:
         """PDF 를 만든다. **워커 스레드에서** 돌린다.
@@ -825,6 +834,24 @@ class JournalDialog(tk.Toplevel):
                 subprocess.Popen(["xdg-open", str(path)])
         except OSError:
             pass  # 못 열어도 파일은 만들어졌다
+
+    def _send_pdf(self) -> None:
+        """만들어 둔 PDF 를 그 매매의 스레드로 보낸다.
+
+        보내는 일 자체는 코어가 한다(Discord 연결을 코어가 쥐고 있다). 결과는 화면
+        로그에 남으므로 여기서는 보냈다는 것만 알린다.
+        """
+        from trader.journal_export import pdf_path
+
+        entry = self._current
+        if not entry or self._on_send_pdf is None:
+            return
+        path = pdf_path(entry)
+        if not path.exists():
+            self._status.configure(text="먼저 PDF 를 만드세요")
+            return
+        self._on_send_pdf(entry["trade_date"], entry["symbol"], str(path))
+        self._status.configure(text="Discord 로 보내는 중…")
 
     def _save(self) -> None:
         if self._current is None:

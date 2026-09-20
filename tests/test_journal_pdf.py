@@ -439,3 +439,28 @@ def test_이미_있어도_다시_만들_수_있다():
 
     assert '"PDF 다시 만들기"' in source
     assert '"!disabled"' in source  # 있어도 잠그지 않는다
+
+
+@pytest.mark.font
+def test_만들기와_보내기는_따로다():
+    """PDF 는 인쇄하려고 뽑는 경우가 많다 — 합쳐 두면 인쇄만 하려는데 Discord 에도
+    올라가고, 올라간 것은 되돌릴 수 없다."""
+    import inspect
+
+    from trader.ui.journal_dialog import JournalDialog
+
+    make = inspect.getsource(JournalDialog._make_pdf)
+    assert "_on_send_pdf" not in make  # 만들면서 보내지 않는다
+    assert hasattr(JournalDialog, "_send_pdf")  # 보내기는 따로 있다
+
+
+@pytest.mark.font
+def test_PDF가_없으면_전송_버튼이_잠긴다():
+    """없는 파일을 보낼 수는 없다."""
+    import inspect
+
+    from trader.ui.journal_dialog import JournalDialog
+
+    source = inspect.getsource(JournalDialog._sync_pdf_button)
+
+    assert '_send_button.state(["!disabled"] if has else ["disabled"])' in source

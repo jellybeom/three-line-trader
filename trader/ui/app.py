@@ -1258,7 +1258,11 @@ class App(tk.Tk):
             months=months,
             on_delete=self._delete_journal,
             on_pdf=self._make_pdf,
+            on_send_pdf=self._send_trade_pdf,
         )
+
+    def _send_trade_pdf(self, trade_date: str, symbol: str, path: str) -> None:
+        self._bus.commands.put(bus.SendTradePdf(trade_date, symbol, path))
 
     def _make_pdf(self, trade_date: str, symbol: str):
         """매매 한 건을 PDF 로. **워커 스레드에서 불린다** — DB 를 새로 연다.

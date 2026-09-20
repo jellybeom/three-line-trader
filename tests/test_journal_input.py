@@ -855,3 +855,87 @@ def test_파일_첨부_권한이_없으면_시작할_때_알린다(bot):
     _run(b._warn_if_cannot_attach())
 
     assert sent and "파일 첨부" in sent[0]
+
+
+# ── PDF 를 스레드로 (2026-09-16) ────────────────────────────────
+
+
+class _PdfAttachment:
+    def __init__(self, filename: str):
+        self.filename = filename
+
+
+class _PdfMessage:
+    def __init__(self, author_id: int, files: list[str]):
+        self.author = type("A", (), {"id": author_id})()
+        self.attachments = [_PdfAttachment(f) for f in files]
+        self.deleted = False
+
+    async def delete(self):
+        self.deleted = True
+
+
+class _PdfThread:
+    def __init__(self, messages):
+        self._messages = messages
+        self.sent = []
+
+    def history(self, limit=50):
+        async def gen():
+            for m in self._messages:
+                yield m
+
+        return gen()
+
+    async def send(self, **kwargs):
+        self.sent.append(kwargs)
+
+
+def test_예전_PDF만_지우고_차트와_답글은_남긴다(bot):
+    """같은 파일이 쌓이면 어느 것이 최신인지 스크롤해 찾아야 한다.
+
+    다만 지우는 것은 **봇이 올린 PDF 메시지뿐**이다 — 차트(png)와 사람의 답글은
+    건드리지 않는다.
+    """
+    b, _thread, _store = bot
+    b._client = type("C", (), {"user": type("U", (), {"id": 7})()})()
+    messages = [
+        _PdfMessage(7, ["옛날.pdf"]),  # 봇이 올린 PDF → 지운다
+        _PdfMessage(7, ["차트-daily.png"]),  # 봇이 올린 차트 → 둔다
+        _PdfMessage(9, ["남의.pdf"]),  # 사람이 올린 것 → 둔다
+        _PdfMessage(7, []),  # 봇의 embed → 둔다
+    ]
+    thread = _PdfThread(messages)
+
+    _run(b._purge_old_pdf(thread))
+
+    assert [m.deleted for m in messages] == [True, False, False, False]
+
+
+def test_스레드가_없으면_이유를_알려준다(bot, monkeypatch):
+    """조용히 실패하면 갔는지 안 갔는지 알 수 없다."""
+    b, _thread, _store = bot
+
+    async def no_thread(*_a):
+        return None
+
+    monkeypatch.setattr(b, "_thread_for", no_thread)
+
+    assert "스레드" in _run(b.send_trade_pdf("2026-09-15", "441270", "x.pdf"))
+
+
+def test_PDF를_보내면_빈_문자열을_돌려준다(bot, monkeypatch, tmp_path):
+    """성공을 빈 문자열로 두면 호출부가 `if error:` 한 줄로 갈린다."""
+    b, _thread, _store = bot
+    b._client = type("C", (), {"user": type("U", (), {"id": 7})()})()
+    thread = _PdfThread([])
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    async def found(*_a):
+        return thread
+
+    monkeypatch.setattr(b, "_thread_for", found)
+
+    assert _run(b.send_trade_pdf("2026-09-15", "441270", str(pdf))) == ""
+    assert thread.sent  # 실제로 보냈다

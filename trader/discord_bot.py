@@ -331,6 +331,44 @@ class TraderBot:
         except (discord.HTTPException, ValueError):
             return None
 
+    async def send_trade_pdf(self, trade_date: str, symbol: str, path: str) -> str:
+        """매매 한 건의 PDF 를 그 매매의 스레드로. 실패 사유를 돌려준다(빈 문자열이면 성공).
+
+        **예전에 올린 PDF 는 지운다.** 같은 파일이 쌓이면 어느 것이 최신인지 스크롤해
+        찾아야 한다. 용량은 문제가 아니지만(한 장 250KB, 스레드 한도 10MB) 읽기가
+        나빠진다. 지워도 잃는 것이 없다 — 마크다운이 원본이고 로컬에도 남는다.
+
+        지우는 것은 **봇이 올린 PDF 메시지뿐**이다. 차트·일지 embed·답글은 건드리지
+        않는다. 차트는 파일이 png 라 확장자로 갈린다.
+        """
+        thread = await self._thread_for(trade_date, symbol)
+        if thread is None:
+            return "이 매매의 Discord 스레드를 찾을 수 없습니다"
+        try:
+            await self._purge_old_pdf(thread)
+            await thread.send(file=discord.File(path))
+        except discord.Forbidden:
+            return "봇에게 '파일 첨부' 권한이 없습니다"
+        except discord.HTTPException as err:
+            return f"Discord 전송 실패: {err}"
+        return ""
+
+    async def _purge_old_pdf(self, thread) -> None:
+        """그 스레드에서 **봇이 올린 PDF 메시지**만 지운다."""
+        me = getattr(self._client, "user", None)
+        if me is None:
+            return
+        try:
+            async for message in thread.history(limit=50):
+                if message.author.id != me.id:
+                    continue
+                if any(
+                    a.filename.lower().endswith(".pdf") for a in message.attachments
+                ):
+                    await message.delete()
+        except discord.HTTPException:
+            pass  # 못 지워도 새 파일은 올라간다
+
     async def send_day_log(self, trade_date: str, data: bytes, rows: int) -> bool:
         """하루치 매매 로그 CSV 를 보관 채널로 보낸다.
 

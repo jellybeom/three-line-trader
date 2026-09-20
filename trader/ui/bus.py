@@ -287,6 +287,19 @@ class SendChartDiscord:
 
 
 @dataclass(frozen=True)
+class SendTradePdf:
+    """매매 한 건의 PDF 를 그 매매의 스레드로 (일지 창의 버튼).
+
+    만들기와 보내기를 나눈다 — PDF 는 인쇄하려고 뽑는 경우가 많은데, 합쳐 두면
+    '인쇄만 하려는데 Discord 에도 올라가는' 일이 생기고 되돌릴 수 없다.
+    """
+
+    trade_date: str
+    symbol: str
+    path: str
+
+
+@dataclass(frozen=True)
 class RegistrationNotice:
     """CSV 등록 결과 — 종목별 선정 근거를 담은 알림을 코어가 발송한다.
 
