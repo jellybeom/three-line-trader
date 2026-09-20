@@ -464,3 +464,51 @@ def test_PDF가_없으면_전송_버튼이_잠긴다():
     source = inspect.getsource(JournalDialog._sync_pdf_button)
 
     assert '_send_button.state(["!disabled"] if has else ["disabled"])' in source
+
+
+@pytest.mark.font
+def test_지난_매매도_이름을_찾을_수_있다(tmp_path):
+    """일지 창에서는 며칠 전 매매도 보낸다.
+
+    코어의 오늘 감시 목록에는 오늘 등록된 종목만 있어, 거기서만 찾으면 예전 매매에서
+    터진다(2026-09-16: `'Core' object has no attribute '_registry'`).
+    """
+    from trader.state_machine import Params
+    from trader.store import Store
+
+    store = Store(tmp_path / "t.db")
+    store.register_symbol(
+        "2026-09-15",
+        "441270",
+        "파인엠텍",
+        Params(
+            line1=7_920,
+            line2=7_650,
+            line3=7_400,
+            buy1_amount=100_000,
+            buy2_amount=100_000,
+        ),
+    )
+
+    assert store.symbol_name("2026-09-15", "441270") == "파인엠텍"
+    assert store.symbol_name("2026-09-14", "441270") == ""  # 없으면 빈 문자열
+    store.close()
+
+
+@pytest.mark.font
+def test_PDF_전송은_오늘_감시_목록에_기대지_않는다():
+    """지난 매매를 보낼 때 오늘 목록에 없으면 이름을 못 찾는다."""
+    import inspect
+
+    from trader.core import Core
+
+    # 주석에는 그 이름이 나올 수 있으므로 **코드 줄만** 본다.
+    code = [
+        l
+        for l in inspect.getsource(Core._send_trade_pdf).splitlines()
+        if l.strip() and not l.strip().startswith(("#", '"""'))
+    ]
+    body = "\n".join(code)
+
+    assert "self._entries" not in body
+    assert "symbol_name" in body

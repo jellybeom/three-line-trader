@@ -922,6 +922,18 @@ class Store:
                 (trade_date, symbol, thread_id),
             )
 
+    def symbol_name(self, trade_date: str, symbol: str) -> str:
+        """그 매매일의 종목명. 없으면 빈 문자열.
+
+        지난 매매를 다룰 때 쓴다 — 코어의 오늘 감시 목록(`_entries`)에는 오늘 등록된
+        종목만 있어서, 며칠 전 매매의 이름은 거기서 찾을 수 없다.
+        """
+        row = self._conn.execute(
+            "SELECT name FROM symbols WHERE trade_date=? AND symbol=?",
+            (trade_date, symbol),
+        ).fetchone()
+        return row["name"] if row else ""
+
     def thread_of(self, trade_date: str, symbol: str) -> str:
         row = self._conn.execute(
             "SELECT thread_id FROM journal_sync WHERE trade_date=? AND symbol=?",

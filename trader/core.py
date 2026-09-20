@@ -834,7 +834,9 @@ class Core:
 
     async def _send_trade_pdf(self, trade_date: str, symbol: str, path: str) -> None:
         """PDF 를 스레드로. 결과를 로그에 남긴다 — 조용히 실패하면 갔는지 알 수 없다."""
-        name = self._registry.get(symbol, (symbol,))[0]
+        # 이름은 **DB 에서** 찾는다. 일지 창에서는 지난 매매도 보내므로 오늘 감시 목록
+        # (`_entries`)에 없을 수 있다 — 거기서만 찾으면 예전 매매에서 터진다.
+        name = self._store.symbol_name(trade_date, symbol) or symbol
         error = await self._bot.send_trade_pdf(trade_date, symbol, path)
         if error:
             self._log(symbol, "에러", f"{name} PDF 전송 실패 — {error}")
