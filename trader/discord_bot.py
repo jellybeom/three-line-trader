@@ -29,6 +29,8 @@ from trader import journal_input
 from trader.notifier import build_trade_embed
 
 _PDF_BUTTON_ID = "trade_pdf"  # 버튼 custom_id 접두어
+# 차트가 없는 스레드에 버튼만 올릴 때의 안내. 버튼 하나만 덩그러니 있으면 무엇인지 모른다.
+_PDF_BUTTON_TEXT = "📄 이 매매의 PDF 를 받을 수 있습니다"
 _BACKLOG_MAX = 30  # 기동 시 훑을 최근 스레드 수 (약 한 달치)
 _BACKFILL_DAYS = 5  # 스레드를 뒤늦게 만들 대상 기간 (최근 매매일 수)
 
@@ -319,13 +321,19 @@ class TraderBot:
 
         스레드로 보낸 차트는 작성자가 봇이라 답글로 세지 않는다 (되먹임 방지 1층).
         """
-        channel = self._channel
+        channel, view = self._channel, None
         if thread_key and (thread := await self._thread_for(*thread_key)) is not None:
             channel = thread
+            # 버튼은 **스레드 안의 차트 메시지**에 붙인다. 채널 메시지에 붙이면 스레드
+            # 상단에 사본으로 따라와 Discord 가 회색(못 누름)으로 그린다(2026-09-21).
+            view = self._pdf_view(*thread_key)
         if channel is None:
             return False
         files = [discord.File(path) for path in paths]
-        await channel.send(content=caption[:1900] or None, files=files)
+        kwargs = {"content": caption[:1900] or None, "files": files}
+        if view is not None:
+            kwargs["view"] = view
+        await channel.send(**kwargs)
         return True
 
     async def _thread_for(self, trade_date: str, symbol: str):
@@ -464,10 +472,7 @@ class TraderBot:
         ):
             return False
         try:
-            message = await self._journal_channel.send(
-                embed=self._to_embed(embed),
-                view=self._pdf_view(trade_date, symbol),
-            )
+            message = await self._journal_channel.send(embed=self._to_embed(embed))
         except discord.Forbidden as err:
             # 50001 Missing Access. 비공개 채널은 역할별로 접근을 따로 허용해야 한다 —
             # 채널은 보이는데 전송만 막혀 청산할 때마다 같은 오류가 난다(2026-08-26).
@@ -632,30 +637,63 @@ class TraderBot:
         return made
 
     async def attach_pdf_buttons(self, limit: int = 30) -> int:
-        """스레드 첫 메시지에 `📄 PDF 받기` 버튼을 붙인다. 붙인 개수를 돌려준다.
+        """최근 스레드마다 **스레드 안에 버튼 하나**가 있게 맞춘다. 고친 개수를 돌려준다.
 
-        **내용 갱신과 따로 돈다.** 갱신은 '내용이 바뀌었을 때만' 고쳐 쓰는데, 버튼은
-        내용이 그대로여도 붙여야 한다 — 그 안에 넣었더니 옛 스레드에 영영 안 붙었다
-        (2026-09-20 확인). 답글 여부와도 무관하므로 `recent_threads` 를 쓴다.
-
-        이미 붙어 있으면 건너뛴다. 매번 편집하면 기동이 느려지고 Discord 요청만 는다.
+        embed 갱신과 **따로 돈다** — 갱신은 내용이 바뀌었을 때만 고쳐 써서, 그 안에 넣으면
+        내용이 같은 옛 스레드에는 영영 안 붙는다(2026-09-20). 답글 여부와도 무관하다.
         """
         if self._journal_channel is None:
             return 0
-        added = 0
+        fixed = 0
         for trade_date, symbol in self._core.store.recent_threads(limit):
-            thread_id = self._core.store.thread_of(trade_date, symbol)
-            if not thread_id:
-                continue
-            try:
-                message = await self._journal_channel.fetch_message(int(thread_id))
-                if message.components:  # 이미 버튼이 있다
+            if await self.ensure_pdf_button(trade_date, symbol):
+                fixed += 1
+        return fixed
+
+    async def ensure_pdf_button(self, trade_date: str, symbol: str) -> bool:
+        """그 매매의 스레드에 활성 버튼이 **정확히 하나** 있게 한다. 무언가 고쳤으면 True.
+
+        1. 채널 메시지(스레드 상단 embed)의 버튼은 **뗀다.** 스레드 상단에 사본으로 따라와
+           Discord 가 회색으로 그리므로, 두면 '누를 수 없는 버튼' 이 하나 더 보인다.
+        2. 스레드 안에 봇이 올린 버튼이 이미 있으면 그대로 둔다 — 기동마다 새로 올리면 쌓인다.
+        3. 없으면 **차트 메시지**에 붙인다. 새 메시지를 더 올리지 않아 스레드가 깔끔하다.
+        4. 차트도 없으면 짧은 안내와 함께 버튼 메시지를 올린다.
+        """
+        thread_id = self._core.store.thread_of(trade_date, symbol)
+        me = getattr(self._client, "user", None)
+        if not thread_id or me is None:
+            return False
+        changed = False
+        try:
+            starter = await self._journal_channel.fetch_message(int(thread_id))
+            if starter.components:
+                await starter.edit(view=None)
+                changed = True
+        except (discord.HTTPException, ValueError):
+            pass  # 첫 메시지가 지워졌어도 스레드 안은 맞출 수 있다
+
+        thread = await self._thread_for(trade_date, symbol)
+        if thread is None:
+            return changed
+        chart = None
+        try:
+            async for message in thread.history(limit=50, oldest_first=True):
+                if message.author.id != me.id:
                     continue
-                await message.edit(view=self._pdf_view(trade_date, symbol))
-                added += 1
-            except (discord.HTTPException, ValueError):
-                continue  # 지워진 메시지 — 다음 것으로
-        return added
+                if message.components:
+                    return changed  # 이미 스레드 안에 버튼이 있다
+                if chart is None and any(
+                    a.filename.lower().endswith(".png") for a in message.attachments
+                ):
+                    chart = message
+            view = self._pdf_view(trade_date, symbol)
+            if chart is not None:
+                await chart.edit(view=view)
+            else:
+                await thread.send(content=_PDF_BUTTON_TEXT, view=view)
+        except discord.HTTPException:
+            return changed
+        return True
 
     async def refresh_thread_embeds(self) -> int:
         """이미 만들어진 스레드의 첫 메시지를 최신 형식으로 고쳐 쓴다.
@@ -699,7 +737,10 @@ class TraderBot:
             if getattr(message, "attachments", None):
                 return  # 이미 있다
         try:
-            await thread.send(files=[discord.File(p) for p in paths])
+            await thread.send(
+                files=[discord.File(p) for p in paths],
+                view=self._pdf_view(trade_date, symbol),
+            )
         except (discord.HTTPException, OSError):
             pass  # 차트가 없어도 복기는 된다
 

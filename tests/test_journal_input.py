@@ -991,77 +991,123 @@ def test_허용되지_않은_사용자는_버튼을_눌러도_막힌다(bot):
 
 
 class _ButtonMessage:
-    """버튼이 있는지(components)와 편집 호출을 기록하는 첫 메시지."""
+    """버튼(components)·첨부·작성자와 편집 호출을 기록하는 메시지."""
 
-    def __init__(self, components=()):
+    def __init__(self, author_id=7, components=(), files=()):
+        self.author = type("A", (), {"id": author_id})()
         self.components = list(components)
+        self.attachments = [type("F", (), {"filename": f})() for f in files]
         self.edits = []
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
+        if "view" in kwargs:
+            self.components = [] if kwargs["view"] is None else ["버튼"]
 
 
-class _ButtonChannel:
-    def __init__(self, messages: dict):
-        self._messages = messages
+class _ButtonThread:
+    def __init__(self, messages):
+        self.messages = list(messages)
+        self.sent = []
 
-    async def fetch_message(self, message_id):
-        return self._messages[message_id]
+    def history(self, limit=50, oldest_first=False):
+        async def gen():
+            for m in self.messages:
+                yield m
 
+        return gen()
 
-def test_내용이_그대로여도_옛_스레드에_버튼이_붙는다(bot):
-    """버튼 붙이기를 '내용이 바뀌었을 때만' 도는 갱신 안에 넣었더니, 옛 스레드에는
-    영영 안 붙었다(2026-09-20 확인: 재시작 후에도 버튼이 없었다)."""
-    b, _thread, store = bot
-    old = _ButtonMessage()
-    b._journal_channel = _ButtonChannel({111: old})
-
-    added = _run(b.attach_pdf_buttons())
-
-    assert added == 1
-    assert "view" in old.edits[0]
-    assert "embed" not in old.edits[0]  # 내용은 건드리지 않는다
+    async def send(self, **kwargs):
+        self.sent.append(kwargs)
 
 
-def test_답글이_없는_스레드에도_버튼이_붙는다(bot):
-    """`threads_with_replies` 는 답글 달린 것만 준다 — 버튼은 모든 스레드에 필요하다."""
-    b, _thread, store = bot
-    assert (
-        store.has_replies("2026-08-24", "263800") is False
-    )  # 픽스처의 스레드는 답글 없음
-    old = _ButtonMessage()
-    b._journal_channel = _ButtonChannel({111: old})
+class _StarterChannel:
+    def __init__(self, starter):
+        self._starter = starter
 
-    assert _run(b.attach_pdf_buttons()) == 1
+    async def fetch_message(self, _message_id):
+        return self._starter
 
 
-def test_이미_버튼이_있으면_건드리지_않는다(bot):
-    """매번 편집하면 기동이 느려지고 Discord 요청만 는다."""
+def _setup(b, monkeypatch, starter, thread):
+    b._client = type("C", (), {"user": type("U", (), {"id": 7})()})()
+    b._journal_channel = _StarterChannel(starter)
+
+    async def thread_for(*_a):
+        return thread
+
+    monkeypatch.setattr(b, "_thread_for", thread_for)
+
+
+def test_채널_메시지의_버튼은_뗀다(bot, monkeypatch):
+    """스레드 상단에 사본으로 따라와 Discord 가 회색(못 누름)으로 그린다(2026-09-21)."""
     b, _thread, _store = bot
-    done = _ButtonMessage(components=["이미 있음"])
-    b._journal_channel = _ButtonChannel({111: done})
+    starter = _ButtonMessage(components=["버튼"])
+    chart = _ButtonMessage(files=["a-daily.png", "a-minute.png"])
+    _setup(b, monkeypatch, starter, _ButtonThread([chart]))
 
-    assert _run(b.attach_pdf_buttons()) == 0
-    assert done.edits == []
+    _run(b.ensure_pdf_button("2026-08-24", "263800"))
+
+    assert starter.edits == [{"view": None}]
 
 
-def test_지워진_첫_메시지는_건너뛴다(bot):
-    """하나가 실패해도 나머지 스레드에는 붙어야 한다."""
-    import discord
+def test_버튼은_스레드_안의_차트_메시지에_붙는다(bot, monkeypatch):
+    """새 메시지를 더 올리지 않는다 — 스레드가 지저분해지지 않는다."""
+    b, _thread, _store = bot
+    chart = _ButtonMessage(files=["a-daily.png", "a-minute.png"])
+    thread = _ButtonThread([chart])
+    _setup(b, monkeypatch, _ButtonMessage(), thread)
 
-    b, _thread, store = bot
-    store.save_thread("2026-08-25", "005930", "222")
-    ok = _ButtonMessage()
+    assert _run(b.ensure_pdf_button("2026-08-24", "263800")) is True
+    assert chart.components  # 차트 밑에 붙었다
+    assert thread.sent == []  # 새 메시지는 없다
 
-    class Channel:
-        async def fetch_message(self, message_id):
-            if message_id == 111:
-                raise discord.NotFound(
-                    type("R", (), {"status": 404, "reason": ""})(), ""
-                )
-            return ok
 
-    b._journal_channel = Channel()
+def test_차트가_없으면_안내와_함께_버튼을_올린다(bot, monkeypatch):
+    """버튼 하나만 덩그러니 있으면 무엇인지 모른다."""
+    from trader.discord_bot import _PDF_BUTTON_TEXT
 
-    assert _run(b.attach_pdf_buttons()) == 1
-    assert ok.edits
+    b, _thread, _store = bot
+    thread = _ButtonThread([_ButtonMessage(author_id=9)])  # 사람의 답글뿐
+    _setup(b, monkeypatch, _ButtonMessage(), thread)
+
+    _run(b.ensure_pdf_button("2026-08-24", "263800"))
+
+    assert len(thread.sent) == 1
+    assert thread.sent[0]["content"] == _PDF_BUTTON_TEXT
+    assert thread.sent[0]["view"] is not None
+
+
+def test_이미_버튼이_있으면_아무것도_올리지_않는다(bot, monkeypatch):
+    """기동할 때마다 새로 올리면 스레드에 버튼이 쌓인다."""
+    b, _thread, _store = bot
+    has_button = _ButtonMessage(components=["버튼"], files=["a-daily.png"])
+    thread = _ButtonThread([has_button])
+    _setup(b, monkeypatch, _ButtonMessage(), thread)
+
+    assert _run(b.ensure_pdf_button("2026-08-24", "263800")) is False
+    assert thread.sent == [] and has_button.edits == []
+
+
+def test_사람이_올린_이미지에는_붙이지_않는다(bot, monkeypatch):
+    """봇이 올린 차트만 버튼 자리다 — 남의 메시지는 편집할 수도 없다."""
+    b, _thread, _store = bot
+    human = _ButtonMessage(author_id=9, files=["내캡처.png"])
+    thread = _ButtonThread([human])
+    _setup(b, monkeypatch, _ButtonMessage(), thread)
+
+    _run(b.ensure_pdf_button("2026-08-24", "263800"))
+
+    assert human.edits == []
+    assert len(thread.sent) == 1  # 대신 버튼 메시지를 올렸다
+
+
+def test_새_스레드의_채널_메시지에는_버튼이_없다():
+    """버튼은 차트와 함께 스레드 안으로 간다."""
+    import inspect
+
+    from trader.discord_bot import TraderBot
+
+    source = inspect.getsource(TraderBot.open_journal_thread)
+
+    assert "_pdf_view" not in source

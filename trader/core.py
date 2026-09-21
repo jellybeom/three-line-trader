@@ -2181,6 +2181,10 @@ class Core:
             )
         except Exception as e:  # noqa: BLE001 — 차트 실패가 매매에 영향 주지 않게
             self._log(symbol, "에러", f"차트 생성 실패: {e}")
+            if auto and self._bot is not None:
+                # 차트가 없으면 버튼이 붙을 자리도 없다. 안내 메시지와 함께 올려
+                # 스레드에서 PDF 를 받을 수 있게 한다.
+                await self._bot.ensure_pdf_button(self._date, symbol)
             return
         finally:
             self._chart_busy.discard(symbol)
