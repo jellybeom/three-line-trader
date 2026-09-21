@@ -986,6 +986,20 @@ class Store:
         ).fetchone()
         return (row["d"], row["m"]) if row else ("", "")
 
+    def recent_threads(self, limit: int = 30) -> list[tuple[str, str]]:
+        """스레드가 있는 매매 (최근 순). 답글 여부와 무관하다.
+
+        `threads_with_replies` 는 답글이 달린 것만 주므로, 버튼처럼 **모든 스레드에
+        붙여야 하는 것**에는 쓸 수 없다.
+        """
+        rows = self._conn.execute(
+            """SELECT trade_date, symbol FROM journal_sync
+               WHERE thread_id <> ''
+               ORDER BY trade_date DESC, symbol LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [(r["trade_date"], r["symbol"]) for r in rows]
+
     def threads_with_replies(self) -> list[tuple[str, str]]:
         """스레드가 열린 매매 전부. 기동할 때 밀린 답글을 훑는 대상이다.
 

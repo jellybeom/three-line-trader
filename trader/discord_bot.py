@@ -631,6 +631,32 @@ class TraderBot:
                 break  # 권한이 없으면 나머지도 마찬가지다 — 같은 오류를 쌓지 않는다
         return made
 
+    async def attach_pdf_buttons(self, limit: int = 30) -> int:
+        """스레드 첫 메시지에 `📄 PDF 받기` 버튼을 붙인다. 붙인 개수를 돌려준다.
+
+        **내용 갱신과 따로 돈다.** 갱신은 '내용이 바뀌었을 때만' 고쳐 쓰는데, 버튼은
+        내용이 그대로여도 붙여야 한다 — 그 안에 넣었더니 옛 스레드에 영영 안 붙었다
+        (2026-09-20 확인). 답글 여부와도 무관하므로 `recent_threads` 를 쓴다.
+
+        이미 붙어 있으면 건너뛴다. 매번 편집하면 기동이 느려지고 Discord 요청만 는다.
+        """
+        if self._journal_channel is None:
+            return 0
+        added = 0
+        for trade_date, symbol in self._core.store.recent_threads(limit):
+            thread_id = self._core.store.thread_of(trade_date, symbol)
+            if not thread_id:
+                continue
+            try:
+                message = await self._journal_channel.fetch_message(int(thread_id))
+                if message.components:  # 이미 버튼이 있다
+                    continue
+                await message.edit(view=self._pdf_view(trade_date, symbol))
+                added += 1
+            except (discord.HTTPException, ValueError):
+                continue  # 지워진 메시지 — 다음 것으로
+        return added
+
     async def refresh_thread_embeds(self) -> int:
         """이미 만들어진 스레드의 첫 메시지를 최신 형식으로 고쳐 쓴다.
 
@@ -656,10 +682,7 @@ class TraderBot:
                 current = message.embeds[0].description if message.embeds else ""
                 if current == embed["description"]:
                     continue
-                await message.edit(
-                    embed=self._to_embed(embed),
-                    view=self._pdf_view(trade_date, symbol),
-                )
+                await message.edit(embed=self._to_embed(embed))
                 fixed += 1
                 await self._attach_charts(trade_date, symbol)
             except (discord.HTTPException, ValueError, IndexError):
@@ -691,6 +714,7 @@ class TraderBot:
         if made := await self.backfill_threads():
             await self.send_text(f"매매일지 스레드 {made}개를 만들었습니다.")
         await self.refresh_thread_embeds()
+        await self.attach_pdf_buttons()
         for trade_date, symbol in self._core.store.threads_with_replies()[
             :_BACKLOG_MAX
         ]:

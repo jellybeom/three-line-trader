@@ -988,3 +988,80 @@ def test_허용되지_않은_사용자는_버튼을_눌러도_막힌다(bot):
     _run(b._on_pdf_button(interaction))
 
     assert replies and "허용되지 않은" in replies[0]
+
+
+class _ButtonMessage:
+    """버튼이 있는지(components)와 편집 호출을 기록하는 첫 메시지."""
+
+    def __init__(self, components=()):
+        self.components = list(components)
+        self.edits = []
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+
+
+class _ButtonChannel:
+    def __init__(self, messages: dict):
+        self._messages = messages
+
+    async def fetch_message(self, message_id):
+        return self._messages[message_id]
+
+
+def test_내용이_그대로여도_옛_스레드에_버튼이_붙는다(bot):
+    """버튼 붙이기를 '내용이 바뀌었을 때만' 도는 갱신 안에 넣었더니, 옛 스레드에는
+    영영 안 붙었다(2026-09-20 확인: 재시작 후에도 버튼이 없었다)."""
+    b, _thread, store = bot
+    old = _ButtonMessage()
+    b._journal_channel = _ButtonChannel({111: old})
+
+    added = _run(b.attach_pdf_buttons())
+
+    assert added == 1
+    assert "view" in old.edits[0]
+    assert "embed" not in old.edits[0]  # 내용은 건드리지 않는다
+
+
+def test_답글이_없는_스레드에도_버튼이_붙는다(bot):
+    """`threads_with_replies` 는 답글 달린 것만 준다 — 버튼은 모든 스레드에 필요하다."""
+    b, _thread, store = bot
+    assert (
+        store.has_replies("2026-08-24", "263800") is False
+    )  # 픽스처의 스레드는 답글 없음
+    old = _ButtonMessage()
+    b._journal_channel = _ButtonChannel({111: old})
+
+    assert _run(b.attach_pdf_buttons()) == 1
+
+
+def test_이미_버튼이_있으면_건드리지_않는다(bot):
+    """매번 편집하면 기동이 느려지고 Discord 요청만 는다."""
+    b, _thread, _store = bot
+    done = _ButtonMessage(components=["이미 있음"])
+    b._journal_channel = _ButtonChannel({111: done})
+
+    assert _run(b.attach_pdf_buttons()) == 0
+    assert done.edits == []
+
+
+def test_지워진_첫_메시지는_건너뛴다(bot):
+    """하나가 실패해도 나머지 스레드에는 붙어야 한다."""
+    import discord
+
+    b, _thread, store = bot
+    store.save_thread("2026-08-25", "005930", "222")
+    ok = _ButtonMessage()
+
+    class Channel:
+        async def fetch_message(self, message_id):
+            if message_id == 111:
+                raise discord.NotFound(
+                    type("R", (), {"status": 404, "reason": ""})(), ""
+                )
+            return ok
+
+    b._journal_channel = Channel()
+
+    assert _run(b.attach_pdf_buttons()) == 1
+    assert ok.edits
