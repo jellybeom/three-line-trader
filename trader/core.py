@@ -166,6 +166,12 @@ def _load_auto_connect(config_path: str) -> bool:
     )
 
 
+def _after(base: dtime, minutes: int) -> dtime:
+    """시각에 분을 더한다. 자정을 넘기면 23:59 로 묶는다(장 마감 뒤라 일어날 일은 없다)."""
+    total = min(base.hour * 60 + base.minute + minutes, 23 * 60 + 59)
+    return dtime(total // 60, total % 60)
+
+
 def _load_schedule(config_path: str) -> dict:
     """config.toml 의 [schedule] — 감시 자동 시작/중지와 일일 요약 발송 시각.
 
@@ -185,6 +191,9 @@ def _load_schedule(config_path: str) -> dict:
         "enabled": False,
         "start": dtime(8, 55),
         "stop": dtime(15, 30),
+        # 장 마감 차트. 15:30 정각이 아니라 **몇 분 뒤**여야 한다 — 그때가 종가 동시호가가
+        # 체결되는 순간이라, 바로 조회하면 마지막 봉이 아직 안 담길 수 있다.
+        "closing_chart": dtime(15, 32),
         "summary": dtime(15, 35),
     }
     path = Path(config_path)
@@ -193,7 +202,7 @@ def _load_schedule(config_path: str) -> dict:
     section = tomllib.loads(path.read_text(encoding="utf-8")).get("schedule", {})
     result = dict(default)
     result["enabled"] = bool(section.get("enabled", False))
-    for key in ("start", "stop", "summary"):
+    for key in ("start", "stop", "closing_chart", "summary"):
         raw = section.get(key)
         if not raw:
             continue
@@ -2155,6 +2164,7 @@ class Core:
         to_ui: bool = False,
         to_discord: bool = False,
         auto: bool = False,  # 종료 시 자동 생성 — 차트를 매매일지 스레드로 보낸다
+        closing: bool = False,  # 장 마감 차트 — 보관본을 덮어쓰지 않는다
     ) -> None:
         """차트 생성은 느리므로(REST 2~3회 + 렌더링 1~3초) 전부 스레드에 위임한다.
         매매 루프·틱 판정은 이 작업과 무관하게 계속 돈다."""
@@ -2203,9 +2213,11 @@ class Core:
             )
         if to_discord and self._bot is not None:
             await self._send_chart_images(
-                symbol, (daily_path, minute_path), to_thread=auto
+                symbol, (daily_path, minute_path), to_thread=auto, closing=closing
             )
-        if to_discord:  # 종료 자동 차트 — 일지 폴더에 보관하고 경로를 남긴다
+        if to_discord and not closing:
+            # 종료 자동 차트만 보관한다. 마감 차트로 덮어쓰면 PDF·문서의 차트가
+            # 바뀌어, '청산할 때 무엇을 보고 판단했나' 가 사라진다.
             self._archive_charts(symbol, daily_path, minute_path)
 
     def _build_charts(
@@ -2326,7 +2338,11 @@ class Core:
         )
 
     async def _send_chart_images(
-        self, symbol: str, paths: tuple[str, ...], to_thread: bool = False
+        self,
+        symbol: str,
+        paths: tuple[str, ...],
+        to_thread: bool = False,
+        closing: bool = False,
     ) -> None:
         """일봉·3분봉을 한 메시지로 (요청 1회, 사진 2장 나란히).
 
@@ -2336,9 +2352,16 @@ class Core:
         """
         name = self._entries[symbol]["name"] if symbol in self._entries else symbol
         try:
+            # 마감 차트는 캡션으로 구분한다 — 같은 스레드에 두 장이 쌓이므로 어느 쪽이
+            # 청산 시점이고 어느 쪽이 마감인지 글로 보여야 한다.
+            caption = (
+                f"🔚 {name}({symbol}) 장 마감 차트"
+                if closing
+                else f"📈 {name}({symbol}) 차트"
+            )
             await self._bot.send_images(
                 list(paths),
-                f"📈 {name}({symbol}) 차트",
+                caption,
                 thread_key=(self._date, symbol) if to_thread else None,
             )
         except Exception as e:  # noqa: BLE001
@@ -2440,9 +2463,44 @@ class Core:
             self._bus.events.put(bus.WatchStatus(False))
             self._log("시스템", "감시", "자동 스케줄 — 감시 중지")
 
+        # 장 마감 차트 — 요약보다 **먼저** 둔다. 요약이 오기 전에 차트를 보고 그날을
+        # 정리하는 순서가 자연스럽고, 차트 생성이 느려도 요약이 밀리지 않는다.
+        # 설정이 없으면 중지 2분 뒤로 둔다. 손으로 만든 스케줄(시험·옛 설정)에도
+        # 키가 없을 수 있어, 없다고 터지면 스케줄 전체가 멈춘다.
+        chart_at = self._schedule.get("closing_chart") or _after(
+            self._schedule["stop"], minutes=2
+        )
+        if self._sched_last("closing_chart") != today and t >= chart_at:
+            self._sched_mark("closing_chart", today)
+            self._spawn(self._send_closing_charts(today), "장 마감 차트")
+
         if self._sched_last("summary") != today and t >= self._schedule["summary"]:
             self._sched_mark("summary", today)
             await self.send_daily_summary()
+
+    async def _send_closing_charts(self, today: str) -> None:
+        """그날 청산된 매매마다 **장 마감 차트**를 스레드에 한 번 더 올린다.
+
+        스레드의 차트는 **청산 시점**의 것이라 그 뒤 움직임이 없다. 판 뒤에 더 올랐는지,
+        판 것이 맞았는지는 마감 차트라야 보인다(2026-09-21 요청).
+
+        **정규장 마감 기준이다.** 대체거래소가 20시까지 열려 있어도 기다리지 않는다 —
+        이 프로그램이 매매하는 판은 정규장이고, 3분봉 조회도 정규장 범위만 돌려준다.
+
+        PDF·매매일지 문서는 **청산 시점 차트 그대로** 둔다. '청산할 때 무엇을 보고
+        판단했나' 가 거기 남아 있어야 한다.
+        """
+        if self._bot is None:
+            return
+        closed = [
+            row["symbol"]
+            for row in self._store.daily_report(today)[0]
+            if row.get("state") == State.CLOSED.value and row.get("total_bought")
+        ]
+        for symbol in closed:
+            if not self._store.thread_of(today, symbol):
+                continue  # 스레드가 없으면 올릴 자리도 없다
+            await self._chart_task(symbol, to_discord=True, auto=True, closing=True)
 
     async def _auto_start(self, today: str) -> None:
         """무인 운용: 필요한 연결까지 스스로 하고 감시를 시작한다."""

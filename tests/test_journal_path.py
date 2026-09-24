@@ -496,7 +496,10 @@ def test_스케줄에_요약_이후_항목이_없다(tmp_path):
         encoding="utf-8",
     )
     schedule = _load_schedule(str(cfg))
-    assert set(schedule) == {"enabled", "start", "stop", "summary"}
+
+    # 항목이 늘어도 **요약이 가장 늦어야** 한다. 장 마감 차트(15:32)처럼 요약 앞에
+    # 끼는 것은 규칙에 맞다 — 금지하는 것은 요약 **뒤**의 자동 작업이다.
+    assert schedule["summary"] == dt.time(15, 35)
     assert max(v for v in schedule.values() if isinstance(v, dt.time)) == dt.time(
         15, 35
     )

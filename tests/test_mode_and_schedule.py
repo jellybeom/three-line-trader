@@ -345,3 +345,172 @@ def test_설정_예시의_거래세도_같다():
         .read_text(encoding="utf-8")
     )
     assert tomllib.loads(text)["fees"]["tax_rate"] == 0.002
+
+
+# ── 장 마감 차트 (2026-09-21) ───────────────────────────────────
+
+
+def test_마감_차트는_종료_직후가_아니라_몇_분_뒤다(tmp_path):
+    """15:30 정각은 종가 동시호가가 체결되는 순간이라, 바로 조회하면 마지막 봉이
+    아직 안 담길 수 있다."""
+    from trader.core import _load_schedule
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[schedule]\nenabled = true\n", encoding="utf-8")
+
+    schedule = _load_schedule(str(cfg))
+
+    assert schedule["stop"] < schedule["closing_chart"] < schedule["summary"]
+
+
+def test_설정에_없어도_스케줄이_멈추지_않는다(tmp_path):
+    """손으로 만든 스케줄(시험·옛 설정)에 키가 없다고 전체가 멈추면 안 된다."""
+    import datetime as dt
+
+    from trader.core import _after
+
+    assert _after(dt.time(15, 30), 2) == dt.time(15, 32)
+    assert _after(dt.time(23, 59), 2) == dt.time(23, 59)  # 자정을 넘기지 않는다
+
+
+def test_마감_차트는_보관본을_덮어쓰지_않는다():
+    """PDF·문서의 차트가 바뀌면 '청산할 때 무엇을 보고 판단했나' 가 사라진다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core._chart_task)
+
+    assert "if to_discord and not closing:" in source
+
+
+def test_마감_차트는_캡션으로_구분한다():
+    """같은 스레드에 두 장이 쌓인다 — 어느 쪽이 청산 시점인지 글로 보여야 한다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core._send_chart_images)
+
+    assert "장 마감 차트" in source
+
+
+def test_스레드가_없는_매매는_건너뛴다():
+    """올릴 자리가 없는데 차트를 그리면 시간만 쓴다."""
+    import inspect
+
+    from trader.core import Core
+
+    source = inspect.getsource(Core._send_closing_charts)
+
+    assert "thread_of" in source
+    assert "closing=True" in source
+
+
+def _closing_scenario(tmp_path, monkeypatch, moments):
+    """주어진 시각들에 차례로 켜졌다 꺼졌을 때, 마감 차트가 몇 번 나갔는지 센다."""
+    import datetime as dt
+
+    import trader.core as core_mod
+    from trader.store import Store
+
+    sent = []
+    now = {"t": moments[0]}
+
+    class FixedDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now["t"]
+
+    monkeypatch.setattr(core_mod, "datetime", FixedDatetime)
+
+    async def record_closing(today):
+        sent.append(today)
+
+    async def no_summary():
+        return None
+
+    async def scenario():
+        for moment in moments:
+            now["t"] = moment
+            c = Core(bus.Bus(), db_dir=str(tmp_path))
+            c._date = moment.date().isoformat()
+            c._store = Store(str(tmp_path / "t.db"))
+            c._schedule = {
+                "enabled": True,
+                "start": dt.time(8, 55),
+                "stop": dt.time(15, 30),
+                "closing_chart": dt.time(15, 32),
+                "summary": dt.time(15, 35),
+            }
+            c._running = True  # 자동 시작 경로를 타지 않게
+            c._send_closing_charts = record_closing
+            c.send_daily_summary = no_summary
+            c._spawn = lambda coro, _name: asyncio.get_event_loop().create_task(coro)
+            await c._check_schedule()
+            await asyncio.sleep(0)  # 띄운 작업이 돌 틈
+            c._store.close()
+
+    asyncio.run(scenario())
+    return sent
+
+
+def test_마감_차트는_하루에_한_번이다(tmp_path, monkeypatch):
+    """재시작해도 다시 보내지 않는다 — 스레드에 같은 차트가 쌓인다."""
+    import datetime as dt
+
+    sent = _closing_scenario(
+        tmp_path,
+        monkeypatch,
+        [
+            dt.datetime(2026, 9, 21, 15, 33),
+            dt.datetime(2026, 9, 21, 15, 50),  # 재시작
+        ],
+    )
+
+    assert sent == ["2026-09-21"]
+
+
+def test_그_시각에_꺼져_있었으면_그날_안에_켜질_때_보낸다(tmp_path, monkeypatch):
+    """16:10 에 켜져도 그날 장이 끝난 뒤라 같은 차트가 나온다."""
+    import datetime as dt
+
+    sent = _closing_scenario(
+        tmp_path,
+        monkeypatch,
+        [
+            dt.datetime(2026, 9, 21, 16, 10),
+        ],
+    )
+
+    assert sent == ["2026-09-21"]
+
+
+def test_다음_날_아침에는_어제_것을_보내지_않는다(tmp_path, monkeypatch):
+    """프로그램이 이미 새 매매일로 넘어가 있다 — 어제 종목 정보가 오늘 목록에 없을 수
+    있어, 그 경로는 만들지 않기로 했다(2026-09-21). 놓친 날은 `/차트` 로 부른다."""
+    import datetime as dt
+
+    sent = _closing_scenario(
+        tmp_path,
+        monkeypatch,
+        [
+            dt.datetime(2026, 9, 22, 8, 45),
+        ],
+    )
+
+    assert sent == []
+
+
+def test_장중에는_보내지_않는다(tmp_path, monkeypatch):
+    import datetime as dt
+
+    sent = _closing_scenario(
+        tmp_path,
+        monkeypatch,
+        [
+            dt.datetime(2026, 9, 21, 14, 0),
+        ],
+    )
+
+    assert sent == []
