@@ -114,6 +114,46 @@ def load_bot_config(config_path="config.toml") -> BotConfig:
     )
 
 
+def pdf_choices(
+    candidates: list[tuple[str, str, str]],
+    here: tuple[str, str] | None,
+    text: str = "",
+    limit: int = 25,
+) -> list[tuple[str, str]]:
+    """`/pdf` 자동완성 — [(보이는 이름, 값)]. 값은 `매매일:종목코드`.
+
+    **스레드 안에서 부르면 그 매매를 맨 위에** 둔다. 어느 매매인지 이미 정해져 있으니
+    폰에서 날짜와 6자리 코드를 칠 이유가 없다 — 목록을 열고 첫 줄을 누르면 끝난다.
+    같은 매매가 아래 목록에 또 나오지 않게 한 번만 넣는다.
+
+    Discord 는 후보를 25개까지만 받는다.
+    """
+
+    def label(date: str, symbol: str, name: str) -> str:
+        return f"{date[5:]} {name}({symbol})"
+
+    names = {(d, s): n for d, s, n in candidates}
+    out: list[tuple[str, str]] = []
+    if here is not None:
+        name = names.get(here, here[1])
+        out.append((f"📍 이 매매 · {label(*here, name)}", f"{here[0]}:{here[1]}"))
+    needle = (text or "").strip()
+    for date, symbol, name in candidates:
+        if (date, symbol) == here:
+            continue
+        shown = label(date, symbol, name)
+        if needle and needle not in shown and needle not in date:
+            continue
+        out.append((shown, f"{date}:{symbol}"))
+    return out[:limit]
+
+
+def parse_trade_key(value: str) -> tuple[str, str] | None:
+    """`2026-09-15:440110` → (매매일, 종목). 형식이 아니면 None."""
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2}):([0-9A-Z]{6})", (value or "").strip())
+    return (match.group(1), match.group(2)) if match else None
+
+
 # ── 표시용 데이터 구성 (순수 함수 — 코어 없이 테스트 가능) ─────
 
 
@@ -1016,6 +1056,53 @@ class TraderBot:
             return [
                 app_commands.Choice(name=m, value=m) for m in core.months() if text in m
             ][:25]
+
+        @tree.command(
+            name="pdf", description="매매 PDF 를 만들어 그 매매의 스레드로 보냅니다"
+        )
+        @app_commands.describe(매매="스레드 안에서는 비워 두면 그 매매 (목록의 첫 줄)")
+        async def trade_pdf(interaction, 매매: str = "") -> None:
+            """**이미 있어도 다시 만든다** — 코멘트를 나중에 썼으면 내용이 달라진다.
+
+            PDF 는 그 매매의 **스레드로** 간다. 스레드 밖에서 불러도 마찬가지다 — 차트와
+            코멘트가 있는 자리에 모여야 나중에 찾기 쉽다. 결과 알림은 **나에게만** 보이게
+            한다; 스레드에 'PDF 를 올렸습니다' 가 쌓이면 복기하는 자리가 지저분해진다.
+            """
+            if not await guard(interaction):
+                return
+            here = core.trade_of_thread(interaction.channel_id)
+            key = parse_trade_key(매매) or (here if not 매매 else None)
+            if key is None:
+                await interaction.response.send_message(
+                    "매매를 목록에서 고르세요. (스레드 밖에서는 꼭 골라야 합니다)",
+                    ephemeral=True,
+                )
+                return
+            # 만드는 데 몇 초 걸린다 — Discord 는 3초 안에 응답이 없으면 실패로 본다.
+            await interaction.response.defer(ephemeral=True)
+            error = await core.make_and_send_pdf(*key)
+            if error:
+                await interaction.followup.send(
+                    f"PDF 를 만들지 못했습니다 — {error}", ephemeral=True
+                )
+                return
+            thread_id = core.thread_id_of(*key)
+            where = f"<#{thread_id}>" if thread_id else "스레드"
+            await interaction.followup.send(
+                f"📄 {key[0][5:]} {core.symbol_name(*key)} PDF 를 {where} 에 올렸습니다",
+                ephemeral=True,
+            )
+
+        @trade_pdf.autocomplete("매매")
+        async def trade_pdf_autocomplete(interaction, current: str):
+            """스레드 안이면 그 매매가 첫 줄, 그 아래로 최근 매매."""
+            if not config.allows(interaction.user.id):
+                return []
+            here = core.trade_of_thread(interaction.channel_id)
+            return [
+                app_commands.Choice(name=name[:100], value=value)
+                for name, value in pdf_choices(core.pdf_candidates(), here, current)
+            ]
 
         @tree.command(
             name="관심종목", description="오늘 관심종목의 태그·메모·기준봉을 봅니다"

@@ -352,6 +352,7 @@ def test_슬래시_명령이_모두_등록된다():
         "근접도",
         "관심종목",
         "월간",
+        "pdf",
     }
     # 주문을 내는 조작은 일부러 넣지 않는다 (계정 탈취 시 피해 제한)
     assert "청산" not in commands and "삭제" not in commands
@@ -701,3 +702,90 @@ def test_보유기간을_모르면_아무것도_붙지_않는다():
     """진입 기록이 없는 종목에서 '보유 ' 만 덩그러니 남지 않게."""
     embed = build_dashboard_embed(FakeCore(_entries()))
     assert "보유 " not in embed["description"]
+
+
+# ── /pdf (2026-09-22) ───────────────────────────────────────────
+
+_CANDS = [
+    ("2026-09-21", "020120", "키다리스튜디오"),
+    ("2026-09-21", "248170", "샘표식품"),
+    ("2026-09-18", "053300", "한국정보인증"),
+]
+
+
+def test_스레드_안에서는_그_매매가_첫_줄이다():
+    """어느 매매인지 이미 정해져 있다 — 폰에서 날짜와 6자리 코드를 칠 이유가 없다."""
+    from trader.discord_bot import pdf_choices
+
+    choices = pdf_choices(_CANDS, ("2026-09-18", "053300"))
+
+    assert choices[0] == (
+        "📍 이 매매 · 09-18 한국정보인증(053300)",
+        "2026-09-18:053300",
+    )
+
+
+def test_첫_줄의_매매는_아래에_또_나오지_않는다():
+    from trader.discord_bot import pdf_choices
+
+    values = [v for _n, v in pdf_choices(_CANDS, ("2026-09-18", "053300"))]
+
+    assert values.count("2026-09-18:053300") == 1
+    assert len(values) == 3
+
+
+def test_스레드_밖에서는_최근_매매만_보인다():
+    from trader.discord_bot import pdf_choices
+
+    choices = pdf_choices(_CANDS, None)
+
+    assert not any(n.startswith("📍") for n, _v in choices)
+    assert [v for _n, v in choices][0] == "2026-09-21:020120"
+
+
+def test_입력한_글자로_거른다():
+    """종목명이든 날짜든 쳐서 찾는다."""
+    from trader.discord_bot import pdf_choices
+
+    assert [v for _n, v in pdf_choices(_CANDS, None, "샘표")] == ["2026-09-21:248170"]
+    assert len(pdf_choices(_CANDS, None, "09-21")) == 2
+
+
+def test_거르더라도_이_매매는_남는다():
+    """스레드 안에서 다른 걸 치다 지워도 첫 줄로 곧장 돌아갈 수 있어야 한다."""
+    from trader.discord_bot import pdf_choices
+
+    choices = pdf_choices(_CANDS, ("2026-09-18", "053300"), "샘표")
+
+    assert choices[0][1] == "2026-09-18:053300"
+
+
+def test_후보는_스물다섯_개까지다():
+    """Discord 가 그 이상을 받지 않아 명령 자체가 실패한다."""
+    from trader.discord_bot import pdf_choices
+
+    many = [(f"2026-09-{d:02d}", f"{d:06d}", f"종목{d}") for d in range(1, 31)]
+
+    assert len(pdf_choices(many, ("2026-09-30", "000030"))) == 25
+
+
+def test_값의_형식이_아니면_받지_않는다():
+    """손으로 엉뚱한 값을 넣어도 다른 매매로 새지 않는다."""
+    from trader.discord_bot import parse_trade_key
+
+    assert parse_trade_key("2026-09-21:020120") == ("2026-09-21", "020120")
+    assert parse_trade_key("2026-09-21:0011A0") == (
+        "2026-09-21",
+        "0011A0",
+    )  # 영문 섞인 코드
+    assert parse_trade_key("키다리") is None
+    assert parse_trade_key("") is None
+
+
+def test_스레드가_없는_매매는_후보에서_뺀다():
+    """PDF 는 스레드로 간다 — 골랐는데 보낼 자리가 없으면 헛걸음이다."""
+    import inspect
+
+    from trader.core import Core
+
+    assert "recent_threads" in inspect.getsource(Core.pdf_candidates)

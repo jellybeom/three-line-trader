@@ -841,6 +841,29 @@ class Core:
                     return
                 self._spawn(self._send_trade_pdf(td, sym, path), "PDF 전송")
 
+    def trade_of_thread(self, channel_id) -> tuple[str, str] | None:
+        """Discord 채널(스레드) ID → 그 매매. 스레드가 아니면 None."""
+        if channel_id is None:
+            return None
+        return self._store.trade_of_thread(str(channel_id))
+
+    def thread_id_of(self, trade_date: str, symbol: str) -> str:
+        return self._store.thread_of(trade_date, symbol)
+
+    def symbol_name(self, trade_date: str, symbol: str) -> str:
+        return self._store.symbol_name(trade_date, symbol) or symbol
+
+    def pdf_candidates(self, limit: int = 25) -> list[tuple[str, str, str]]:
+        """`/pdf` 후보 — 스레드가 있는 최근 매매 (매매일, 종목, 이름).
+
+        PDF 는 스레드로 가므로 **스레드가 없는 매매는 후보에서 뺀다.** 골랐는데 보낼
+        자리가 없다고 실패하면 헛걸음이다.
+        """
+        return [
+            (date, symbol, self.symbol_name(date, symbol))
+            for date, symbol in self._store.recent_threads(limit)
+        ]
+
     async def make_and_send_pdf(self, trade_date: str, symbol: str) -> str:
         """PDF 를 만들어 그 매매의 스레드로. 실패 사유를 돌려준다(빈 문자열이면 성공).
 
