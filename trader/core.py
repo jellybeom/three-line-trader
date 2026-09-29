@@ -2386,6 +2386,7 @@ class Core:
                 list(paths),
                 caption,
                 thread_key=(self._date, symbol) if to_thread else None,
+                button=not closing,  # PDF 버튼은 청산 차트에만 — 스레드당 하나
             )
         except Exception as e:  # noqa: BLE001
             self._log(symbol, "경고", f"차트 전송 실패: {e}", notify=False)

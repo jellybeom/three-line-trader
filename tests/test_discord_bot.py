@@ -789,3 +789,156 @@ def test_스레드가_없는_매매는_후보에서_뺀다():
     from trader.core import Core
 
     assert "recent_threads" in inspect.getsource(Core.pdf_candidates)
+
+
+# ── 대시보드 고정이 쌓이지 않게 (2026-09-29) ──────────────────────
+
+
+class _DashMessage:
+    def __init__(self, mid, author_id=7, title="📊 2026-09-29 · 실전 · 감시 중"):
+        self.id = mid
+        self.author = type("A", (), {"id": author_id})()
+        self.embeds = [type("E", (), {"title": title})()] if title else []
+        self.deleted = False
+        self.edited = 0
+
+    async def edit(self, **_kw):
+        self.edited += 1
+
+    async def delete(self):
+        self.deleted = True
+
+    async def pin(self):
+        pass
+
+
+class _DashChannel:
+    """고정 목록·부분 메시지 편집을 흉내 낸다. edit_error 로 편집 실패를 만든다."""
+
+    def __init__(self, pinned=(), edit_error=None):
+        self.pinned = list(pinned)
+        self.edit_error = edit_error
+        self.sent = []
+        self._next = 100
+
+    async def send(self, content=None, embed=None, files=None):
+        self._next += 1
+        message = _DashMessage(self._next)
+        self.sent.append(message)
+        self.pinned.append(message)
+        return message
+
+    def get_partial_message(self, mid):
+        channel = self
+
+        class P:
+            async def edit(self, **_kw):
+                if channel.edit_error is not None:
+                    raise channel.edit_error
+
+            async def delete(self):
+                channel.pinned = [m for m in channel.pinned if m.id != mid]
+
+        return P()
+
+    def pins(self, limit=50):
+        async def gen():
+            for m in list(self.pinned):
+                yield m
+
+        return gen()
+
+
+def _dash_bot(channel):
+    from trader.discord_bot import TraderBot
+
+    class Core(_CommandCore):
+        def __init__(self):
+            super().__init__()
+            self.running = True
+
+        def on_bot_warning(self, text):
+            pass
+
+    bot = TraderBot(Core(), BotConfig("T", 999, frozenset({100})))
+    bot._channel = channel
+    bot._client = type("C", (), {"user": type("U", (), {"id": 7})()})()
+    return bot
+
+
+def test_일시적인_편집_실패로는_대시보드를_새로_만들지_않는다():
+    """ID 를 버리면 옛 것이 고정된 채 남고 새 것이 또 고정된다 — 며칠이면 쌓인다."""
+    import discord as _d
+
+    channel = _DashChannel()
+    bot = _dash_bot(channel)
+    asyncio.run(bot.refresh_dashboard())
+    first = bot._dashboard_id
+
+    resp = type("R", (), {"status": 503, "reason": "Service Unavailable"})()
+    channel.edit_error = _d.HTTPException(resp, "일시 오류")
+    asyncio.run(bot.refresh_dashboard())
+
+    assert bot._dashboard_id == first  # 다음 주기에 같은 메시지를 다시 편집한다
+    assert len(channel.sent) == 1
+
+
+def test_대시보드가_정말_지워졌으면_새로_만든다():
+    import discord as _d
+
+    channel = _DashChannel()
+    bot = _dash_bot(channel)
+    asyncio.run(bot.refresh_dashboard())
+
+    resp = type("R", (), {"status": 404, "reason": "Not Found"})()
+    channel.edit_error = _d.NotFound(resp, "Unknown Message")
+    asyncio.run(bot.refresh_dashboard())
+
+    assert len(channel.sent) == 2
+    assert bot._dashboard_id == channel.sent[1].id
+
+
+def test_새_대시보드를_만들면_남아_있던_옛_대시보드를_치운다():
+    """재부팅 등으로 ID 를 잃어 고정된 채 남은 것들."""
+    old1, old2 = _DashMessage(1), _DashMessage(2)
+    channel = _DashChannel(pinned=[old1, old2])
+    bot = _dash_bot(channel)
+
+    asyncio.run(bot.refresh_dashboard())
+
+    assert old1.deleted and old2.deleted
+    assert not channel.sent[0].deleted  # 지금 것은 남긴다
+
+
+def test_사람이_고정한_메시지와_대시보드가_아닌_봇_메시지는_건드리지_않는다():
+    human = _DashMessage(1, author_id=9)  # 사람이 고정
+    notice = _DashMessage(2, title="📌 공지")  # 봇이 올린 다른 고정
+    plain = _DashMessage(3, title=None)  # embed 없는 봇 메시지
+    stale = _DashMessage(4)
+    bot = _dash_bot(_DashChannel(pinned=[human, notice, plain, stale]))
+
+    assert asyncio.run(bot.sweep_dashboards()) == 1
+    assert stale.deleted
+    assert not (human.deleted or notice.deleted or plain.deleted)
+
+
+def test_장_마감_정리는_지금_것과_옛_것을_모두_걷어낸다():
+    channel = _DashChannel()
+    bot = _dash_bot(channel)
+    asyncio.run(bot.refresh_dashboard())
+    stale = _DashMessage(1)  # 지난 실행이 남긴 것
+    channel.pinned.append(stale)
+
+    asyncio.run(bot.clear_dashboard())
+
+    assert bot._dashboard_id is None
+    assert channel.pinned == [stale] and stale.deleted  # 지금 것은 삭제, 옛 것도 삭제
+
+
+def test_고정_목록을_못_읽어도_정리는_조용히_넘어간다():
+    class Channel(_DashChannel):
+        def pins(self, limit=50):
+            raise PermissionError("Missing Permissions")
+
+    bot = _dash_bot(Channel())
+    assert asyncio.run(bot.sweep_dashboards()) == 0

@@ -1111,3 +1111,61 @@ def test_새_스레드의_채널_메시지에는_버튼이_없다():
     source = inspect.getsource(TraderBot.open_journal_thread)
 
     assert "_pdf_view" not in source
+
+
+def test_장_마감_차트에는_버튼을_붙이지_않는다(bot, monkeypatch):
+    """PDF 는 청산 시점 차트로 만든다 — 마감 차트의 버튼은 같은 일을 하는 중복이다."""
+    b, _thread, _store = bot
+    closing = _ButtonMessage(files=["a-daily.png", "a-minute.png"])
+    closing.content = "🔚 남화토건(091590) 장 마감 차트"
+    thread = _ButtonThread([closing])
+    _setup(b, monkeypatch, _ButtonMessage(), thread)
+
+    _run(b.ensure_pdf_button("2026-08-24", "263800"))
+
+    assert closing.edits == []  # 마감 차트는 버튼 자리가 아니다
+    assert len(thread.sent) == 1  # 청산 차트가 없으니 안내 메시지에 붙였다
+
+
+def test_장_마감_차트에_붙은_중복_버튼은_뗀다(bot, monkeypatch):
+    """2026-09-29 이전에 올라간 마감 차트에는 청산 차트와 같은 버튼이 붙어 있다."""
+    b, _thread, _store = bot
+    chart = _ButtonMessage(components=["버튼"], files=["a-daily.png"])
+    chart.content = "📈 남화토건(091590) 차트"
+    closing = _ButtonMessage(components=["버튼"], files=["b-daily.png"])
+    closing.content = "🔚 남화토건(091590) 장 마감 차트"
+    thread = _ButtonThread([chart, closing])
+    _setup(b, monkeypatch, _ButtonMessage(), thread)
+
+    assert _run(b.ensure_pdf_button("2026-08-24", "263800")) is True
+    assert closing.edits == [{"view": None}]
+    assert chart.edits == [] and chart.components  # 청산 차트의 버튼은 그대로
+    assert thread.sent == []
+
+
+def test_마감_차트는_버튼_없이_보낸다(tmp_path):
+    sent = []
+
+    class Bot:
+        async def send_images(self, paths, caption="", thread_key=None, button=True):
+            sent.append((caption, button))
+            return True
+
+    import asyncio
+
+    from trader.core import Core
+    from trader.store import Store
+    from trader.ui import bus
+
+    core = Core(bus.Bus(), db_dir=str(tmp_path))
+    core._date = "2026-09-29"
+    core._store = Store(str(tmp_path / "t.db"))
+    core._bot = Bot()
+    asyncio.run(core._send_chart_images("005930", ("a.png",), to_thread=True))
+    asyncio.run(
+        core._send_chart_images("005930", ("a.png",), to_thread=True, closing=True)
+    )
+    core._store.close()
+
+    assert sent[0][1] is True  # 청산 차트 — 버튼
+    assert sent[1][0].startswith("🔚") and sent[1][1] is False  # 마감 차트 — 없음

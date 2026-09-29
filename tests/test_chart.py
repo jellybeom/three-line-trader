@@ -493,7 +493,7 @@ def test_종료_체결시_Discord_로_차트가_자동_전송된다(tmp_path):
             sent.append(("embed", [embed]))
             return True
 
-        async def send_images(self, paths, caption="", thread_key=None):
+        async def send_images(self, paths, caption="", thread_key=None, button=True):
             sent.append(("images", list(paths), thread_key))  # 한 메시지에 여러 장
             return True
 
@@ -583,7 +583,7 @@ def test_Discord_명령으로_요청하면_Discord로_전송된다(tmp_path):
     sent = []
 
     class FakeBot:
-        async def send_images(self, paths, caption="", thread_key=None):
+        async def send_images(self, paths, caption="", thread_key=None, button=True):
             sent.append((list(paths), caption, thread_key))
             return True
 
@@ -695,7 +695,7 @@ def test_종료_차트는_매매일지_스레드로_간다(tmp_path):
     sent = []
 
     class Bot:
-        async def send_images(self, paths, caption="", thread_key=None):
+        async def send_images(self, paths, caption="", thread_key=None, button=True):
             sent.append(thread_key)
             return True
 

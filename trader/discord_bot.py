@@ -31,6 +31,11 @@ from trader.notifier import build_trade_embed
 _PDF_BUTTON_ID = "trade_pdf"  # 버튼 custom_id 접두어
 # 차트가 없는 스레드에 버튼만 올릴 때의 안내. 버튼 하나만 덩그러니 있으면 무엇인지 모른다.
 _PDF_BUTTON_TEXT = "📄 이 매매의 PDF 를 받을 수 있습니다"
+# 장 마감 차트 캡션의 머리 (core._send_chart_images). 버튼은 청산 차트에만 둔다 —
+# PDF 는 청산 시점 차트로 만들므로 마감 차트의 버튼은 같은 일을 하는 중복이다.
+_CLOSING_MARK = "🔚"
+# 대시보드 embed 제목의 머리 (build_dashboard_embed). 고정 목록에서 이것만 골라 치운다.
+_DASHBOARD_MARK = "📊 "
 _BACKLOG_MAX = 30  # 기동 시 훑을 최근 스레드 수 (약 한 달치)
 _BACKFILL_DAYS = 5  # 스레드를 뒤늦게 만들 대상 기간 (최근 매매일 수)
 
@@ -242,6 +247,19 @@ def build_dashboard_embed(
     }
 
 
+def _is_closing_chart(message) -> bool:
+    """장 마감 차트 메시지인가 (캡션 머리로 가린다)."""
+    return str(getattr(message, "content", "") or "").startswith(_CLOSING_MARK)
+
+
+def _is_dashboard(message, bot_id: int) -> bool:
+    """봇이 올린 대시보드 메시지인가 (작성자 + embed 제목 머리)."""
+    if getattr(getattr(message, "author", None), "id", None) != bot_id:
+        return False
+    embeds = getattr(message, "embeds", None) or []
+    return bool(embeds) and str(embeds[0].title or "").startswith(_DASHBOARD_MARK)
+
+
 # ── 봇 본체 ───────────────────────────────────────────────────
 
 
@@ -307,6 +325,11 @@ class TraderBot:
                 await self._warn_if_cannot_attach()
                 await self._collect_backlog()
             await tree.sync()
+            # 지난 실행이 남긴 대시보드를 치운다 (재연결이면 지금 것은 남긴다)
+            if removed := await self.sweep_dashboards(keep=self._dashboard_id):
+                self._core.on_bot_warning(
+                    f"남아 있던 옛 대시보드 {removed}개를 정리했습니다"
+                )
             self._core.on_bot_ready()
 
         @client.event
@@ -350,7 +373,11 @@ class TraderBot:
         return True
 
     async def send_images(
-        self, paths: list[str], caption: str = "", thread_key: tuple | None = None
+        self,
+        paths: list[str],
+        caption: str = "",
+        thread_key: tuple | None = None,
+        button: bool = True,
     ) -> bool:
         """이미지 여러 장을 한 메시지로 (복기 차트 일봉·3분봉).
 
@@ -360,13 +387,16 @@ class TraderBot:
         채널로 물러난다 — 차트가 아예 사라지는 것보다 낫다.
 
         스레드로 보낸 차트는 작성자가 봇이라 답글로 세지 않는다 (되먹임 방지 1층).
+
+        button=False 면 PDF 버튼을 붙이지 않는다 — 장 마감 차트용. 스레드당 버튼은
+        청산 차트의 것 **하나**다 (2026-09-29, 둘 다 붙어 같은 버튼이 두 개 보였다).
         """
         channel, view = self._channel, None
         if thread_key and (thread := await self._thread_for(*thread_key)) is not None:
             channel = thread
             # 버튼은 **스레드 안의 차트 메시지**에 붙인다. 채널 메시지에 붙이면 스레드
             # 상단에 사본으로 따라와 Discord 가 회색(못 누름)으로 그린다(2026-09-21).
-            view = self._pdf_view(*thread_key)
+            view = self._pdf_view(*thread_key) if button else None
         if channel is None:
             return False
         files = [discord.File(path) for path in paths]
@@ -696,8 +726,10 @@ class TraderBot:
         1. 채널 메시지(스레드 상단 embed)의 버튼은 **뗀다.** 스레드 상단에 사본으로 따라와
            Discord 가 회색으로 그리므로, 두면 '누를 수 없는 버튼' 이 하나 더 보인다.
         2. 스레드 안에 봇이 올린 버튼이 이미 있으면 그대로 둔다 — 기동마다 새로 올리면 쌓인다.
-        3. 없으면 **차트 메시지**에 붙인다. 새 메시지를 더 올리지 않아 스레드가 깔끔하다.
+        3. 없으면 **청산 차트 메시지**에 붙인다. 새 메시지를 더 올리지 않아 스레드가 깔끔하다.
         4. 차트도 없으면 짧은 안내와 함께 버튼 메시지를 올린다.
+        5. 장 마감 차트에 붙은 버튼은 **뗀다** — 청산 차트의 것과 같은 일을 하는 중복이다
+           (2026-09-29 이전에 올라간 마감 차트에는 붙어 있다).
         """
         thread_id = self._core.store.thread_of(trade_date, symbol)
         me = getattr(self._client, "user", None)
@@ -715,17 +747,29 @@ class TraderBot:
         thread = await self._thread_for(trade_date, symbol)
         if thread is None:
             return changed
-        chart = None
+        chart, has_button = None, False
         try:
             async for message in thread.history(limit=50, oldest_first=True):
                 if message.author.id != me.id:
                     continue
+                closing = _is_closing_chart(message)
                 if message.components:
-                    return changed  # 이미 스레드 안에 버튼이 있다
-                if chart is None and any(
-                    a.filename.lower().endswith(".png") for a in message.attachments
+                    if closing:  # 마감 차트의 중복 버튼
+                        await message.edit(view=None)
+                        changed = True
+                    else:
+                        has_button = True  # 이미 스레드 안에 버튼이 있다
+                    continue
+                if (
+                    chart is None
+                    and not closing
+                    and any(
+                        a.filename.lower().endswith(".png") for a in message.attachments
+                    )
                 ):
                     chart = message
+            if has_button:
+                return changed
             view = self._pdf_view(trade_date, symbol)
             if chart is not None:
                 await chart.edit(view=view)
@@ -894,35 +938,75 @@ class TraderBot:
         if self._channel is None or not self._core.running:
             return
         embed = self._to_embed(build_dashboard_embed(self._core, self._blocked))
-        if self._dashboard_id is None:
-            message = await self._channel.send(embed=embed)
-            self._dashboard_id = message.id
+        if self._dashboard_id is not None:
+            # 조회 없이 ID 로 바로 편집한다 — 10초마다 조회+편집 두 번이던 것을 한 번으로.
             try:
-                await message.pin()
-            except Exception as e:  # noqa: BLE001 — 고정에 실패해도 대시보드는 동작한다
-                if not self._pin_warned:  # 원인을 한 번은 알려준다 (대개 권한 부족)
-                    self._pin_warned = True
-                    self._core.on_bot_warning(
-                        f"대시보드 고정 실패 — 채널에 '메시지 관리' 권한이 필요합니다 ({e})"
-                    )
-            return
+                await self._channel.get_partial_message(self._dashboard_id).edit(
+                    embed=embed
+                )
+                return
+            except discord.NotFound:  # 정말 지워졌을 때만 새로 만든다
+                self._dashboard_id = None
+            except (
+                Exception
+            ):  # noqa: BLE001 — 일시 오류(503·타임아웃)는 다음 주기에 다시
+                # 여기서 ID 를 버리면 옛 메시지가 고정된 채 남고 새 것이 또 고정된다 —
+                # 며칠이면 고정 메시지가 쌓인다(2026-09-29).
+                return
+        message = await self._channel.send(embed=embed)
+        self._dashboard_id = message.id
         try:
-            message = await self._channel.fetch_message(self._dashboard_id)
-            await message.edit(embed=embed)
-        except Exception:  # noqa: BLE001 — 지워졌으면 다음 주기에 새로 만든다
-            self._dashboard_id = None
+            await message.pin()
+        except Exception as e:  # noqa: BLE001 — 고정에 실패해도 대시보드는 동작한다
+            if not self._pin_warned:  # 원인을 한 번은 알려준다 (대개 권한 부족)
+                self._pin_warned = True
+                self._core.on_bot_warning(
+                    f"대시보드 고정 실패 — 채널에 '메시지 관리' 권한이 필요합니다 ({e})"
+                )
+        await self.sweep_dashboards(keep=message.id)
 
     async def clear_dashboard(self) -> None:
-        """장 마감·요약 발송 후 대시보드를 걷어낸다 (고정 해제 + 삭제)."""
-        if self._channel is None or self._dashboard_id is None:
+        """장 마감·요약 발송 후 대시보드를 걷어낸다.
+
+        지우면 고정도 함께 풀린다 — 고정 해제를 따로 부르지 않는다(해제가 실패하면
+        삭제까지 건너뛰던 문제). 끝으로 고정 목록에 남은 옛 대시보드도 치운다.
+        """
+        if self._channel is None:
             return
-        message_id, self._dashboard_id = self._dashboard_id, None
+        if self._dashboard_id is not None:
+            message_id, self._dashboard_id = self._dashboard_id, None
+            try:
+                await self._channel.get_partial_message(message_id).delete()
+            except Exception:  # noqa: BLE001 — 이미 없으면 그만
+                pass
+        await self.sweep_dashboards()
+
+    async def sweep_dashboards(self, keep: int | None = None) -> int:
+        """고정 목록에서 **봇이 올린 옛 대시보드**를 지운다. 지운 개수를 돌려준다.
+
+        대시보드 ID 는 메모리에만 있어, 장중 재시작(재부팅·비정상 종료)이면 옛 것을
+        잃는다. 그래서 ID 에 기대지 않고 고정 목록을 직접 훑는다. 사람이 고정한 메시지나
+        대시보드가 아닌 봇 메시지는 건드리지 않는다. 실패해도 매매와 무관하다.
+        """
+        me = getattr(self._client, "user", None)
+        if self._channel is None or me is None:
+            return 0
+        removed = 0
         try:
-            message = await self._channel.fetch_message(message_id)
-            await message.unpin()
-            await message.delete()
-        except Exception:  # noqa: BLE001 — 이미 없으면 그만
-            pass
+            stale = [
+                m
+                async for m in self._channel.pins(limit=100)
+                if m.id != keep and _is_dashboard(m, me.id)
+            ]
+        except Exception:  # noqa: BLE001 — 권한이 없거나 일시 오류면 다음 기회에
+            return 0
+        for message in stale:
+            try:
+                await message.delete()
+                removed += 1
+            except Exception:  # noqa: BLE001, S112 — 하나가 실패해도 나머지는 치운다
+                continue
+        return removed
 
     def _to_embed(self, data: dict):
         embed = discord.Embed(
