@@ -324,6 +324,20 @@ def decide(
     raise AssertionError(f"처리되지 않은 상태: {s}")
 
 
+def occupies_slot(pos: Position) -> bool:
+    """최대 종목 수 자리를 차지하는가.
+
+    '대기' 라도 1차 매수 주문이 나가 체결을 기다리면(pending) 자리를 차지한다 —
+    상태는 체결 통보가 와야 바뀌므로, 상태만 보면 그 사이 초과 진입이 생긴다
+    (2026-10-12). 매도 주문이 걸린 보유 종목은 상태가 아직 보유 단계라 그대로 센다.
+    """
+    if pos.state is State.CLOSED:
+        return False
+    if pos.state is State.WAITING:
+        return pos.pending
+    return True
+
+
 def mark_pending(pos: Position) -> Position:
     """주문 전송 직후 호출 — 체결 확인 전까지 decide() 를 잠근다."""
     return replace(pos, pending=True)

@@ -57,6 +57,8 @@ from trader.state_machine import (
     apply_transition,
     decide,
     mark_pending,
+    occupies_slot,
+    Position,
 )
 from trader.store import Store
 from trader.journal import (
@@ -318,6 +320,10 @@ class Core:
         self._block_notified: set[str] = set()  # 보류 알림은 종목당 1회
         self._order_fail: dict[str, dict] = {}  # 종목별 주문 실패 누적 {count, until}
         self._order_blocked: set[str] = set()  # 연속 실패로 당일 주문 차단된 종목
+        # 주문 판정~접수 사이(비동기 대기 중)인 종목. 같은 종목에 주문이 겹치지 않게 막고,
+        # 신규 진입이면 최대 종목 수 자리를 **검사와 동시에** 예약한다(2026-10-12 사고).
+        self._in_flight: set[str] = set()
+        self._entering: set[str] = set()  # _in_flight 중 신규 진입(대기→매수)인 것
         self._commission_rate = 0.0
         self._tax_rate = 0.0
         self._schedule = {"enabled": False}
@@ -482,6 +488,8 @@ class Core:
         self._order_fail.clear()
         self._order_blocked.clear()
         self._pending.clear()
+        self._in_flight.clear()
+        self._entering.clear()
         self._load_calendar()
         self._load_date(self._date)
         self._emit_date_loaded()  # TradeDate 이벤트가 UI 목록을 비우고 다시 채운다
@@ -1294,15 +1302,15 @@ class Core:
             )
             return
 
-        if (
-            d.side is Side.BUY and pos.state is State.WAITING
-        ):  # 1차(또는 갭 동시) 진입 시점
-            active = sum(
-                1
-                for x in self._entries.values()
-                if x["pos"].state not in (State.WAITING, State.CLOSED)
-            )
-            if active >= self._max_symbols:
+        # 같은 종목의 주문이 이미 접수 단계에 있으면 이번 판정은 버린다. 접수까지
+        # 비동기로 기다리는 동안 다른 경로(재연결 가격 보정·수동 청산)의 판정이 끼어들면
+        # 같은 물량을 두 번 주문하게 된다. 접수되면 pending 이 판정을 잠근다.
+        if symbol in self._in_flight:
+            return
+        entering = d.side is Side.BUY and pos.state is State.WAITING
+        if entering:  # 1차(또는 갭 동시) 진입 시점
+            holders = self.slot_holders()
+            if len(holders) >= self._max_symbols:
                 # 슬롯이 비면 재진입할 수 있도록 '대기' 상태를 유지한다.
                 self._log_block(
                     symbol,
@@ -1311,7 +1319,40 @@ class Core:
                     price,
                 )
                 return
+            # **검사와 예약 사이에 await 가 없어야 한다.** 아래의 예수금 조회·주문 전송은
+            # 비동기라, 예약 없이 넘어가면 그 사이 다른 종목도 같은 빈자리를 보고 통과한다
+            # (2026-10-12: 한 자리가 비자 1초 안에 4종목이 들어가 10/7 이 됐다).
+            self._entering.add(symbol)
+        self._in_flight.add(symbol)
+        try:
+            await self._send_order(symbol, d, price, pos, from_state)
+        finally:
+            # 접수됐으면 이미 pending 이 자리를 잡고 있고, 걸러졌거나 실패했으면 자리를
+            # 돌려준다 — 어느 쪽이든 여기서 예약을 푼다 (await 없이 바로 이어진다).
+            self._in_flight.discard(symbol)
+            self._entering.discard(symbol)
 
+    def slot_holders(self) -> set[str]:
+        """최대 종목 수 자리를 차지한 종목들 — **진입 관문의 유일한 기준.**
+
+        세 가지를 모두 센다. 하나라도 빠지면 그 틈으로 초과 진입이 생긴다.
+        1. 보유 상태(1차·2차·익절 단계) — 매도 주문이 걸려 있어도 아직 보유 중이다.
+        2. 1차 매수 주문을 넣고 체결을 기다리는 종목 — 상태는 아직 '대기' 지만
+           주문은 이미 나갔다. 예전에는 이것을 빼고 세어 초과 진입했다(2026-10-12).
+        3. 진입 관문을 통과해 주문 접수 중인 종목(_entering).
+        """
+        held = {
+            symbol
+            for symbol, x in self._entries.items()
+            if occupies_slot(x["pos"])
+        }
+        return held | self._entering
+
+    async def _send_order(
+        self, symbol: str, d: Decision, price: float, pos: Position, from_state: State
+    ) -> None:
+        """관문을 통과한 주문의 예수금·실패 이력 확인과 전송. _execute 에서만 부른다."""
+        e = self._entries[symbol]
         if d.side is Side.BUY and not await self._can_buy(symbol, d, price):
             return
         if not self._order_allowed(symbol):
@@ -1442,7 +1483,9 @@ class Core:
         지금은 대기 상태를 유지해, 자금이 생기면 다음 틱에 같은 규칙으로 재판정된다
         (1선~2선이면 1차, 2선~3선이면 1·2차 동시, 3선 아래면 그때 종료).
         """
-        deposit = await self._get_deposit()
+        # 체결을 기다리는 매수 주문 금액은 빼고 본다. 예수금은 5초 캐시이고 증권사 반영에도
+        # 시차가 있어, 빼지 않으면 동시에 나간 주문들이 같은 잔고를 중복으로 쓴다.
+        deposit = await self._get_deposit() - self._pending_buy_amount()
         need = (
             d.qty * price * (1.0 + self._commission_rate)
         )  # 수수료까지 있어야 주문이 통과된다
@@ -1465,6 +1508,16 @@ class Core:
                 price,
             )
         return False
+
+    def _pending_buy_amount(self) -> float:
+        """체결 대기 중인 매수 주문의 예상 금액 합 (수수료 포함)."""
+        return sum(
+            info["decision"].qty
+            * info["trigger_price"]
+            * (1.0 + self._commission_rate)
+            for info in self._pending.values()
+            if info["decision"].side is Side.BUY
+        )
 
     # ── 체결통보 → 상태 확정 ────────────────────────────────────
 
@@ -1562,6 +1615,8 @@ class Core:
             text += f"→ 세후 {net:+,.0f})"
         self._log(symbol, "체결", text, notify=False)
         self._notify_trade(symbol, d.reason, fill.filled_qty, fill.fill_price)
+        if d.side is Side.BUY and info["from_state"] is State.WAITING:
+            self._check_slot_overflow(symbol)
         if (
             e["pos"].state is State.CLOSED
             and e["pos"].total_bought
@@ -1570,6 +1625,23 @@ class Core:
             self._spawn(
                 self._chart_task(symbol, to_discord=True, auto=True), "차트 생성"
             )
+
+    def _check_slot_overflow(self, symbol: str) -> None:
+        """신규 진입 체결 뒤 최대 종목 수를 넘었으면 크게 알린다 (마지막 감시선).
+
+        관문(slot_holders 예약)이 막으므로 정상이면 절대 울리지 않는다. 울린다면
+        관문을 거치지 않는 새 진입 경로가 생겼다는 뜻이라, 조용히 넘기지 않는다.
+        수동 편집으로 보유 상태를 늘린 경우에도 울릴 수 있다.
+        """
+        holders = self.slot_holders()
+        if len(holders) <= self._max_symbols:
+            return
+        self._log(
+            symbol,
+            "에러",
+            f"최대 종목 수 초과 감지 — 보유 {len(holders)}종목 > 설정 {self._max_symbols}"
+            " (진입 관문 점검 필요)",
+        )
 
     async def _no_duplicate_order(self, symbol: str, d: Decision) -> bool:
         """직전 주문이 실패했던 종목만, 주문 직전에 미체결(ka10075)을 확인한다.
