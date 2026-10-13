@@ -40,9 +40,11 @@ from trader.notifier import (
     build_briefing_embed,
     build_watchlist_embed,
     build_trade_embed,
+    format_daily_summary,
     format_message,
     format_trade,
     should_notify,
+    split_text,
 )
 from dataclasses import replace
 
@@ -1197,15 +1199,24 @@ class Core:
                 bus.LogLine(_now(), "시스템", "경고", f"매매일지 반영 실패: {err}")
             )
 
-    async def _send_embed(self, embed: dict) -> None:
+    async def _send_embed(self, embed: dict) -> bool:
+        """embed 발송. 성공하면 True.
+
+        실패는 **DB 에 남긴다**(notify=False — 실패를 Discord 로 다시 알리면 재귀다).
+        예전에는 화면에만 찍어, 화면을 다시 불러오면 사라져 요약이 왜 안 왔는지
+        알 수 없었다(2026-10-13).
+        """
         if self._bot is None:
-            return
+            return False
+        title = str(embed.get("title", ""))[:40]
         try:
-            await self._bot.send_embed(embed)
+            if await self._bot.send_embed(embed):
+                return True
+            reason = "Discord 채널 미연결"
         except Exception as e:  # noqa: BLE001 — 발송 실패가 매매를 막지 않게
-            self._bus.events.put(
-                bus.LogLine(_now(), "시스템", "경고", f"알림 발송 실패: {e}")
-            )
+            reason = str(e)
+        self._log("시스템", "경고", f"알림 발송 실패 [{title}]: {reason}", notify=False)
+        return False
 
     async def _send_discord(self, text: str) -> None:
         try:
@@ -1342,9 +1353,7 @@ class Core:
         3. 진입 관문을 통과해 주문 접수 중인 종목(_entering).
         """
         held = {
-            symbol
-            for symbol, x in self._entries.items()
-            if occupies_slot(x["pos"])
+            symbol for symbol, x in self._entries.items() if occupies_slot(x["pos"])
         }
         return held | self._entering
 
@@ -1512,9 +1521,7 @@ class Core:
     def _pending_buy_amount(self) -> float:
         """체결 대기 중인 매수 주문의 예상 금액 합 (수수료 포함)."""
         return sum(
-            info["decision"].qty
-            * info["trigger_price"]
-            * (1.0 + self._commission_rate)
+            info["decision"].qty * info["trigger_price"] * (1.0 + self._commission_rate)
             for info in self._pending.values()
             if info["decision"].side is Side.BUY
         )
@@ -2923,8 +2930,23 @@ class Core:
         )
         if self._bot is not None:  # 요약이 나갔으니 장중 대시보드는 걷어낸다
             await self._bot.clear_dashboard()
-        await self._send_embed(embed)
+        if not await self._send_embed(embed) and self._bot is not None:
+            # 요약은 하루 한 번이다 — embed 가 끝내 거부되면 글자 요약이라도 보낸다
+            await self._send_summary_text(symbols, fills, deposit)
         await self._send_day_log()
+
+    async def _send_summary_text(
+        self, symbols: list[dict], fills: list[dict], deposit: float | None
+    ) -> None:
+        """일일 요약 embed 발송 실패 시의 대체 — 글자 요약을 메시지 한도로 나눠 보낸다."""
+        text = format_daily_summary(self._date, symbols, fills, deposit)
+        try:
+            for chunk in split_text(
+                "⚠️ 요약 카드 발송에 실패해 글로 보냅니다\n" + text
+            ):
+                await self._bot.send_text(chunk)
+        except Exception as e:  # noqa: BLE001
+            self._log("시스템", "경고", f"글자 요약 발송도 실패: {e}", notify=False)
 
     async def _send_day_log(self) -> None:
         """하루치 로그 CSV 를 보관 채널로. 실패해도 요약에는 영향이 없다.

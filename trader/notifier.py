@@ -718,6 +718,105 @@ def build_proximity_embed(trade_date: str, symbols: list[dict], top: int = 12) -
     }
 
 
+# ── Discord embed 제한 ──────────────────────────────────────────
+# https://discord.com/developers/docs/resources/message#embed-object-embed-limits
+EMBED_MAX_FIELDS = 25
+EMBED_MAX_TOTAL = 6000  # 제목·설명·필드 이름/값·꼬리말 글자 수의 합
+EMBED_MAX_TITLE = 256
+EMBED_MAX_DESCRIPTION = 4096
+EMBED_MAX_FIELD_NAME = 256
+EMBED_MAX_FIELD_VALUE = 1024
+EMBED_MAX_FOOTER = 2048
+
+
+def clamp_embed(data: dict) -> dict:
+    """각 칸을 Discord 제한 길이로 자른다. 한 장으로만 보낼 수 있는 곳의 최후 방어선.
+
+    여러 장으로 나눌 수 있는 곳은 split_embed 를 쓴다 — 이것은 칸 하나가 너무 긴
+    경우(필드 값 1024자 등)만 막는다.
+    """
+    out = dict(data)
+    out["title"] = str(data.get("title", ""))[:EMBED_MAX_TITLE]
+    out["description"] = str(data.get("description", ""))[:EMBED_MAX_DESCRIPTION]
+    out["fields"] = [
+        {
+            **f,
+            "name": str(f.get("name", ""))[:EMBED_MAX_FIELD_NAME] or "\u200b",
+            "value": str(f.get("value", ""))[:EMBED_MAX_FIELD_VALUE] or "\u200b",
+        }
+        for f in data.get("fields", [])
+    ]
+    if footer := (data.get("footer") or {}).get("text"):
+        out["footer"] = {"text": str(footer)[:EMBED_MAX_FOOTER]}
+    return out
+
+
+def embed_chars(data: dict) -> int:
+    """Discord 가 6000자 제한에 세는 글자 수."""
+    return (
+        len(data.get("title", ""))
+        + len(data.get("description", ""))
+        + len((data.get("footer") or {}).get("text", ""))
+        + sum(len(f["name"]) + len(f["value"]) for f in data.get("fields", []))
+    )
+
+
+def split_embed(data: dict) -> list[dict]:
+    """한 장에 안 들어가면 **여러 장으로 나눈다.** 아무것도 버리지 않는다.
+
+    - 머리글(description)은 첫 장에, 꼬리말은 마지막 장에 둔다.
+    - 필드는 순서 그대로 채우고, 한 필드는 쪼개지 않는다 — 보류·근접도 같은 묶음이
+      두 메시지에 걸치지 않는다.
+    - 나뉠 때만 제목에 `(1/2)` 를 붙인다. 한 장이면 지금과 똑같다.
+    """
+    data = clamp_embed(data)
+    fields = data["fields"]
+    footer = data.get("footer", {}).get("text", "")
+    title = data["title"]
+    suffix = " (99/99)"  # 쪽 번호 자리를 미리 비워 둔다
+    pages: list[list[dict]] = [[]]
+    used = len(title) + len(suffix) + len(data["description"]) + len(footer)
+    for field in fields:
+        size = len(field["name"]) + len(field["value"])
+        page = pages[-1]
+        full = len(page) >= EMBED_MAX_FIELDS or used + size > EMBED_MAX_TOTAL
+        # 빈 장은 넘기지 않는다 — 단, 첫 장은 머리글만으로 찰 수 있으니 넘겨도 된다
+        if full and (page or len(pages) == 1):
+            pages.append([])
+            used = len(title) + len(suffix) + len(footer)
+        pages[-1].append(field)
+        used += size
+    total = len(pages)
+    out = []
+    for i, page in enumerate(pages):
+        part = {k: v for k, v in data.items() if k not in ("fields", "footer")}
+        part["fields"] = page
+        if total > 1:
+            part["title"] = f"{title} ({i + 1}/{total})"[:EMBED_MAX_TITLE]
+        if i > 0:
+            part["description"] = ""
+        if i == total - 1 and footer:
+            part["footer"] = {"text": footer}
+        out.append(part)
+    return out
+
+
+def split_text(text: str, limit: int = 1900) -> list[str]:
+    """줄 단위로 나눠 메시지 한도(2000자) 안에 들게 한다. 한 줄이 넘치면 그 줄만 자른다."""
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        line = line[:limit]
+        if current and len(current) + 1 + len(line) > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def build_daily_summary_embed(
     trade_date: str,
     symbols: list[dict],
@@ -773,8 +872,11 @@ def build_daily_summary_embed(
             head += f" · 투입 대비 **{net / invested:+.2%}**"
         color = _COLOR_PROFIT if net > 0 else (_COLOR_LOSS if net < 0 else _COLOR_FLAT)
 
+    # 종목 수를 자르지 않는다. 25칸·6000자를 넘으면 발송할 때 여러 장으로 나눈다
+    # (split_embed). 예전에는 20종목으로 자르고 '외 N종목' 으로 접었는데, 뒤에 붙는
+    # 항목이 늘어 25칸을 넘자 Discord 가 요약을 통째로 거부했다(2026-10-13, 진입 21종목).
     fields = []
-    for s in traded[:20]:  # embed 필드 상한(25) 여유
+    for s in traded:
         own = [f for f in fills if f["symbol"] == s["symbol"]]
         bought = sum(f["qty"] for f in own if f["side"] == "매수")
         sold = sum(f["qty"] for f in own if f["side"] == "매도")
@@ -823,11 +925,6 @@ def build_daily_summary_embed(
                 "inline": False,
             }
         )
-    if len(traded) > 20:
-        fields.append(
-            {"name": f"외 {len(traded) - 20}종목", "value": "\u200b", "inline": False}
-        )
-
     # 보류 종목을 근접도보다 **먼저** 놓는다. '살 수 있었는데 못 산 것' 이 '내일 볼 만한
     # 것' 보다 급한 정보다.
     fields += build_blocked_fields(symbols, blocked or {})

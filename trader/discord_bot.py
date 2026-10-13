@@ -26,7 +26,7 @@ import discord
 from discord import app_commands
 
 from trader import journal_input
-from trader.notifier import build_trade_embed
+from trader.notifier import build_trade_embed, clamp_embed, split_embed
 
 _PDF_BUTTON_ID = "trade_pdf"  # 버튼 custom_id 접두어
 # 차트가 없는 스레드에 버튼만 올릴 때의 안내. 버튼 하나만 덩그러니 있으면 무엇인지 모른다.
@@ -367,9 +367,15 @@ class TraderBot:
         return True
 
     async def send_embed(self, data: dict) -> bool:
+        """embed 를 보낸다. Discord 제한(25칸·6000자)을 넘으면 **여러 장으로 나눈다.**
+
+        넘친 채로 보내면 Discord 가 400 으로 통째로 거부한다 — 일일 요약이 그렇게
+        사라졌다(2026-10-13, 진입 21종목). 잘라 버리지 않고 다음 장으로 넘긴다.
+        """
         if self._channel is None:
             return False
-        await self._channel.send(embed=self._to_embed(data))
+        for page in split_embed(data):
+            await self._channel.send(embed=self._to_embed(page))
         return True
 
     async def send_images(
@@ -1009,6 +1015,14 @@ class TraderBot:
         return removed
 
     def _to_embed(self, data: dict):
+        """dict → discord.Embed. 칸마다 Discord 길이 제한으로 자른다 (최후 방어선).
+
+        필드가 25개를 넘으면 뒤를 버린다 — 나눌 수 있는 곳(send_embed·/요약·/월간)은
+        먼저 split_embed 로 나눠 들어오므로, 여기서 버려지는 일은 편집처럼 한 장으로만
+        보낼 수 있는 곳뿐이다. 거부당해 아무것도 안 보이는 것보다는 낫다.
+        """
+        data = clamp_embed(data)
+        data["fields"] = data["fields"][:25]
         embed = discord.Embed(
             title=data.get("title", ""),
             description=data.get("description", ""),
@@ -1101,7 +1115,8 @@ class TraderBot:
                     "날짜는 YYYY-MM-DD 형식으로 입력하세요."
                 )
                 return
-            await interaction.followup.send(embed=self._to_embed(embed))
+            for page in split_embed(embed):  # 길면 여러 장으로 (25칸·6000자 제한)
+                await interaction.followup.send(embed=self._to_embed(page))
 
         @summary.autocomplete("날짜")
         async def summary_autocomplete(interaction, current: str):
@@ -1127,9 +1142,8 @@ class TraderBot:
             if not re.fullmatch(r"\d{4}-\d{2}", month):
                 await interaction.followup.send("달은 YYYY-MM 형식으로 입력하세요.")
                 return
-            await interaction.followup.send(
-                embed=self._to_embed(core.monthly_embed(month))
-            )
+            for page in split_embed(core.monthly_embed(month)):
+                await interaction.followup.send(embed=self._to_embed(page))
 
         @monthly.autocomplete("달")
         async def monthly_autocomplete(interaction, current: str):
