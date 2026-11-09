@@ -17,6 +17,7 @@ broker 의 extract_fill 로 해석). 필드는 키움 FID 관례:
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -49,6 +50,25 @@ _EXCHANGE = "KRX"
 
 class BrokerError(RuntimeError):
     """주문/조회 실패 (거부, 필드 누락, 네트워크 등)."""
+
+
+def _body_hint(resp, limit: int = 120) -> str:
+    """JSON 이 아닌 응답 본문을 한 줄로 줄인다 — 태그를 걷고 공백을 접는다.
+
+    `<html><title>502 Bad Gateway</title>…` → ` — 502 Bad Gateway …`. 비었으면 빈 문자열.
+    """
+    try:
+        text = str(resp.text or "")
+    except Exception:  # noqa: BLE001 — 본문 디코딩 실패는 단서가 없을 뿐이다
+        return ""
+    text = re.sub(
+        r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    return f" — {text[:limit]}{'…' if len(text) > limit else ''}"
 
 
 @dataclass(frozen=True)
@@ -642,8 +662,11 @@ class Broker:
         try:
             data = resp.json()
         except ValueError as e:
+            # 응답 본문(대개 게이트웨이 오류 페이지)을 조금 남긴다. 예전에는 버려서
+            # 같은 오류가 한 종목에만 반복될 때 원인을 좁힐 단서가 없었다(2026-11-09).
             raise BrokerError(
                 f"{api_id} 응답이 JSON 이 아님 (HTTP {resp.status_code})"
+                f"{_body_hint(resp)}"
             ) from e
         if resp.status_code != 200 or data.get("return_code", 0) != 0:
             raise BrokerError(

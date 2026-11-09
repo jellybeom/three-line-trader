@@ -96,6 +96,7 @@ _TICK_WATCH_START = dtime(9, 0)
 _TICK_WATCH_END = dtime(15, 20)
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
+_MANUAL_SELL_ALERT_COUNT = 2  # 매도 연속 실패 이 횟수면 즉시 '수동 매도 필요' 알림
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
 # 조회한 주문가능금액의 이 비율까지만 쓴다. 직전 체결이 증권사 여력에 반영되기까지
 # 시차가 있어, 꽉 채워 주문하면 "매수증거금이 부족합니다" 로 거부된다(2026-07-29 실측).
@@ -322,6 +323,8 @@ class Core:
         self._block_notified: set[str] = set()  # 보류 알림은 종목당 1회
         self._order_fail: dict[str, dict] = {}  # 종목별 주문 실패 누적 {count, until}
         self._order_blocked: set[str] = set()  # 연속 실패로 당일 주문 차단된 종목
+        # '수동 매도 필요' 를 알린 종목 — 그 뒤 자동 매도가 성공하면 '직접 팔지 마세요' 로 되돌린다
+        self._manual_sell_alerted: set[str] = set()
         # 주문 판정~접수 사이(비동기 대기 중)인 종목. 같은 종목에 주문이 겹치지 않게 막고,
         # 신규 진입이면 최대 종목 수 자리를 **검사와 동시에** 예약한다(2026-10-12 사고).
         self._in_flight: set[str] = set()
@@ -489,6 +492,7 @@ class Core:
         self._deposit_cache = None
         self._order_fail.clear()
         self._order_blocked.clear()
+        self._manual_sell_alerted.clear()
         self._pending.clear()
         self._in_flight.clear()
         self._entering.clear()
@@ -1366,6 +1370,10 @@ class Core:
             return
         if not self._order_allowed(symbol):
             return
+        if self._order_fail.get(symbol, {}).get("count", 0) and not (
+            await self._verify_before_retry(symbol, d, pos)
+        ):
+            return
         if not await self._no_duplicate_order(symbol, d):
             return
 
@@ -1373,9 +1381,17 @@ class Core:
             order_fn = self._broker.buy if d.side is Side.BUY else self._broker.sell
             order_no = await asyncio.to_thread(order_fn, symbol, d.qty)
         except BrokerError as err:
-            self._on_order_failed(symbol, err)
+            self._on_order_failed(symbol, err, d, price, pos)
             return
         self._order_fail.pop(symbol, None)  # 성공하면 실패 누적 초기화
+        if symbol in self._manual_sell_alerted:
+            self._manual_sell_alerted.discard(symbol)
+            self._alert_now(
+                symbol,
+                "경고",
+                f"✅ 자동 매도 주문이 접수됐습니다 ({d.qty}주 · {d.reason}) — "
+                "앞선 '수동 매도 필요' 알림은 무시하고 **직접 매도하지 마세요**",
+            )
         self._clear_block(symbol)  # 진입에 성공했으니 보류 표시 해제
         order_id = self._store.record_order(symbol, d.side.value, d.qty)
         e["pos"] = mark_pending(pos)
@@ -1707,33 +1723,137 @@ class Core:
         fail = self._order_fail.get(symbol)
         return not (fail and time.monotonic() < fail["until"])
 
-    def _on_order_failed(self, symbol: str, err: Exception) -> None:
+    def _on_order_failed(
+        self,
+        symbol: str,
+        err: Exception,
+        d: Decision | None = None,
+        price: float = 0.0,
+        pos: Position | None = None,
+    ) -> None:
         fail = self._order_fail.setdefault(symbol, {"count": 0, "until": 0.0})
         fail["count"] += 1
         fail["until"] = time.monotonic() + _ORDER_FAIL_COOLDOWN_SEC
+        # 무엇을 하려다 실패했는지 남긴다 — 예전 로그에는 매수/매도·수량·사유가 없어
+        # 몇 주를 왜 팔려다 막혔는지 알 수 없었다(2026-11-09 셀바스헬스케어).
+        what = f"{d.side.value} {d.qty}주 ({d.reason}) " if d and d.side else ""
         # 재시도해도 절대 성공하지 않는 오류 — 상태가 계좌와 어긋난 것이므로 사람이 봐야 한다
         if "매도가능수량" in str(err):
             self._order_blocked.add(symbol)
             self._log(
                 symbol,
                 "에러",
-                f"주문 실패: {err} — 프로그램이 아는 잔량과 계좌가 다릅니다. "
+                f"{what}주문 실패: {err} — 프로그램이 아는 잔량과 계좌가 다릅니다. "
                 "당일 이 종목 주문을 중단합니다 (편집으로 잔량을 맞춰주세요)",
             )
             return
         self._log(
             symbol,
             "에러",
-            f"주문 실패({fail['count']}회): {err} — {_ORDER_FAIL_COOLDOWN_SEC}초간 재시도 보류",
+            f"{what}주문 실패({fail['count']}회): {err} — "
+            f"{_ORDER_FAIL_COOLDOWN_SEC}초간 재시도 보류",
         )
+        if d is not None and d.side is Side.SELL and pos is not None:
+            self._warn_manual_sell(symbol, d, price, pos, fail["count"])
         if fail["count"] >= _ORDER_FAIL_BLOCK_COUNT:
             self._order_blocked.add(symbol)
+            tail = (
+                "영웅문에서 직접 매도한 뒤 편집으로 잔량을 맞춰 주세요"
+                if d is not None and d.side is Side.SELL
+                else "계좌 상태를 직접 확인하세요"
+            )
             self._log(
                 symbol,
                 "경고",
-                f"주문 연속 실패 {fail['count']}회 → 당일 이 종목 주문을 중단합니다. "
-                "계좌 상태를 직접 확인하세요",
+                f"주문 연속 실패 {fail['count']}회 → 당일 이 종목 주문을 중단합니다. {tail}",
             )
+
+    def _warn_manual_sell(
+        self, symbol: str, d: Decision, price: float, pos: Position, count: int
+    ) -> None:
+        """매도가 연속 실패하면 **바로** 수동 매도를 요청한다 (종목당 하루 1회).
+
+        매도는 손실을 막거나 이익을 지키는 주문이라 막히면 돈이 걸린다. 예전에는 3회째에
+        '계좌 상태를 직접 확인하세요' 만 보냈고, 그것도 다른 알림과 묶여 몇 초 늦게 나갔다
+        — 실제로는 1시간 넘게 팔지 못했다(2026-11-09 셀바스헬스케어, 502 4회).
+        프로그램은 재시도를 멈추지 않는다: 일시적 오류면 곧 성공하고(같은 날 파수AI는
+        1분 만에 성공), 그때는 '직접 팔지 마세요' 를 다시 알린다.
+        """
+        if count < _MANUAL_SELL_ALERT_COUNT or symbol in self._manual_sell_alerted:
+            return
+        self._manual_sell_alerted.add(symbol)
+        rate = (price / pos.avg_price - 1) * 100 if pos.avg_price and price else None
+        pnl = f" · 평단 대비 {rate:+.2f}%" if rate is not None else ""
+        self._alert_now(
+            symbol,
+            "에러",
+            f"🚨 수동 매도 필요 — 매도 {d.qty}주가 연속 {count}회 실패했습니다 "
+            f"({d.reason}). 현재가 {price:,.0f}{pnl} · 보유 {pos.remaining}주. "
+            "영웅문에서 직접 매도한 뒤 프로그램에서 잔량을 맞춰 주세요. "
+            "프로그램도 재시도하며, 그 사이 성공하면 다시 알립니다",
+        )
+
+    def _alert_now(self, symbol: str, kind: str, text: str) -> None:
+        """묶음 대기 없이 바로 보내는 알림 (DB 로그에도 남긴다).
+
+        경고·에러는 보통 몇 초 모았다가 한 장으로 보내는데, 지금 사람이 손을 써야 하는
+        알림은 그 사이에 묻히면 안 된다.
+        """
+        self._log(symbol, kind, text, notify=False)
+        if self._bot is None or self._notify_level == "끔":
+            return
+        name = self._entries.get(symbol, {}).get("name", "")
+        label = f"{name}({symbol})" if name else symbol
+        self._spawn(
+            self._send_embed(build_alert_embed(kind, label, text)), "긴급 알림 발송"
+        )
+
+    async def _verify_before_retry(
+        self, symbol: str, d: Decision, pos: Position
+    ) -> bool:
+        """실패했던 종목에 다시 주문하기 전에 계좌 잔고와 맞춰 본다. 보내도 되면 True.
+
+        '응답이 JSON 이 아님(502)' 같은 실패는 **응답만 잃고 주문은 접수됐을** 수 있다.
+        그대로 다시 보내면 같은 물량이 두 번 나간다 — 익절 30주가 60주가 되는 식이다.
+        - 매도: 계좌의 매도가능수량이 프로그램 잔량보다 적으면 앞 주문이 체결됐거나
+          사람이 직접 판 것이다 → 보내지 않고 이 종목 주문을 멈춘다.
+        - 매수: 계좌 보유가 프로그램 잔량보다 많으면 앞 주문이 체결된 것이다 → 같다.
+        조회가 실패하면 이번에는 보내지 않는다(확인 못 한 채 보내는 것이 더 위험하다).
+        다음 틱에 다시 확인한다.
+        """
+        try:
+            detail = await asyncio.to_thread(self._broker.holdings_detail)
+        except BrokerError as err:
+            fail = self._order_fail.setdefault(symbol, {"count": 0, "until": 0.0})
+            fail["until"] = time.monotonic() + _ORDER_FAIL_COOLDOWN_SEC
+            self._log(
+                symbol,
+                "경고",
+                f"재주문 전 잔고 확인 실패: {err} — 이번 재주문은 보내지 않습니다",
+                notify=False,
+            )
+            return False
+        held, sellable = detail.get(symbol, (0, 0))
+        expected = pos.remaining
+        if d.side is Side.SELL:
+            mismatch = sellable < expected
+            seen = f"매도가능 {sellable}주"
+        else:
+            mismatch = held > expected
+            seen = f"보유 {held}주"
+        if not mismatch:
+            return True
+        self._order_blocked.add(symbol)
+        self._manual_sell_alerted.discard(symbol)
+        self._alert_now(
+            symbol,
+            "에러",
+            f"재주문 중단 — 계좌 {seen} · 프로그램 잔량 {expected}주. 앞서 실패로 보인 "
+            "주문이 실제로는 체결됐거나 직접 매매한 것으로 보입니다. 같은 주문을 다시 "
+            "보내지 않고 당일 이 종목 주문을 멈춥니다 — 영웅문에서 확인한 뒤 "
+            "편집으로 잔량을 맞춰 주세요",
+        )
+        return False
 
     async def _check_pending(self) -> None:
         """체결통보가 오지 않는 주문을 경고하고, 더 지연되면 강제로 대기를 해제한다."""
