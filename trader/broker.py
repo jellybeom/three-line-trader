@@ -52,6 +52,25 @@ class BrokerError(RuntimeError):
     """주문/조회 실패 (거부, 필드 누락, 네트워크 등)."""
 
 
+class RateLimitError(BrokerError):
+    """호출 횟수 초과로 거부됨 (HTTP 429 등). 잠시 쉬면 풀리므로 조회는 기다렸다 다시 한다."""
+
+
+# 2026-11-12 18시부터 계좌 TR(kt000xx · kt500xx)은 **초당 1회**로 제한된다(키움 공지
+# 2026-11-09, 종전 5회). 우리가 쓰는 것은 예수금(kt00001)·잔고(kt00018)다.
+_ACCOUNT_TR_PREFIXES = ("kt000", "kt500")
+_RATE_LIMIT_MARKS = ("요청 개수", "허용된 요청", "유량", "초과하였")
+
+
+def is_account_tr(api_id: str) -> bool:
+    return api_id.startswith(_ACCOUNT_TR_PREFIXES)
+
+
+def _looks_rate_limited(status: int, message: str) -> bool:
+    """호출 횟수 초과 응답인가. 실제 응답을 받아본 적이 없어 넓게 잡는다."""
+    return status == 429 or any(mark in message for mark in _RATE_LIMIT_MARKS)
+
+
 def _body_hint(resp, limit: int = 120) -> str:
     """JSON 이 아닌 응답 본문을 한 줄로 줄인다 — 태그를 걷고 공백을 접는다.
 
@@ -61,9 +80,7 @@ def _body_hint(resp, limit: int = 120) -> str:
         text = str(resp.text or "")
     except Exception:  # noqa: BLE001 — 본문 디코딩 실패는 단서가 없을 뿐이다
         return ""
-    text = re.sub(
-        r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.DOTALL | re.IGNORECASE
-    )
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", text)
     text = " ".join(text.split())
     if not text:
@@ -109,12 +126,16 @@ class Broker:
     """
 
     _MIN_INTERVAL = 0.25  # REST 호출 최소 간격 (초) — 초당 4회
+    # 계좌 TR 은 같은 TR 끼리 이 간격을 둔다 — 제한은 초당 1회지만, 우리가 보낸 간격과
+    # 서버에 도착한 간격은 통신 지연만큼 어긋나므로 20% 여유를 둔다.
+    _ACCOUNT_MIN_INTERVAL = 1.2
     _QUERY_RETRIES = 2  # 조회 전용 재시도 횟수
 
     def __init__(self, auth: KiwoomAuth):
         self._auth = auth
         self._lock = threading.Lock()  # 여러 스레드(to_thread)의 호출 간격 보장
         self._last_call = 0.0
+        self._account_gate: dict[str, tuple[threading.Lock, list[float]]] = {}
         self._deposit_hint: tuple[str, str] | None = (
             None  # (qry_tp, key) 성공 조합 기억
         )
@@ -179,7 +200,10 @@ class Broker:
         if self._deposit_hint:
             qry_tp, key = self._deposit_hint
             value = self._extract_deposit(self.deposit_detail(qry_tp), (key,))
-            if value:
+            # 0 도 답이다(돈을 다 쓴 상태). 예전에는 0 이면 힌트를 버리고 조회 방식을
+            # 바꿔가며 2~3번 더 불렀는데, 초당 1회 제한에서는 그것이 곧 거부다.
+            # 필드가 사라졌을 때만 다시 탐색한다.
+            if value is not None:
                 return value
             self._deposit_hint = None  # 힌트가 더 이상 맞지 않으면 다시 탐색
 
@@ -636,7 +660,13 @@ class Broker:
             except BrokerError as e:
                 last_error = e
                 if attempt < retries:
-                    time.sleep(0.5 * (attempt + 1))  # 한도 초과 완화용 백오프
+                    wait = 0.5 * (attempt + 1)  # 한도 초과 완화용 백오프
+                    if isinstance(e, RateLimitError):
+                        # 횟수 초과는 창(1초)이 지나야 풀린다 — 그보다 빨리 다시 부르면
+                        # 또 거부될 뿐이다. 제한이 TR 별이 아니라 계좌 TR 전체 합산이어도
+                        # 이 대기로 맞춰진다.
+                        wait = max(wait, self._ACCOUNT_MIN_INTERVAL)
+                    time.sleep(wait)
         raise last_error
 
     def _throttle(self) -> None:
@@ -646,9 +676,32 @@ class Broker:
             time.sleep(wait)
         self._last_call = time.monotonic()
 
+    def _wait_turn(self, api_id: str) -> None:
+        """이 호출이 나가도 되는 때까지 기다린다.
+
+        계좌 TR 은 TR 별 문에서 먼저 줄을 선다(1.2초 간격). **이 대기는 전체 잠금 밖에서
+        한다** — 안에서 자면 그동안 주문·시세 조회까지 막힌다. 주문(kt10000/kt10001)은
+        계좌 TR 이 아니므로 이 문을 거치지 않고 예전처럼 0.25초 간격만 지킨다.
+        찍는 시각은 전체 간격까지 통과한 **실제 발송 직전**이다 — 먼저 찍으면 전체 간격
+        대기(최대 0.25초)만큼 두 호출 사이가 좁아질 수 있다.
+        """
+        if not is_account_tr(api_id):
+            with self._lock:
+                self._throttle()
+            return
+        gates = self.__dict__.setdefault("_account_gate", {})
+        with self._lock:  # 문을 만드는 것만 전체 잠금으로 보호한다
+            gate, last = gates.setdefault(api_id, (threading.Lock(), [0.0]))
+        with gate:
+            wait = last[0] + self._ACCOUNT_MIN_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            with self._lock:
+                self._throttle()
+            last[0] = time.monotonic()
+
     def _request_once(self, path: str, api_id: str, body: dict) -> dict:
-        with self._lock:
-            self._throttle()
+        self._wait_turn(api_id)
         try:
             resp = self._post(path, api_id, body)
         except BrokerError:
@@ -662,6 +715,11 @@ class Broker:
         try:
             data = resp.json()
         except ValueError as e:
+            if _looks_rate_limited(resp.status_code, ""):
+                raise RateLimitError(
+                    f"{api_id} 호출 횟수 초과 (HTTP {resp.status_code})"
+                    f"{_body_hint(resp)}"
+                ) from e
             # 응답 본문(대개 게이트웨이 오류 페이지)을 조금 남긴다. 예전에는 버려서
             # 같은 오류가 한 종목에만 반복될 때 원인을 좁힐 단서가 없었다(2026-11-09).
             raise BrokerError(
@@ -669,9 +727,15 @@ class Broker:
                 f"{_body_hint(resp)}"
             ) from e
         if resp.status_code != 200 or data.get("return_code", 0) != 0:
-            raise BrokerError(
+            message = str(data.get("return_msg", data))
+            error = (
+                RateLimitError
+                if _looks_rate_limited(resp.status_code, message)
+                else BrokerError
+            )
+            raise error(
                 f"{api_id} 실패 (HTTP {resp.status_code}, code {data.get('return_code')}): "
-                f"{data.get('return_msg', data)}"
+                f"{message}"
             )
         return data
 

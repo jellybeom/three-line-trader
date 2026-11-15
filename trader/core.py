@@ -97,6 +97,7 @@ _TICK_WATCH_END = dtime(15, 20)
 _ORDER_FAIL_COOLDOWN_SEC = 30  # 주문 실패 후 같은 종목 재시도 금지 시간
 _ORDER_FAIL_BLOCK_COUNT = 3  # 연속 실패 이 횟수면 당일 해당 종목 주문 차단
 _MANUAL_SELL_ALERT_COUNT = 2  # 매도 연속 실패 이 횟수면 즉시 '수동 매도 필요' 알림
+_DEPOSIT_FAIL_COOLDOWN_SEC = 2.0  # 예수금 조회 실패 뒤 재조회까지 (틱마다 재시도 방지)
 _DEPOSIT_TTL_SEC = 5.0  # 예수금 조회 캐시 수명 (틱마다 REST 호출 방지)
 # 조회한 주문가능금액의 이 비율까지만 쓴다. 직전 체결이 증권사 여력에 반영되기까지
 # 시차가 있어, 꽉 채워 주문하면 "매수증거금이 부족합니다" 로 거부된다(2026-07-29 실측).
@@ -317,6 +318,9 @@ class Core:
         self._notice_batch: list[tuple[str, str, str]] = []  # (종류, 표시, 내용)
         self._notice_at = 0.0  # 마지막 적재 시각 (조용해지면 발송)
         self._deposit_cache: tuple[float, float] | None = None  # (조회시각, 값)
+        self._deposit_task: asyncio.Future | None = None  # 진행 중인 예수금 조회
+        self._deposit_gen = 0  # 캐시를 버릴 때마다 오른다 — 버리기 전 조회 결과를 가려낸다
+        self._deposit_fail: tuple[float, str] | None = None  # (재조회 가능 시각, 사유)
         self._block_logged: dict[str, tuple[str, float]] = (
             {}
         )  # 종목 → (마지막 사유·구간, 시각)
@@ -490,6 +494,7 @@ class Core:
         self._block_notified.clear()
         self._sched_done.clear()
         self._deposit_cache = None
+        self._deposit_fail = None
         self._order_fail.clear()
         self._order_blocked.clear()
         self._manual_sell_alerted.clear()
@@ -1234,7 +1239,8 @@ class Core:
         if self._broker is None:
             self._log("시스템", "에러", "키움 연결 후 조회할 수 있습니다")
             return
-        deposit = await asyncio.to_thread(self._broker.deposit)
+        self._invalidate_deposit()  # 새로고침은 최신값 — 단, 진행 중인 조회가 있으면 함께 쓴다
+        deposit = await self._get_deposit()
         self._bus.events.put(bus.Account(deposit, self._account_label))
 
     async def _reconcile(self) -> None:
@@ -1422,13 +1428,37 @@ class Core:
         now = time.monotonic()
         if self._deposit_cache and now - self._deposit_cache[0] < _DEPOSIT_TTL_SEC:
             return self._deposit_cache[1]
-        value = await asyncio.to_thread(self._broker.deposit)
-        self._deposit_cache = (time.monotonic(), value)
+        # 방금 실패했으면 잠깐은 다시 부르지 않는다. 보류 종목은 틱마다 여기로 오는데,
+        # 그때마다 조회하면 계좌 TR 초당 1회 제한(2026-11-12)에 계속 걸린다.
+        if self._deposit_fail and now < self._deposit_fail[0]:
+            raise BrokerError(self._deposit_fail[1])
+        # 동시에 들어온 조회는 한 번만 부른다(매수 확인 · /상태 · 화면 새로고침이 겹칠 때).
+        task = self._deposit_task
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._fetch_deposit(self._deposit_gen))
+            self._deposit_task = task
+        return await asyncio.shield(task)
+
+    async def _fetch_deposit(self, gen: int) -> float:
+        try:
+            value = await asyncio.to_thread(self._broker.deposit)
+        except BrokerError as err:
+            self._deposit_fail = (
+                time.monotonic() + _DEPOSIT_FAIL_COOLDOWN_SEC,
+                str(err),
+            )
+            raise
+        self._deposit_fail = None
+        # 조회하는 사이 캐시를 버렸다면(매도 체결) 이 값은 체결 전 잔고일 수 있다 —
+        # 돌려주기는 하되 캐시에 넣지 않아, 다음 확인이 새로 조회하게 한다.
+        if gen == self._deposit_gen:
+            self._deposit_cache = (time.monotonic(), value)
         self._deposit_display = value
         return value
 
     def _invalidate_deposit(self) -> None:
         self._deposit_cache = None
+        self._deposit_gen += 1
 
     @staticmethod
     def _entry_qty(params: Params) -> int:
@@ -1510,7 +1540,16 @@ class Core:
         """
         # 체결을 기다리는 매수 주문 금액은 빼고 본다. 예수금은 5초 캐시이고 증권사 반영에도
         # 시차가 있어, 빼지 않으면 동시에 나간 주문들이 같은 잔고를 중복으로 쓴다.
-        deposit = await self._get_deposit() - self._pending_buy_amount()
+        try:
+            deposit = await self._get_deposit() - self._pending_buy_amount()
+        except BrokerError as err:
+            # **여기서 예외를 올려 보내면 안 된다.** 틱 처리 밖으로 새면 실시간 연결
+            # 세션이 끊기고(로그에는 재연결로만 보인다) 같은 묶음의 체결통보까지 잃는다.
+            # 잔고를 모르는 채 사지도 않는다 — 이번 틱만 거르고 다음 틱에 다시 확인한다.
+            self._log_block(
+                symbol, f"예수금 조회 실패 — 다음 틱에 다시 확인합니다 ({err})", price
+            )
+            return False
         need = (
             d.qty * price * (1.0 + self._commission_rate)
         )  # 수수료까지 있어야 주문이 통과된다
